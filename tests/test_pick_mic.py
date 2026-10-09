@@ -43,7 +43,8 @@ class ProbeStatusTest(unittest.TestCase):
         with mock.patch.object(pm.sd, "rec", side_effect=fake_rec), \
              mock.patch.object(pm.sd, "wait", lambda: None), \
              mock.patch.object(pm.time, "sleep", lambda _s: None):
-            return pm._probe_status(1)
+            alive, reason, rms = pm._probe_status(1)
+        return alive, reason
 
     def test_loud_signal_is_alive(self):
         alive, reason = self._probe_with(
@@ -98,7 +99,7 @@ class ProbeStatusTest(unittest.TestCase):
         with mock.patch.object(pm.sd, "rec", side_effect=fake_rec), \
              mock.patch.object(pm.sd, "wait", lambda: None), \
              mock.patch.object(pm.time, "sleep", lambda _s: None):
-            alive, reason = pm._probe_status(1)
+            alive, reason, _rms = pm._probe_status(1)
         self.assertTrue(alive, "после повтора устройство должно считаться живым")
         self.assertEqual(calls["n"], 2)
 
@@ -116,7 +117,7 @@ class GatherTest(unittest.TestCase):
              "hostapi": 0, "default_samplerate": 44100},
         ]
         hostapis = [{"name": "Windows MME"}, {"name": "Windows WASAPI"}]
-        statuses = {0: (False, "не поддерживает 16 кГц"), 1: (True, "жив (rms=0.01)")}
+        statuses = {0: (False, "не умеет 16 кГц", 0.0), 1: (True, "жив (rms=0.01)", 0.011)}
 
         with mock.patch.object(pm.sd, "query_devices", side_effect=lambda i=None: (
                 devices if i is None else devices[i])), \

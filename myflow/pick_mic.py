@@ -78,15 +78,16 @@ def _is_mic(name: str) -> bool:
     return True
 
 
-def _probe_status(device: int | None, timeout: float = 2.5) -> tuple[bool, str]:
-    """(жив_ли, причина). Причина важна: «занят» и «тишина» — разные проблемы.
+def _probe_status(device: int | None, timeout: float = 2.5) -> tuple[bool, str, float]:
+    """(жив_ли, причина, rms). RMS нужен, чтобы выбирать лучший вариант физики.
 
     Открытие потока НЕ достаточно: MME/DirectSound «открываются» даже на
     выключенном блютуз-устройстве и молча отдают нули — поэтому смотрим RMS.
     Но и «не открылось» нельзя путать с «молчит»: первое обычно значит, что
     устройство занято другим приложением.
     """
-    result: dict[str, object] = {"alive": False, "reason": "нет сигнала"}
+    result: dict[str, object] = {"alive": False, "reason": "нет сигнала", "rms": 0.0,
+                                 "rms_max": 0.0, "rms_min": float("inf")}
 
     def _attempt() -> None:
         try:
@@ -101,17 +102,29 @@ def _probe_status(device: int | None, timeout: float = 2.5) -> tuple[bool, str]:
             skip = int(SAMPLE_RATE * _PROBE_SKIP_SECONDS)
             tail = x[skip:] if len(x) > skip else x
             rms = float(np.sqrt(np.mean(tail ** 2)))
-            if rms > _QUIET_RMS:
+            # Два числа: максимум = «на что устройство способно» (живость),
+            # минимум = «что оно отдаёт стабильно». У части USB-микрофонов MME
+            # даёт то норму, то почти цифровую тишину (Ardor: MME медиана
+            # 2e-5 против DirectSound 3.3e-4), поэтому выбирать вариант физики
+            # надо по стабильному уровню, а не по разовому пику.
+            best = max(float(result["rms_max"]), rms)
+            worst = min(float(result["rms_min"]), rms)
+            result["rms_max"], result["rms_min"] = best, worst
+            result["rms"] = worst
+            if best > _QUIET_RMS:
                 result["alive"] = True
-                result["reason"] = f"жив (rms={rms:.4f})"
-            elif rms > _DEAD_RMS:
+                result["reason"] = f"жив (rms={worst:.4f})"
+            elif best > _DEAD_RMS:
                 # Сигнал есть, но тихий: микрофон рабочий, однако проверь
                 # громкость входа — иначе фразы будут отсекаться как «тишина».
                 result["alive"] = True
-                result["reason"] = f"тихий вход (rms={rms:.5f}) — подними усиление?"
+                result["reason"] = f"тихий вход (rms={worst:.5f}) — подними усиление?"
             else:
-                result["reason"] = f"нет сигнала (rms={rms:.6f})"
+                result["alive"] = False
+                result["reason"] = f"нет сигнала (rms={best:.6f})"
         except Exception as exc:  # noqa: BLE001 — мёртвое/занятое так и помечаем
+            if result["alive"]:
+                return                    # уже есть успешный замер — он важнее
             msg = str(exc)
             short = msg.split("[PaErrorCode")[0].strip()
             short = short.replace("Error opening InputStream:", "").strip() or "ошибка"
@@ -122,13 +135,14 @@ def _probe_status(device: int | None, timeout: float = 2.5) -> tuple[bool, str]:
             elif "Invalid device" in msg:
                 result["reason"] = "устройство исчезло (пересканируй)"
             else:
-                reason = f"не открылся: {short}"
-                result["reason"] = reason[:40]
+                result["reason"] = f"не открылся: {short}"[:40]
 
     def _run() -> None:
         _attempt()
-        if not result["alive"]:
-            # Один повтор: сразу после старта/BT-пробуждения первый заход часто
+        if result["alive"]:
+            _attempt()                    # второй замер: берём максимум из двух
+        else:
+            # Повтор: сразу после старта/BT-пробуждения первый заход часто
             # падает, хотя устройство рабочее.
             time.sleep(0.15)
             _attempt()
@@ -137,8 +151,8 @@ def _probe_status(device: int | None, timeout: float = 2.5) -> tuple[bool, str]:
     t.start()
     t.join(timeout)
     if t.is_alive():
-        return False, "таймаут (драйвер завис)"
-    return bool(result["alive"]), str(result["reason"])
+        return False, "таймаут (драйвер завис)", 0.0
+    return bool(result["alive"]), str(result["reason"]), float(result["rms"])
 
 
 def _probe(device: int | None, timeout: float = 2.5) -> bool:
@@ -159,17 +173,30 @@ def _hostapi_short(device: int) -> str:
         return ""
 
 
+# Приоритет драйверов среди ЖИВЫХ вариантов одной физики (меньше — лучше).
+# Обоснование — замеры на своём железе (Ardor Gaming Vox):
+#   * MME — legacy-API: у части USB-микрофонов отдаёт почти цифровую тишину
+#     (медиана rms 2e-5 против 3.3e-4 у DirectSound) и «плавает» между пробами;
+#   * WASAPI — часто не умеет 16 кГц (родная частота устройства 48/96 кГц);
+#   * WDM-KS — индексы устройств нестабильны («Invalid device» после переподключений).
+# DirectSound стабильнее всех на этом железе. Приоритет применяется ТОЛЬКО к
+# живым вариантам: если DS не открылся, выберется MME, и т.д.
+_API_RANK = {"DS": 0, "MME": 1, "WASAPI": 2, "WDM": 3}
+
+
 def _cluster_key(name: str) -> str:
     """Ядро имени без пробелов/скобок — для склейки дублей одной физики."""
     return re.sub(r"[\s_()\[\]-]+", "", name.lower())
 
 
 def _gather() -> list[dict]:
-    """Входные устройства: одна запись на физику, с живостью и причиной.
+    """Входные устройства: одна запись на физику, с живостью, причиной и API.
 
-    Возвращает [{"name", "idx", "alive", "status", "api"}], живые — первыми.
-    Обрезанные имена сопоставляем префиксом: «...DualSense W» ⊆
-    «...DualSense Wireless Controller».
+    Возвращает [{"name", "idx", "alive", "status", "api", "rms"}], живые — первыми.
+    Среди дублей одной физики (MME/DirectSound/WASAPI/WDM-KS) выбираем вариант с
+    ЛУЧШИМ сигналом: MME у части USB-микрофонов отдаёт ослабленный/рваный сигнал
+    (у Ardor: MME rms 0.0006-0.0021 против DirectSound 0.0112-0.0177), а WASAPI
+    может вообще не открыть 16 кГц. Обрезанные имена сопоставляем префиксом.
     """
     cands: list[tuple[int, str]] = []
     for i, d in enumerate(sd.query_devices()):
@@ -190,16 +217,25 @@ def _gather() -> list[dict]:
         key = _cluster_key(name)
         match = next((g for g in groups
                       if g["key"].startswith(key) or key.startswith(g["key"])), None)
-        alive, reason = probed[idx]
+        alive, reason, rms = probed[idx]
+        api = _hostapi_short(idx)
+        rank = _API_RANK.get(api, 9)
         if match is None:
             groups.append({"key": key, "name": name, "idx": idx, "alive": alive,
-                           "status": reason, "api": _hostapi_short(idx)})
+                           "status": reason, "api": api, "rms": rms, "rank": rank})
         else:
-            # Дубли одной физики в разных API: берём первый ЖИВОЙ вариант,
-            # его причину и его API (Ardor: MME живой, WASAPI не умеет 16 кГц).
+            better = False
             if alive and not match["alive"]:
-                match["idx"], match["alive"] = idx, True
-                match["status"], match["api"] = reason, _hostapi_short(idx)
+                better = True
+            elif alive and match["alive"]:
+                # Сначала по драйверу (см. _API_RANK), при равных — по уровню.
+                if rank < match["rank"]:
+                    better = True
+                elif rank == match["rank"] and rms > float(match.get("rms") or 0.0) * 1.5:
+                    better = True
+            if better:
+                match.update(idx=idx, alive=True, status=reason,
+                             api=api, rms=rms, rank=rank)
             if len(match["name"]) < len(name):
                 match["name"], match["key"] = name, key
     groups.sort(key=lambda g: (not g["alive"], g["idx"]))

@@ -8,6 +8,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+
+import numpy as np
 from pathlib import Path
 from unittest import mock
 
@@ -78,6 +80,80 @@ class MicNoteTest(unittest.TestCase):
         self.assertEqual(mic.note(0), "жив")
         self.assertIn("MME", mic.note(1))
         self.assertIn("нет сигнала", mic.note(2))
+
+
+class LevelMeterTest(unittest.TestCase):
+    """Живой индикатор уровня: ловит регресс «колбэк падает, уровень всегда 0»."""
+
+    class _FakeStream:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.started = False
+
+        def start(self):
+            self.started = True
+
+        def stop(self):
+            pass
+
+        def close(self):
+            pass
+
+    def _meter(self, recorder=None, error=None):
+        calls = []
+
+        def factory(**kwargs):
+            calls.append(kwargs)
+            if error is not None:
+                raise error
+            stream = self._FakeStream(**kwargs)
+            if recorder is not None:
+                recorder["cb"] = kwargs["callback"]
+                recorder["stream"] = stream
+            return stream
+
+        return T.LevelMeter(stream_factory=factory), calls
+
+    def test_peak_updates_from_callback(self):
+        rec = {}
+        meter, calls = self._meter(rec)
+        meter.switch(13)
+        self.assertEqual(calls[0]["device"], 13)
+        self.assertEqual(calls[0]["samplerate"], 16000)
+        self.assertTrue(rec["stream"].started)
+        self.assertEqual(meter.peak(), 0.0)
+        rec["cb"](np.full((1024, 1), 0.05, dtype=np.float32), 1024, None, None)
+        self.assertAlmostEqual(meter.peak(), 0.05, places=4)
+        meter.stop()
+
+    def test_switch_does_not_reopen_same_device(self):
+        meter, calls = self._meter()
+        meter.switch(5)
+        meter.switch(5)
+        self.assertEqual(len(calls), 1, "то же устройство — поток не переоткрываем")
+        meter.switch(6)
+        self.assertEqual(len(calls), 2)
+        meter.stop()
+
+    def test_device_error_is_reported(self):
+        meter, _ = self._meter(error=RuntimeError(
+            "Error opening InputStream: Device unavailable [PaErrorCode -9985]"))
+        meter.switch(2)
+        self.assertIn("Device unavailable", meter.error)
+        self.assertEqual(meter.peak(), 0.0)
+
+    def test_bar_marks_gate_always(self):
+        bar = T.LevelMeter.bar(0.05, width=20, gate=0.01)
+        self.assertEqual(len(bar), 20)
+        self.assertIn("╎", bar, "метка порога должна быть видна и под столбиком")
+        self.assertEqual(T.LevelMeter.bar(0.0, width=10).count("█"), 0)
+        self.assertGreater(T.LevelMeter.bar(0.5, width=10).count("█"), 5)
+
+    def test_bar_shows_unreachable_gate(self):
+        """Уровень ниже порога: столбик не дотягивается до метки."""
+        bar = T.LevelMeter.bar(0.002, width=20, gate=0.01)
+        gate_pos = bar.index("╎")
+        self.assertLess(bar.count("█"), gate_pos, "столбик должен быть левее метки")
 
 
 class TextHelpersTest(unittest.TestCase):

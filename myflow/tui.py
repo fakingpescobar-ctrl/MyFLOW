@@ -595,6 +595,99 @@ class SettingsState:
         return {ch.key: ch.options[ch.index][1] for ch in self.choices if ch.options}
 
 
+class LevelMeter:
+    """Живой уровень микрофона: открывает поток и держит текущий пик.
+
+    Зачем: «жив/мёртв» не отвечает на вопрос «хватит ли громкости». В рантайме
+    фраза отсекается при пике < 0.01, поэтому в настройках показываем уровень
+    и метку порога — видно, проходит ли голос и какой драйвер (API) его даёт.
+    """
+
+    def __init__(self, samplerate: int = 16000, stream_factory=None) -> None:
+        self.samplerate = samplerate
+        # Фабрика потока — точка внедрения для тестов (чтобы не подменять
+        # sys.modules['sounddevice'], это ломает импорт numpy).
+        self._factory = stream_factory
+        self._stream = None
+        self._device: object = "_unset"
+        self._peak = 0.0
+        self._lock = threading.Lock()
+        self.error = ""
+
+    @property
+    def device(self):
+        return self._device
+
+    def switch(self, device: int | None) -> None:
+        """Переключить индикатор на другое устройство (если изменилось)."""
+        if device == self._device:
+            return
+        self.stop()
+        self._device = device
+        self.error = ""
+        with self._lock:
+            self._peak = 0.0
+        try:
+            # numpy/sounddevice импортируем локально: TUI стартует быстро, а
+            # индикатор нужен только на экране настроек. ВАЖНО: numpy именно
+            # здесь — раньше его не было в модуле, и колбэк падал с NameError,
+            # показывая нулевой уровень (тест это теперь ловит).
+            import numpy as _np
+
+            def _cb(indata, frames, time_info, status) -> None:  # noqa: ANN001
+                if not len(indata):
+                    return
+                peak = float(_np.abs(indata[:, 0]).max())
+                with self._lock:
+                    # Плавное затухание: столбик не дёргается на паузах.
+                    self._peak = max(peak, self._peak * 0.99)
+
+            kwargs = dict(samplerate=self.samplerate, channels=1, dtype="float32",
+                          device=device, callback=_cb, blocksize=1024)
+            if self._factory is not None:
+                stream = self._factory(**kwargs)
+            else:
+                import sounddevice as sd
+                stream = sd.InputStream(**kwargs)
+            stream.start()
+            self._stream = stream
+        except Exception as exc:  # noqa: BLE001 — занятый/недоступный микрофон
+            self.error = str(exc).split("[PaErrorCode")[0].strip()[:46]
+            self._stream = None
+
+    def peak(self) -> float:
+        with self._lock:
+            return self._peak
+
+    def stop(self) -> None:
+        stream, self._stream = self._stream, None
+        if stream is not None:
+            try:
+                stream.stop()
+                stream.close()
+            except Exception:  # noqa: BLE001
+                pass
+        self._device = "_unset"
+
+    @staticmethod
+    def bar(peak: float, width: int = 20, gate: float = 0.01) -> str:
+        """Полоска уровня + метка порога (порог = минимальный пик фразы)."""
+        # Логарифмическая шкала: 0.001 -> 0, 1.0 -> ширина
+        import math
+        level = 0.0 if peak <= 0 else min(1.0, max(0.0, (math.log10(peak) + 3) / 3))
+        filled = int(round(level * width))
+        gate_pos = int(round(((math.log10(gate) + 3) / 3) * width)) if gate > 0 else 0
+        cells = []
+        for i in range(width):
+            if i == gate_pos:
+                cells.append("╎")       # метка порога видна всегда — по ней
+            elif i < filled:            # видно, проходит ли голос
+                cells.append("█")
+            else:
+                cells.append("░")
+        return "".join(cells)
+
+
 def build_choices(store, mics: list[dict], system_ok: bool) -> SettingsState:
     s = store.get()
     current = s.asr.input_device
@@ -643,7 +736,9 @@ def apply_choices(store, values: dict) -> None:
     store.save()
 
 
-def render_settings(state: SettingsState, store, w: int, h: int) -> list[str]:
+def render_settings(state: SettingsState, store, w: int, h: int,
+                    level: tuple[float, str] | None = None) -> list[str]:
+    """level = (пик, ошибка) для живого индикатора выделенного микрофона."""
     body: list[str] = []
     inner_w = w - 6
     for bi, ch in enumerate(state.choices):
@@ -654,13 +749,29 @@ def render_settings(state: SettingsState, store, w: int, h: int) -> list[str]:
             note = ch.note(i) if ch.note else ""
             room = max(4, inner_w - 2 - len(note) - 1)
             plain = plain[:room]
-            note_color = C_OK if note in ("живой", "осн.") else C_DIM
+            note_color = C_OK if note.startswith(("жив", "осн.")) else C_DIM
             row = (C_TEXT if sel else C_DIM) + plain + RESET
             row += " " * max(1, inner_w - 2 - len(plain) - len(note))
             row += note_color + norm_text(note) + RESET
             rows.append(row)
         body += block(ch.title, rows, inner_w + 2, focused=(bi == state.focus))
         body.append("")
+        # Под блоком микрофона — живой уровень: видно, хватает ли громкости
+        # (фраза в рантайме отсекается при пике ниже 0.01).
+        if ch.key == "mic" and level is not None:
+            peak, err = level
+            if err:
+                meter = f"{C_ERR}нет доступа: {err}{RESET}"
+            else:
+                bar = LevelMeter.bar(peak)
+                ok = peak >= 0.01
+                color = C_OK if ok else C_WARN
+                verdict = "проходит порог 0.010" if ok else "тихо — фраза будет отсечена"
+                meter = (f"{C_DIM}уровень {RESET}{color}{bar}{RESET}"
+                         f"{C_DIM} {peak:.4f}{RESET}  "
+                         f"{color}{verdict}{RESET}")
+            body.append(f"   {meter}")
+            body.append("")
     cur = store.get()
     info = (f"{C_DIM}сейчас: микрофон {cur.asr.input_device if cur.asr.input_device is not None else 'системный'}"
             f" · режим {cur.mode} · вставка {cur.insert_method}{RESET}")
@@ -900,26 +1011,36 @@ class TuiApp:
         self._scan_mics()
         st = self.store
         state = build_choices(st, self._mics, self._system_ok)
-        while not self._stop.is_set():
-            w, h = self.console.size()
-            self.console.draw(render_settings(state, st, w, h))
-            key = self._read_key(0.15)
-            if key == "up":
-                state.move_item(-1)
-            elif key == "down":
-                state.move_item(1)
-            elif key == "left":
-                state.move_block(-1)
-            elif key in ("right", "tab"):
-                state.move_block(1)
-            elif key in ("enter", "f8"):
-                apply_choices(st, state.values())
-                return True
-            elif key in ("esc", "q", "ctrl-c"):
-                return False
-            elif key == "f5":
-                self._scan_mics()
-                state = build_choices(st, self._mics, self._system_ok)
+        meter = LevelMeter()
+        try:
+            while not self._stop.is_set():
+                # Индикатор следит за ВЫДЕЛЕННЫМ микрофоном: стрелками можно
+                # сравнить варианты (MME/DirectSound) по живому уровню.
+                meter.switch(state.values().get("mic"))
+                w, h = self.console.size()
+                self.console.draw(render_settings(state, st, w, h,
+                                                  level=(meter.peak(), meter.error)))
+                key = self._read_key(0.15)
+                if key == "up":
+                    state.move_item(-1)
+                elif key == "down":
+                    state.move_item(1)
+                elif key == "left":
+                    state.move_block(-1)
+                elif key in ("right", "tab"):
+                    state.move_block(1)
+                elif key in ("enter", "f8"):
+                    apply_choices(st, state.values())
+                    return True
+                elif key in ("esc", "q", "ctrl-c"):
+                    return False
+                elif key == "f5":
+                    meter.stop()            # не держим устройство во время скана
+                    self._scan_mics()
+                    state = build_choices(st, self._mics, self._system_ok)
+        finally:
+            # Обязательно: иначе поток удержит микрофон и запись не откроется.
+            meter.stop()
         return False
 
     # ---- фаза 3: пульт ----
