@@ -1,0 +1,21 @@
+# MyFLOW — что не коммитим
+# Окружение и бинарники (тяжёлые, восстанавливаются)
+.venv/
+bin/
+*.zip
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Данные рантайма и приватность: логи/БД/настройки содержат текст диктовок
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.pid
+
+# Мусор бенчей
+data/validation/
