@@ -44,7 +44,7 @@ if (Test-Port 8081) {
     if (-not (Test-Path $whisper)) { Write-Host "нет whisper-server.exe: $whisper" -ForegroundColor $errColor; exit 1 }
     if (-not (Test-Path $wModel))   { Write-Host "нет модели: $wModel (MYFLOW_MODELS_DIR)" -ForegroundColor $errColor; exit 1 }
     Write-Host "ASR  :8081 — поднимаю whisper-server (фон, лог data\asr.log)..." -ForegroundColor $infoColor
-    Start-Server $whisper @('-m', $wModel, '--host', '127.0.0.1', '--port', '8081', '-l', 'auto', '-t', '8') "asr"
+    Start-Server $whisper @('-m', $wModel, '--host', '127.0.0.1', '--port', '8081', '-l', 'ru', '-bs', '5', '-sns', '-t', '4') "asr"
     if (Wait-Port 8081 "/health") { Write-Host "ASR  :8081 — OK" -ForegroundColor $okColor }
     else { Write-Host "ASR  :8081 — НЕ поднялся за 45с (лог: data\asr.log.err)" -ForegroundColor $errColor }
 }
@@ -58,7 +58,9 @@ if (Test-Port 8082) {
     if (-not (Test-Path $llama))  { Write-Host "нет llama-server.exe: $llama" -ForegroundColor $errColor; exit 1 }
     if (-not (Test-Path $lModel)) { Write-Host "нет модели: $lModel" -ForegroundColor $errColor; exit 1 }
     Write-Host "LLM  :8082 — поднимаю llama-server (фон, лог data\llm.log)..." -ForegroundColor $infoColor
-    Start-Server $llama @('-m', $lModel, '--host', '127.0.0.1', '--port', '8082', '-c', '8192', '-ngl', '35', '--jinja') "llm"
+    Start-Server $llama @('-m', $lModel, '--host', '127.0.0.1', '--port', '8082', '-c', '8192',
+                          '-np', '1', '-kvu', '-ngl', '99', '-fa', 'on', '-ctk', 'q8_0', '-ctv', 'q8_0',
+                          '--jinja') "llm"
     if (Wait-Port 8082 "/v1/models") { Write-Host "LLM  :8082 — OK" -ForegroundColor $okColor }
     else { Write-Host "LLM  :8082 — НЕ поднялся за 45с (лог: data\llm.log.err)" -ForegroundColor $errColor }
 }

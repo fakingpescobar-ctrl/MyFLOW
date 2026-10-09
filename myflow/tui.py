@@ -353,6 +353,21 @@ def llama_dir() -> Path:
 
 
 def default_specs(root: Path = ROOT) -> list[ServerSpec]:
+    """Флаги серверов. Тюнинг 10.10.2026 (замеры: полировка p50 205 мс вместо 260-330,
+    ASR точнее на beam=5, VRAM 7.2/10 ГБ):
+
+    llama: -np 1 -kvu        один слот: контекст целиком нашему запросу, кэш
+                             промпта всегда попадает (было 4 слота впустую);
+           -ngl 99           все 36 слоёв на GPU — при -ngl 35 последний слой
+                             с выходной проекцией (389 МБ) считался на CPU и
+                             ронял генерацию до 80 tok/s (стало 105-115);
+           -ctk/-ctv q8_0    KV-кэш вдвое компактнее — освобождает место под -ngl 99;
+           -fa on            flash attention явно (было auto);
+           -c 8192           ~2200 токенов системного промпта + длинная диктовка.
+    whisper: -l ru           без авто-детекта (был случай распознавания русской
+                             фразы как французской); -bs 5 beam search на запас
+                             скорости (RTF 0.02); -sns против не-речевых токенов.
+    """
     models = models_dir()
     whisper = root / "bin" / "whisper" / "Release" / "whisper-server.exe"
     return [
@@ -360,7 +375,8 @@ def default_specs(root: Path = ROOT) -> list[ServerSpec]:
             key="asr", title="ASR whisper.cpp", port=8081,
             url="http://127.0.0.1:8081", health_path="/health",
             exe=whisper, model=models / "ggml-large-v3-turbo-q5_0.bin",
-            args=["--host", "127.0.0.1", "--port", "8081", "-l", "auto", "-t", "8"],
+            args=["--host", "127.0.0.1", "--port", "8081", "-l", "ru",
+                  "-bs", "5", "-sns", "-t", "4"],
             log=root / "data" / "asr.log", required=True,
         ),
         ServerSpec(
@@ -369,7 +385,8 @@ def default_specs(root: Path = ROOT) -> list[ServerSpec]:
             exe=llama_dir() / "llama-server.exe",
             model=models / "Qwen3-4B-Instruct-2507-Q8_0.gguf",
             args=["--host", "127.0.0.1", "--port", "8082", "-c", "8192",
-                  "-ngl", "35", "--jinja"],
+                  "-np", "1", "-kvu", "-ngl", "99", "-fa", "on",
+                  "-ctk", "q8_0", "-ctv", "q8_0", "--jinja"],
             log=root / "data" / "llm.log", required=False,
         ),
     ]

@@ -78,7 +78,11 @@ def detect_category(app_descriptor: str,
 class AsrConfig:
     """Параметры локального whisper-server (аналог gRPC-стоика Wispr)."""
     url: str = "http://127.0.0.1:8081"
-    language: str = "auto"          # auto | ru | en
+    # Язык диктовки. "auto" заставляет whisper определять язык на каждой фразе:
+    # это лишний проход и риск промаха (в логе был случай, когда русская фраза
+    # распозналась как французская: «pour terminer.»). Для русской диктовки
+    # держим "ru"; поставь "auto", если диктуешь на нескольких языках.
+    language: str = "ru"
     translate_to_english: bool = False
     temperature: float = 0.0
     timeout_seconds: float = 60.0   # общий (legacy)
@@ -86,6 +90,7 @@ class AsrConfig:
     timeout_read: float = 45.0      # отдельный read-таймаут (инференс)
     input_device: int | None = None    # индекс sounddevice для записи; None = системный
     initial_prompt: str = ""           # подсказка для whisper (типичные фразы диктовки)
+    prompt_from_dictionary: bool = True  # добавлять слова из словаря в подсказку
 
 
 @dataclass

@@ -98,6 +98,37 @@ class TestWatchContract(unittest.TestCase):
                          "hit_count не должен удваиваться (bump_word убран)")
 
 
+class TestNoiseFilter(unittest.TestCase):
+    """Фильтр «слово -> число»: не учим совпадения с чужим скопированным текстом."""
+
+    def test_word_to_number_is_not_learned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "noise.sqlite")
+            base = "кнопка overlay открывает меню"
+            edited = "кнопка 243 открывает меню"
+            hid = db.insert_history(DictationRecord(
+                asr_text=base, polished_text=base, app_window="test",
+                duration_ms=1000, e2e_latency_ms=100))
+            for _ in range(3):
+                record_edit_and_learn(db, hid, base, edited)
+            rows = db._conn.execute("SELECT COUNT(*) FROM dictionary").fetchone()[0]
+            self.assertEqual(rows, 0, "«overlay -> 243» не должно попасть в словарь")
+            db.close()
+
+    def test_number_to_number_is_still_learned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "num.sqlite")
+            hid = db.insert_history(DictationRecord(
+                asr_text="порт 8081", polished_text="порт 8081", app_window="test",
+                duration_ms=1000, e2e_latency_ms=100))
+            for _ in range(2):
+                record_edit_and_learn(db, hid, "порт 8081", "порт 8080")
+            rows = db._conn.execute(
+                "SELECT source_word, target_word FROM dictionary").fetchall()
+            self.assertEqual([tuple(r) for r in rows], [("8081", "8080")])
+            db.close()
+
+
 class TestCandidateKeyPerApp(unittest.TestCase):
     def test_different_windows_do_not_share_counter(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -35,8 +35,15 @@ class _Flags(dict):
     pass
 
 
+class _AsrCfg:
+    initial_prompt = ""
+    prompt_from_dictionary = True
+    language = "ru"
+
+
 class _Settings:
     hotkey = _HK()
+    asr = _AsrCfg()
     use_ax_observation = False          # в тестах AX не поднимаем
     observation_seconds = 0.2
     app_categories = None                # -> DEFAULT_APP_CATEGORIES
@@ -46,6 +53,7 @@ class _Settings:
     def __init__(self):
         self.style_by_app = {}
         self.default_style = "plain"
+        self.asr = _AsrCfg()
         self.flags = _Flags(auto_insert=True, learning=False, overlay=False,
                             live_preview=False, beep_on_start=False,
                             snippets=True, keep_audio=False, ax_observation=False)
@@ -174,6 +182,8 @@ def make_app(auto=False, busy=False, gen=0, polish_enabled=False, paster=None):
     app.ax.available = False
     app._ax_ready = False
     app._last_insert_pid = 0
+    app._asr_prompt_base = "тестовая подсказка"
+    app._asr_prompt_ts = 0.0
     app.polish = types.SimpleNamespace(
         cfg=types.SimpleNamespace(enabled=polish_enabled, url="http://127.0.0.1:8082/v1"),
         polish=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("LLM лежит")),
@@ -190,7 +200,7 @@ def make_app(auto=False, busy=False, gen=0, polish_enabled=False, paster=None):
                  "_take_preview", "_on_live_preview", "_resolve_category",
                  "_save_audio", "_record_failure", "_try_snippet",
                  "_remember_insert_target", "_watch_with_ax", "_watch_with_clipboard",
-                 "retry_pending", "_log_stats"):
+                 "retry_pending", "_log_stats", "_refresh_asr_prompt"):
         setattr(app, name, types.MethodType(getattr(MyFlowApp, name), app))
     app._guard_polish = MyFlowApp._guard_polish
     return app
@@ -612,6 +622,50 @@ class RetryFlowTest(unittest.TestCase):
             status = db._conn.execute("SELECT status FROM history").fetchone()[0]
             self.assertEqual(status, "audio_missing")
             db.close()
+
+
+class AsrPromptTest(unittest.TestCase):
+    """Подсказка whisper собирается из словаря (имена/термины пишутся верно)."""
+
+    def test_dictionary_words_are_added(self):
+        app = make_app()
+        app._asr_prompt_base = "Пользователь диктует по-русски."
+        app.db.get_dictionary = lambda app_title=None: [
+            {"source_word": "сухой лаг", "target_word": "Сухой Лог"},
+            {"source_word": "квен", "target_word": "Qwen"},
+            {"source_word": "дубль", "target_word": "Сухой Лог"},   # дубль не нужен
+        ]
+        app._refresh_asr_prompt(force=True)
+        prompt = app.settings.get().asr.initial_prompt
+        self.assertIn("Сухой Лог", prompt)
+        self.assertIn("Qwen", prompt)
+        self.assertEqual(prompt.count("Сухой Лог"), 1, "дубликаты не добавляем")
+        self.assertLessEqual(len(prompt), 420, "промпт ограничен по длине")
+
+    def test_empty_dictionary_keeps_base(self):
+        app = make_app()
+        app._asr_prompt_base = "базовая подсказка"
+        app.db.get_dictionary = lambda app_title=None: []
+        app._refresh_asr_prompt(force=True)
+        self.assertEqual(app.settings.get().asr.initial_prompt, "базовая подсказка")
+
+    def test_flag_disables_dictionary_prompt(self):
+        app = make_app()
+        app._asr_prompt_base = "база"
+        app.settings.get().asr.prompt_from_dictionary = False
+        app.db.get_dictionary = lambda app_title=None: [{"target_word": "Qwen"}]
+        app._refresh_asr_prompt(force=True)
+        self.assertEqual(app.settings.get().asr.initial_prompt, "база")
+
+    def test_throttled_without_force(self):
+        app = make_app()
+        app._asr_prompt_base = "база"
+        app.db.get_dictionary = lambda app_title=None: [{"target_word": "Qwen"}]
+        app._refresh_asr_prompt(force=True)
+        first = app.settings.get().asr.initial_prompt
+        app.db.get_dictionary = lambda app_title=None: [{"target_word": "Другое"}]
+        app._refresh_asr_prompt()          # без force — в пределах минуты не трогаем
+        self.assertEqual(app.settings.get().asr.initial_prompt, first)
 
 
 class WatcherTest(unittest.TestCase):

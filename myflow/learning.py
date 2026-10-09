@@ -98,6 +98,12 @@ def record_edit_and_learn(db: Database, history_id: int, polished_text: str,
         for src, dst in pairs:
             if not src or not dst:
                 continue
+            # Фильтр мусора: «слово -> число» почти всегда не правка пользователя
+            # а совпадение с посторонним текстом в буфере (реальный случай:
+            # выучилось «overlay -> 243» из скопированного числа). Число -> число
+            # и число -> слово оставляем: это осмысленные правки.
+            if dst.isdigit() and not src.isdigit() and len(src) > 3:
+                continue
             # Ключ кандидата с контекстом окна: правки в разных окнах не
             # должны «складываться» в один глобальный счётчик.
             key = f"{src}\u0000{dst}\u0000{app_context or ''}"

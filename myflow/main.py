@@ -194,6 +194,8 @@ class MyFlowApp:
         # Фразы-подсказки для ASR: дефолт, если не заданы в settings.json.
         if not cfg.asr.initial_prompt:
             cfg.asr.initial_prompt = ASR_INITIAL_PROMPT
+        self._asr_prompt_base = cfg.asr.initial_prompt
+        self._asr_prompt_ts = 0.0
         self.polish = PolishClient(cfg.polish)
         # Куда вставлять: обычно — буфер+Ctrl+V в активное окно; в opencode-режиме —
         # WriteConsoleInputW напрямую в консоль (не требует фокуса, Enter по флагу).
@@ -728,6 +730,7 @@ class MyFlowApp:
 
         print(f"[myflow] ⚙ распознавание ({recording.duration_ms} мс, {app_category})...")
         self.overlay.show("⚙ распознавание…", "#f5c542")
+        self._refresh_asr_prompt()   # словарь -> подсказка whisper (раз в минуту)
 
         try:
             asr: AsrResult = self.whisper.transcribe(recording.pcm_int16)
@@ -838,6 +841,46 @@ class MyFlowApp:
         else:
             self.overlay.show("✓ готово", "#46a758")
         print(f"[myflow] e2e={e2e_ms} мс (asr={asr.latency_ms}, polish={polished.latency_ms})")
+
+    def _refresh_asr_prompt(self, force: bool = False) -> None:
+        """Подмешать словарь в подсказку whisper (имена, термины, топонимы).
+
+        Whisper учитывает initial_prompt как «контекст предыдущего текста» —
+        если в подсказке есть «Сухой Лог», «Qwen», «opencode», он пишет их
+        правильно. Промпт ограничен (~224 токена), поэтому база обрезается,
+        а словарь идёт коротким списком.
+        """
+        cfg = self.settings.get().asr
+        if not getattr(cfg, "prompt_from_dictionary", True):
+            cfg.initial_prompt = self._asr_prompt_base   # словарь не подмешиваем
+            return
+        now = time.monotonic()
+        if not force and now - self._asr_prompt_ts < 60.0:
+            return
+        self._asr_prompt_ts = now
+        try:
+            words = [d.get("target_word") for d in self.db.get_dictionary(None)]
+        except Exception:  # noqa: BLE001 — подсказка не критична
+            words = []
+        seen: set[str] = set()
+        vocab: list[str] = []
+        for word in words:
+            text = str(word or "").strip()
+            key = text.lower()
+            if not text or key in seen or len(text) > 24 or len(text.split()) > 3:
+                continue
+            seen.add(key)
+            vocab.append(text)
+            if len(vocab) >= 12:
+                break
+        base = self._asr_prompt_base
+        if not vocab:
+            cfg.initial_prompt = base
+            return
+        vocab_text = ", ".join(vocab)
+        budget = 380 - len(vocab_text) - 12      # символов (~190 токенов на всё)
+        head = base[:max(60, budget)].rstrip(" .,;:")
+        cfg.initial_prompt = f"{head}. Термины: {vocab_text}."
 
     # ---- сниппеты / аудио / статистика неудач ----
 
