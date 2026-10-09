@@ -1,7 +1,8 @@
 # start-all.ps1 — подъём серверов MyFLOW (пульт, вызывается из start-myflow.bat).
-#   whisper-server (:8081) и llama-server (:8082) — ФОНОВЫЕ, логи в data\*.log.
-#   Это окно — пульт: показывает статус и живёт, пока его не закроют.
-#   Закрытие пульта НЕ убивает серверы (они отдельные процессы).
+#   whisper-server (:8081) — ТОЛЬКО если ASR не на GigaAM (см. ниже);
+#   llama-server   (:8082) — полировка.
+#   Оба ФОНОВЫЕ, логи в data\*.log. Это окно — пульт: показывает статус и живёт,
+#   пока его не закроют. Закрытие пульта НЕ убивает серверы (отдельные процессы).
 #   Если порт занят — сервер не перезапускается (скип).
 # Пути: $root вычисляется от расположения скрипта; модели — $env:MYFLOW_MODELS_DIR.
 param()
@@ -35,8 +36,16 @@ function Start-Server($exe, $arguments, $logName) {
 
 Write-Host "`n=== MyFLOW: серверы (фоновые, логи в data\) ===" -ForegroundColor $infoColor
 
-# --- 1. ASR whisper-server :8081 ---
-if (Test-Port 8081) {
+# --- 1. ASR whisper-server :8081 (ТОЛЬКО если ASR не на GigaAM) ---
+$py = Join-Path $root ".venv\Scripts\python.exe"
+$needWhisper = $true
+if (Test-Path $py) {
+    $needWhisper = (& $py -c "import sys; sys.path.insert(0,'$($root -replace '\\','/')'); from myflow.asr import whisper_needed; print('1' if whisper_needed() else '0')" 2>$null) -eq '1'
+}
+if (-not $needWhisper) {
+    Write-Host "ASR  :8081 — не нужен: ASR работает на GigaAM (ONNX, CPU), GPU свободен" -ForegroundColor $okColor
+    Write-Host "             (нужен whisper? MYFLOW_KEEP_WHISPER=1 или asr.backend=whisper)" -ForegroundColor $dimColor
+} elseif (Test-Port 8081) {
     Write-Host "ASR  :8081 — уже работает, скип" -ForegroundColor $okColor
 } else {
     $whisper = Join-Path $root "bin\whisper\Release\whisper-server.exe"

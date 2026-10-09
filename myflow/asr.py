@@ -100,6 +100,35 @@ class WhisperClient:
         return AsrResult(text=text, language=language, latency_ms=latency_ms)
 
 
+def whisper_needed(cfg: AsrConfig | None = None) -> bool:
+    """Нужен ли whisper-server вообще.
+
+    Если ASR работает на GigaAM (локальная ONNX-модель на CPU), отдельный
+    whisper-процесс не нужен: он занимает ~1 ГБ VRAM и ничего не делает.
+    Оставляем его только когда бэкенд явно whisper или GigaAM недоступен.
+    MYFLOW_KEEP_WHISPER=1 заставляет держать сервер всегда (fallback вручную).
+    """
+    import os
+    if os.environ.get("MYFLOW_KEEP_WHISPER", "").strip() in ("1", "true", "yes"):
+        return True
+    if cfg is None:
+        try:
+            from myflow.config import SettingsStore
+            cfg = SettingsStore().get().asr
+        except Exception:  # noqa: BLE001
+            return True
+    backend = (getattr(cfg, "backend", "whisper") or "whisper").strip().lower()
+    if backend == "whisper":
+        return True
+    try:
+        from myflow.asr_gigaam import GigaAmClient
+        if GigaAmClient.package_available():
+            return False
+    except Exception:  # noqa: BLE001
+        pass
+    return True
+
+
 def make_asr_client(cfg: AsrConfig):
     """Выбрать ASR-бэкенд: whisper (сервер) или gigaam (ru-only, ONNX на CPU).
 

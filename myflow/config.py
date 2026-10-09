@@ -120,6 +120,25 @@ class PolishConfig:
 
 
 @dataclass
+class VoicePrintConfig:
+    """Проверка «это мой голос?» (speaker verification, WeSpeaker ResNet34 ONNX).
+
+    Нужна, когда VAD ловит чужую речь: телевизор, коллеги, видео. Энергетикой
+    это не решается — эмбеддинг голоса решает (замер: свой голос 0.56-0.83,
+    чужой 0.011-0.090 cosine).
+    """
+    enabled: bool = True
+    threshold: float = 0.25          # косинус к профилю; ниже -> фраза не наша
+    min_seconds: float = 0.8         # короче — эмбеддинг ненадёжен, не проверяем
+    auto_enroll: bool = True         # пополнять профиль своими удачными фразами
+    enroll_min_score: float = 0.45   # в авто-режиме берём только уверенно «свои»
+    # Пути: пусто = $MYFLOW_VOICEPRINT_MODEL / $MYFLOW_VOICEPRINT_PROFILE,
+    # иначе $MYFLOW_MODELS_DIR/voiceprint/model.onnx и data/voiceprint.npz.
+    model_path: str = ""
+    profile_path: str = ""
+
+
+@dataclass
 class HotkeyConfig:
     """Глобальные хоткеи (аналог шорткатов Wispr)."""
     ptt_key: str = "f8"             # Push-to-Talk: держишь — диктуешь
@@ -134,6 +153,7 @@ class Settings:
     asr: AsrConfig = field(default_factory=AsrConfig)
     polish: PolishConfig = field(default_factory=PolishConfig)
     hotkey: HotkeyConfig = field(default_factory=HotkeyConfig)
+    voiceprint: VoicePrintConfig = field(default_factory=VoicePrintConfig)
     # Режим активации записи: "ptt" — по нажатию кнопки (F8),
     # "auto" — постоянно слушает микрофон, фраза режется по паузе.
     mode: str = "ptt"

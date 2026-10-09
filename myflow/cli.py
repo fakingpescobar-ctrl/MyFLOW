@@ -191,12 +191,49 @@ def cmd_doctor(args) -> int:
         ok = False
         _out(f"  settings.json     : ОШИБКА ({exc})")
 
+    from myflow.asr import make_asr_client, whisper_needed
+    try:
+        asr_cfg = SettingsStore().get().asr
+        client = make_asr_client(asr_cfg)
+        name = type(client).__name__
+        healthy = client.health()
+        _out(f"  ASR               : {name} "
+             f"(backend={asr_cfg.backend}) — {'готов' if healthy else 'НЕ ГОТОВ'}")
+        if not healthy:
+            ok = False
+        extra = getattr(client, "load_error", "")
+        if extra:
+            _out(f"    {extra}")
+        if not whisper_needed(asr_cfg):
+            _out("    whisper-сервер не нужен: ASR работает на локальной ONNX-модели (CPU)")
+    except Exception as exc:  # noqa: BLE001
+        ok = False
+        _out(f"  ASR               : ОШИБКА ({exc})")
+
     sup = Supervisor(default_specs())
     for key, info in sup.health_snapshot().items():
         mark = "ok" if info["state"] in ("ok", "external") else info["state"].upper()
         if info["state"] not in ("ok", "external"):
             ok = False
         _out(f"  сервер {key:<10}: [{mark}] {info['note']}")
+
+    from myflow.voiceprint import VoiceGate
+    try:
+        vcfg = SettingsStore().get().voiceprint
+        gate = VoiceGate(enabled=vcfg.enabled, threshold=vcfg.threshold,
+                         model_path=Path(vcfg.model_path) if vcfg.model_path else None,
+                         profile_path=Path(vcfg.profile_path) if vcfg.profile_path else None)
+        if not vcfg.enabled:
+            _out("  голос             : проверка выключена")
+        elif not gate.embedder.model_path.exists():
+            _out(f"  голос             : нет модели ({gate.embedder.model_path})")
+        elif not gate.profile.exists:
+            _out("  голос             : профиль пуст -> myflow.cli voice enroll …")
+        else:
+            _out(f"  голос             : профиль {gate.profile.count} фраз, "
+                 f"порог {vcfg.threshold}, модель {gate.embedder.model_path.name}")
+    except Exception as exc:  # noqa: BLE001
+        _out(f"  голос             : ОШИБКА ({exc})")
 
     from myflow.db import Database
     from myflow.audio_store import AudioStore
@@ -221,6 +258,112 @@ def cmd_doctor(args) -> int:
     _out("")
     _out("ИТОГ: всё в порядке" if ok else "ИТОГ: есть проблемы (см. выше)")
     return 0 if ok else 1
+
+
+# ---------------------------------------------------------------- голос
+def _load_wav_mono16k(path: str):
+    """Читаем wav в int16 mono 16 кГц (что нужно и ASR, и модели голоса)."""
+    import wave
+    import numpy as np
+    with wave.open(path, "rb") as w:
+        if w.getframerate() != 16000 or w.getnchannels() != 1:
+            raise SystemExit(f"{path}: нужен wav 16 кГц моно "
+                             f"(получено {w.getframerate()} Гц, {w.getnchannels()} канал.)")
+        return np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16).copy()
+
+
+def cmd_voice(args) -> int:
+    from myflow.config import SettingsStore
+    from myflow.voiceprint import VoiceGate
+
+    cfg = SettingsStore().get()
+    vp = cfg.voiceprint
+    gate = VoiceGate(
+        enabled=vp.enabled, threshold=vp.threshold, min_seconds=vp.min_seconds,
+        auto_enroll=vp.auto_enroll, enroll_min_score=vp.enroll_min_score,
+        model_path=Path(vp.model_path) if vp.model_path else None,
+        profile_path=Path(vp.profile_path) if vp.profile_path else None,
+    )
+
+    if args.action == "status":
+        _out("== Профиль голоса ==")
+        _out(f"  проверка           : {'включена' if vp.enabled else 'выключена'}")
+        _out(f"  порог (cosine)     : {vp.threshold}")
+        _out(f"  минимальная фраза  : {vp.min_seconds} с")
+        _out(f"  авто-пополнение    : {'да' if vp.auto_enroll else 'нет'}"
+             f" (берём фразы со score >= {vp.enroll_min_score})")
+        _out(f"  модель             : {gate.embedder.model_path} "
+             f"({'есть' if gate.embedder.model_path.exists() else 'НЕТ'})")
+        _out(f"  профиль            : {gate.profile.path} "
+             f"({'есть' if gate.profile.exists else 'НЕТ'})")
+        if gate.profile.exists:
+            _out(f"  фраз в профиле     : {gate.profile.count}")
+        if not gate.embedder.deps_available():
+            _out("  зависимости        : НЕТ (pip install onnxruntime kaldi_native_fbank)")
+        elif not gate.profile.exists:
+            _out("\n  Профиль пуст — проверка голоса не работает.")
+            _out("  Записать: myflow.cli voice enroll data\\validation\\val_dict_1.wav …")
+        return 0
+
+    if args.action == "reset":
+        gate.profile.reset()
+        _out(f"Профиль голоса удалён ({gate.profile.path})")
+        return 0
+
+    if args.action == "enroll":
+        if not gate.embedder.deps_available():
+            _out("Нет зависимостей: pip install onnxruntime kaldi_native_fbank")
+            return 1
+        if not gate.embedder.model_path.exists():
+            _out(f"Нет модели: {gate.embedder.model_path}")
+            _out("Скачать: см. README, раздел «Проверка голоса»")
+            return 1
+        files = list(args.files)
+        if args.from_history:
+            from myflow.db import Database
+            db = Database()
+            try:
+                rows = db._conn.execute(  # noqa: SLF001
+                    """SELECT audio_path FROM history
+                       WHERE audio_path IS NOT NULL AND audio_path <> ''
+                         AND status IN ('ok','fast_path','polished')
+                       ORDER BY id DESC LIMIT ?""", (args.from_history,)).fetchall()
+            finally:
+                db.close()
+            found = [r[0] for r in rows if Path(r[0]).exists()]
+            _out(f"Из истории взято файлов: {len(found)} (запрошено {args.from_history})")
+            files.extend(found)
+        if not files:
+            _out("Нечего enroll-ить: укажи wav-файлы или --from-history N")
+            return 1
+        added = skipped = 0
+        for path in files:
+            pcm = _load_wav_mono16k(str(path))
+            ok, score = gate.enroll(pcm)
+            tag = "добавлен" if ok else "пропущен"
+            score_text = "нет профиля" if score is None else f"cosine={score:+.3f}"
+            _out(f"  {Path(path).name:<28} {tag:<9} {score_text}")
+            added += int(ok)
+            skipped += int(not ok)
+        _out(f"\nДобавлено фраз: {added}, пропущено: {skipped}. "
+             f"Всего в профиле: {gate.profile.count}")
+        if added == 0 and gate.profile.exists:
+            _out("Ни одна фраза не прошла порог похожести — это не ваш голос?")
+        return 0
+
+    if args.action == "test":
+        # Проверить конкретный файл: наш голос или чужой?
+        if not gate.profile.exists:
+            _out("Профиль пуст — сначала voice enroll")
+            return 1
+        for path in args.files:
+            pcm = _load_wav_mono16k(str(path))
+            ok, score, reason = gate.check(pcm)
+            verdict = "СВОЙ" if ok else "ЧУЖОЙ"
+            score_text = "—" if score is None else f"{score:+.3f}"
+            _out(f"  {Path(path).name:<28} {verdict:<6} cosine={score_text}  ({reason})")
+        return 0
+    return 1
 
 
 # ---------------------------------------------------------------- CLI
@@ -263,6 +406,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     doc = sub.add_parser("doctor", help="проверка окружения")
     doc.set_defaults(func=cmd_doctor)
+
+    vp = sub.add_parser("voice", help="профиль голоса (speaker verification)")
+    vp_sub = vp.add_subparsers(dest="action", required=True)
+    vp_sub.add_parser("status", help="состояние профиля и модели")
+    vp_sub.add_parser("reset", help="удалить профиль голоса")
+    vp_en = vp_sub.add_parser("enroll", help="добавить фразы в профиль")
+    vp_en.add_argument("files", nargs="*", help="wav 16 кГц моно (твой голос)")
+    vp_en.add_argument("--from-history", type=int, default=0, metavar="N",
+                       help="взять до N своих записей из истории (сохранённое аудио)")
+    vp_te = vp_sub.add_parser("test", help="проверить файлы: свой голос или чужой")
+    vp_te.add_argument("files", nargs="+")
+    vp.set_defaults(func=cmd_voice)
     return ap
 
 

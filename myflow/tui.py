@@ -370,31 +370,35 @@ def default_specs(root: Path = ROOT) -> list[ServerSpec]:
     """
     models = models_dir()
     whisper = root / "bin" / "whisper" / "Release" / "whisper-server.exe"
+    from myflow.asr import whisper_needed      # локально: без циклических импортов
     # Модель ASR можно подменить через MYFLOW_WHISPER_MODEL (например, на
     # ggml-large-v3-q5_0.bin для «режима качества»: медленнее в ~4 раза, по
     # замерам на своих записях выигрыша по WER не даёт — см. README).
     whisper_model = Path(os.environ.get("MYFLOW_WHISPER_MODEL")
                          or (models / "ggml-large-v3-turbo-q5_0.bin"))
-    return [
-        ServerSpec(
+    specs: list[ServerSpec] = []
+    # whisper-сервер поднимаем ТОЛЬКО если он реально нужен: при бэкенде GigaAM
+    # (локальная ONNX-модель на CPU) он занимал бы ~1 ГБ VRAM впустую.
+    if whisper_needed():
+        specs.append(ServerSpec(
             key="asr", title="ASR whisper.cpp", port=8081,
             url="http://127.0.0.1:8081", health_path="/health",
             exe=whisper, model=whisper_model,
             args=["--host", "127.0.0.1", "--port", "8081", "-l", "ru",
                   "-bs", "5", "-sns", "-t", "4"],
             log=root / "data" / "asr.log", required=True,
-        ),
-        ServerSpec(
-            key="llm", title="LLM Qwen3-4B (полировка)", port=8082,
-            url="http://127.0.0.1:8082", health_path="/v1/models",
-            exe=llama_dir() / "llama-server.exe",
-            model=models / "Qwen3-4B-Instruct-2507-Q8_0.gguf",
-            args=["--host", "127.0.0.1", "--port", "8082", "-c", "8192",
-                  "-np", "1", "-kvu", "-ngl", "99", "-fa", "on",
-                  "-ctk", "q8_0", "-ctv", "q8_0", "--jinja"],
-            log=root / "data" / "llm.log", required=False,
-        ),
-    ]
+        ))
+    specs.append(ServerSpec(
+        key="llm", title="LLM Qwen3-4B (полировка)", port=8082,
+        url="http://127.0.0.1:8082", health_path="/v1/models",
+        exe=llama_dir() / "llama-server.exe",
+        model=models / "Qwen3-4B-Instruct-2507-Q8_0.gguf",
+        args=["--host", "127.0.0.1", "--port", "8082", "-c", "8192",
+              "-np", "1", "-kvu", "-ngl", "99", "-fa", "on",
+              "-ctk", "q8_0", "-ctv", "q8_0", "--jinja"],
+        log=root / "data" / "llm.log", required=False,
+    ))
+    return specs
 
 
 class Supervisor:

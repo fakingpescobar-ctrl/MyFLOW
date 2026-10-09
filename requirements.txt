@@ -15,6 +15,12 @@ pynput==1.8.2
 # Без него MyFLOW автоматически работает на whisper (asr.backend=auto).
 # onnx-asr[hub]
 
+# Опционально: проверка голоса (speaker verification) — отсекает чужую речь
+# (телевизор, коллеги). Нужен kaldi-compatible fbank для WeSpeaker ResNet34:
+#     pip install kaldi_native_fbank     (модель 25 МБ, см. README)
+# onnxruntime для этого уже есть выше.
+# kaldi_native_fbank
+
 # Опционально (только для tools/: валидация VAD и запись wav-датасета):
 # soundfile==0.14.0
 # Только для сравнения VAD-моделей в tools/bench_vad.py:

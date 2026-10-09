@@ -33,6 +33,7 @@ from myflow.axtext import AxReader, AxWatcher
 from myflow.db import Database, DictationRecord
 from myflow.config import SettingsStore, DATA_DIR, DEFAULT_APP_CATEGORIES, detect_category
 from myflow.fastpath import fast_path_allowed
+from myflow.voiceprint import VoiceGate
 from myflow.insertion import ClipboardPaste
 from myflow.opencode_inject import OpenCodeInjector
 from myflow.learning import record_edit_and_learn, watch_pasted_edit
@@ -211,6 +212,18 @@ class MyFlowApp:
         self._asr_prompt_base = cfg.asr.initial_prompt
         self._asr_prompt_ts = 0.0
         self.polish = PolishClient(cfg.polish)
+        # Проверка голоса (speaker verification): отсекает чужую речь, которую
+        # VAD честно считает речью. Модель грузится в фоне (см. _warm_asr).
+        self.voice = VoiceGate(
+            enabled=cfg.voiceprint.enabled,
+            threshold=cfg.voiceprint.threshold,
+            min_seconds=cfg.voiceprint.min_seconds,
+            auto_enroll=cfg.voiceprint.auto_enroll,
+            enroll_min_score=cfg.voiceprint.enroll_min_score,
+            model_path=Path(cfg.voiceprint.model_path) if cfg.voiceprint.model_path else None,
+            profile_path=(Path(cfg.voiceprint.profile_path)
+                          if cfg.voiceprint.profile_path else None),
+        )
         # Куда вставлять: обычно — буфер+Ctrl+V в активное окно; в opencode-режиме —
         # WriteConsoleInputW напрямую в консоль (не требует фокуса, Enter по флагу).
         if cfg.insert_method == "opencode":
@@ -333,6 +346,14 @@ class MyFlowApp:
                           "первая диктовка может не распознаться")
             except Exception as exc:  # noqa: BLE001
                 print(f"[myflow] прогрев ASR: {exc!r}")
+            # Заодно греем модель голоса (ONNX, ~25 МБ) — тоже в фоне.
+            try:
+                if self.voice.ready and self.voice.warmup():
+                    print(f"[myflow] ☺ профиль голоса найден "
+                          f"({self.voice.profile.count} фраз, "
+                          f"порог {self.voice.threshold})")
+            except Exception as exc:  # noqa: BLE001
+                print(f"[myflow] модель голоса: {exc!r}")
 
         threading.Thread(target=_run, daemon=True, name="asr-warmup").start()
 
@@ -757,11 +778,31 @@ class MyFlowApp:
         flags = self.settings.get().flags
         app = app_descriptor()
         app_category = self._resolve_category(app)
+
         # Аудио фразы сохраняем ДО распознавания: если ASR/LLM упадут,
         # фразу можно будет перераспознать (myflow.cli retry).
         audio_path = None
         if flags.get("keep_audio", True):
             audio_path = self._save_audio(recording)
+
+        # Проверка голоса ДО распознавания: если фразу сказал не владелец
+        # (телевизор, коллега, видео) — не тратим ASR/LLM и ничего не вставляем.
+        voice_ok, voice_score, voice_reason = self.voice.check(recording.pcm_int16)
+        if not voice_ok:
+            e2e_ms = int((time.perf_counter() - started) * 1000)
+            print(f"[myflow] ✗ {voice_reason} — фраза пропущена "
+                  f"({recording.duration_ms} мс, {e2e_ms} мс)")
+            self.overlay.show("✗ не ваш голос", "#e5484d")
+            self.db.insert_history(DictationRecord(
+                asr_text="", polished_text="", app_window=app,
+                duration_ms=recording.duration_ms, e2e_latency_ms=e2e_ms,
+                style=self._resolve_style(app), status="other_speaker",
+                app_category=app_category,
+                audio_path=str(audio_path) if audio_path else None,
+            ))
+            return
+        if voice_score is not None:
+            print(f"[myflow] ☺ голос владельца (cosine={voice_score:.3f})")
 
         print(f"[myflow] ⚙ распознавание ({recording.duration_ms} мс, {app_category})...")
         self.overlay.show("⚙ распознавание…", "#f5c542")
@@ -868,6 +909,12 @@ class MyFlowApp:
         self._last_history_id = history_id
 
         print(f"[myflow] ✓ {final_text}")
+        # Профиль голоса пополняем своими же удачными фразами: чем больше
+        # записей, тем устойчивее центроид (микрофон/комната меняются).
+        if self.voice.maybe_auto_enroll(recording.pcm_int16, accepted=True,
+                                        score=voice_score):
+            print(f"[myflow] ☺ профиль голоса обновлён "
+                  f"({self.voice.profile.count} фраз)")
         # Отмена могла прийти, пока шли ASR и полировка: текст уже в истории,
         # но вставлять его не нужно (иначе F9 «не отменяет»).
         if gen != self._gen:

@@ -189,6 +189,13 @@ def make_app(auto=False, busy=False, gen=0, polish_enabled=False, paster=None):
     app.ax.available = False
     app._ax_ready = False
     app._last_insert_pid = 0
+    # Проверка голоса: в тестах профиля нет -> gate пропускает всё.
+    app.voice = mock.Mock()
+    app.voice.check.return_value = (True, None, "нет профиля голоса")
+    app.voice.maybe_auto_enroll.return_value = False
+    app.voice.profile = types.SimpleNamespace(count=0)
+    app.voice.threshold = 0.25
+    app.voice.ready = False
     app._asr_prompt_base = "тестовая подсказка"
     app._asr_prompt_ts = 0.0
     app.polish = types.SimpleNamespace(
@@ -689,6 +696,49 @@ class FastPathFlowTest(unittest.TestCase):
         app = self._app("Сегодня отличная погода.", style="terminal")
         app._process_recording(0, self._rec())
         self.assertTrue(app.polish.polish.called)
+
+
+class VoiceGateFlowTest(unittest.TestCase):
+    """Проверка голоса в оркестраторе: чужую речь не распознаём и не вставляем."""
+
+    def setUp(self):
+        self.p1 = mock.patch("myflow.main._tb_to_file")
+        self.p1.start()
+        self.addCleanup(self.p1.stop)
+
+    @staticmethod
+    def _rec():
+        return Recording(pcm_int16=np.zeros(16000, dtype=np.int16),
+                         duration_ms=1000, max_amplitude=0.5)
+
+    def test_other_speaker_is_dropped_before_asr(self):
+        app = make_app()
+        app.voice.check.return_value = (False, 0.05, "чужой голос (cosine=0.050 < 0.25)")
+        app.whisper = mock.Mock()
+        app.polish.polish = mock.Mock()
+        app._process_recording(0, self._rec())
+        self.assertFalse(app.whisper.transcribe.called, "чужую речь не распознаём")
+        self.assertEqual(app.paster.calls, [])
+        self.assertEqual(app.db.records[-1].status, "other_speaker")
+
+    def test_owner_voice_goes_through(self):
+        app = make_app()
+        app.voice.check.return_value = (True, 0.72, "голос владельца")
+        app.whisper = _Whisper("Проверка голоса.")
+        app._process_recording(0, self._rec())
+        self.assertEqual(app.paster.calls, ["Проверка голоса."])
+        self.assertEqual(app.db.records[-1].status, "ok")
+
+    def test_auto_enroll_called_for_accepted_phrase(self):
+        app = make_app()
+        app.voice.check.return_value = (True, 0.72, "голос владельца")
+        app.voice.maybe_auto_enroll.return_value = True
+        app.whisper = _Whisper("Проверка голоса.")
+        app._process_recording(0, self._rec())
+        self.assertTrue(app.voice.maybe_auto_enroll.called)
+        args, kwargs = app.voice.maybe_auto_enroll.call_args
+        self.assertTrue(kwargs.get("accepted"))
+        self.assertAlmostEqual(kwargs.get("score"), 0.72)
 
 
 class AsrPromptTest(unittest.TestCase):
