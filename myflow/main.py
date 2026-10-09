@@ -189,11 +189,17 @@ def _health_check_llm(polish: PolishClient) -> bool:
 
 
 class MyFlowApp:
-    def __init__(self, overlay: StatusOverlay | None = None) -> None:
-        """overlay — свой статус-слой (TUI подставляет свой); None = обычная плашка."""
-        self.settings = SettingsStore()
+    def __init__(self, overlay: StatusOverlay | None = None,
+                 settings: SettingsStore | None = None,
+                 db: Database | None = None) -> None:
+        """overlay — свой статус-слой (TUI подставляет свой); None = обычная плашка.
+
+        settings/db можно подсунуть свои: это нужно тестам, чтобы переключения
+        на панели не писались в ЖИВОЙ settings.json и в рабочую базу.
+        """
+        self.settings = settings or SettingsStore()
         cfg = self.settings.get()
-        self.db = Database()
+        self.db = db or Database()
         self._pref_auto = cfg.mode == "auto"
         # VAD: общий для обоих режимов параметр паузы; в ptt работает как
         # автостоп при удержании F8, в auto — это конец фразы.
@@ -398,6 +404,309 @@ class MyFlowApp:
         except Exception as exc:  # noqa: BLE001
             self._ax_ready = False
             print(f"[myflow] AX-хелпер не поднялся: {exc!r}")
+
+    # ---- панель управления: живой статус и переключение на лету ----
+
+    def _asr_label(self) -> str:
+        """Короткое имя текущего ASR-движка для панели."""
+        if type(self.whisper).__name__ == "GigaAmClient":
+            model = str(getattr(self.whisper, "model_name", "v3"))
+            short = model.replace("gigaam-", "").replace("-e2e", " e2e").replace("-ctc", "")
+            return f"GigaAM {short} (CPU)"
+        cfg = getattr(self.whisper, "cfg", None)
+        url = getattr(cfg, "url", "")
+        # Защита от нестандартных клиентов (тесты, будущие бэкенды): без проверки
+        # типа url.split() падал на чужом объекте и панель теряла строку ASR.
+        port = url.split("//")[-1] if isinstance(url, str) and "//" in url else ""
+        return f"whisper {port}".strip() or "whisper"
+
+    @staticmethod
+    def _short_mic_name(name: str) -> str:
+        """«Микрофон (Ardor Gaming Vox)» -> «Ardor Gaming Vox» (для панели)."""
+        text = (name or "").strip()
+        for prefix in ("Набор микрофонов (", "Микрофон (", "Микрофон "):
+            if text.startswith(prefix):
+                text = text[len(prefix):]
+                break
+        return text.rstrip(") ").strip() or name
+
+    def control_snapshot(self) -> dict:
+        """Живое состояние всех узлов для панели управления.
+
+        Возвращает {"modules": [...], "values": {...}, "counters": {...}}:
+        modules — список строк-модулей (key, label, value, on, ok, note).
+        """
+        s = self.settings.get()
+        flags = s.flags
+
+        # Проверки живости кэшируем на 2 с: панель опрашивает состояние каждые
+        # ~0.5 с, и без кэша мы бы дёргали серверы по 8 раз в секунду.
+        now = time.monotonic()
+        cache = getattr(self, "_health_cache", None)
+        if cache and now - cache[0] < 2.0:
+            asr_ok, llm_ok = cache[1], cache[2]
+        else:
+            try:
+                asr_ok = bool(self.whisper.health())
+            except Exception:  # noqa: BLE001
+                asr_ok = False
+            llm_ok = False
+            if s.polish.enabled:
+                try:
+                    import requests
+                    llm_ok = bool(requests.get(f"{s.polish.url}/models", timeout=1.5).ok)
+                except Exception:  # noqa: BLE001
+                    llm_ok = False
+            self._health_cache = (now, asr_ok, llm_ok)
+
+        voice = getattr(self, "voice", None)
+        voice_on = bool(voice and voice.enabled)
+        voice_profile = voice.profile.count if voice else 0
+        vad_threshold = float(getattr(self.recorder, "vad_threshold", 0.3))
+
+        modules = [
+            {"key": "asr", "label": "ASR", "value": self._asr_label(), "on": True,
+             "ok": asr_ok, "note": "распознавание речи",
+             "hint": "Enter — сменить движок (GigaAM ↔ whisper)"},
+            {"key": "vad", "label": "VAD", "value": f"Silero v6 · {vad_threshold:.2f}",
+             "on": bool(s.auto_stop_by_silence), "ok": True, "note": "детектор речи",
+             "hint": "←→ порог, Enter — автостоп по паузе"},
+            {"key": "llm", "label": "LLM",
+             "value": f"{s.polish.model.split('-instruct')[0]} · :8082",
+             "on": bool(s.polish.enabled), "ok": llm_ok, "note": "полировка текста",
+             "hint": "Enter — включить/выключить полировку"},
+            {"key": "voice", "label": "Голос",
+             "value": f"{voice_profile} фраз · {s.voiceprint.mode} · {s.voiceprint.threshold:.2f}",
+             "on": voice_on, "ok": voice_profile > 0, "note": "проверка владельца",
+             "hint": "Enter вкл/выкл, ←→ режим (auto/always/off)"},
+            {"key": "ax", "label": "AX",
+             "value": "UI Automation" if self._ax_ready else "буфер обмена",
+             "on": bool(self._ax_ready), "ok": bool(self._ax_ready),
+             "note": "наблюдение за полем ввода",
+             "hint": "Enter — включить/выключить UI Automation"},
+            {"key": "snippets", "label": "Сниппеты", "value": "фразы → готовый текст",
+             "on": bool(flags.get("snippets", True)), "ok": True, "note": "замены фраз",
+             "hint": "Enter — включить/выключить"},
+            {"key": "fastpath", "label": "Быстрый путь",
+             "value": "не звать LLM, если готово",
+             "on": bool(getattr(s.polish, "skip_wellformed", True)), "ok": True,
+             "note": "экономия 100-180 мс", "hint": "Enter — включить/выключить"},
+            {"key": "learning", "label": "Обучение", "value": "словарь из правок",
+             "on": bool(flags.get("learning", True)), "ok": True, "note": "самообучение",
+             "hint": "Enter — включить/выключить"},
+            {"key": "overlay", "label": "Оверлей", "value": "плашка статуса",
+             "on": bool(flags.get("overlay", False)), "ok": True, "note": "поверх окон",
+             "hint": "Enter — включить/выключить"},
+            {"key": "keep_audio", "label": "Аудио фраз", "value": f"последние {s.audio_keep}",
+             "on": bool(flags.get("keep_audio", True)), "ok": True,
+             "note": "для повторного распознавания", "hint": "Enter — включить/выключить"},
+        ]
+
+        # Ввод: микрофон/режим/вставка/стиль/цель — меняются на лету.
+        mic = s.asr.input_device
+        mic_label = "системный по умолчанию"
+        for m in self._mic_choices():
+            if m["idx"] == mic:
+                api = f" [{m.get('api')}]" if m.get("api") else ""
+                mic_label = f"{self._short_mic_name(m['name'])}{api}"
+                break
+        if mic is not None and mic_label.startswith("системный"):
+            # Сканирование микрофонов могло не успеть — покажем хотя бы имя
+            # устройства по индексу, чтобы панель не врала «системный».
+            try:
+                import sounddevice as sd
+                mic_label = (f"{self._short_mic_name(sd.query_devices(mic)['name'])}"
+                             f" [#{mic}]")
+            except Exception:  # noqa: BLE001
+                mic_label = f"#{mic}"
+        mode_label = "авто (слушает)" if self._pref_auto else "PTT (F8)"
+        target = self._target_locked or self._target
+        target_label = ("⚲ " + target.label) if self._target_locked is not None else (
+            target.label if target is not None else "активное окно")
+        values = [
+            {"key": "mic", "label": "Микрофон", "value": mic_label,
+             "hint": "←→ сменить микрофон на лету (F5 — пересканировать)"},
+            {"key": "mode", "label": "Режим диктовки", "value": mode_label,
+             "hint": "←→ авто ↔ PTT"},
+            {"key": "insert", "label": "Куда вставлять",
+             "value": "активное окно (Ctrl+V)" if s.insert_method == "clipboard"
+                      else "чат OpenCode (без фокуса)",
+             "hint": "←→ сменить способ вставки"},
+            {"key": "style", "label": "Стиль текста", "value": s.default_style,
+             "hint": "←→ стиль по умолчанию (F7 — на лету)"},
+            {"key": "target", "label": "Цель вставки", "value": target_label,
+             "hint": "Enter — закрепить/снять окно (F6)"},
+        ]
+
+        counters = {
+            "phrases": int(getattr(self, "_phrases", 0)),
+            "pending": len(getattr(self, "_pending", [])),
+            "queue": self._queue.qsize() if hasattr(self, "_queue") else 0,
+        }
+        return {"modules": modules, "values": values, "counters": counters}
+
+    def _mic_choices(self) -> list[dict]:
+        """Живые микрофоны для панели (кэш на 5 с, чтобы не сканировать каждый кадр)."""
+        now = time.monotonic()
+        cached = getattr(self, "_mic_cache", None)
+        if cached and now - cached[0] < 5.0:
+            return cached[1]
+        try:
+            from myflow.pick_mic import gather_mics
+            mics = [m for m in gather_mics() if m.get("alive")]
+        except Exception:  # noqa: BLE001 — панель не должна падать
+            mics = []
+        self._mic_cache = (now, mics)
+        return mics
+
+    def control_apply(self, action: str, value=None) -> tuple[bool, str]:
+        """Применить изменение с панели управления на лету. (ok, сообщение)."""
+        s = self.settings.get()
+        store = self.settings
+        try:
+            if action == "mic":
+                idx = None if value is None else int(value)
+                self.recorder.set_device(idx)
+                s.asr.input_device = idx
+                store.save()
+                self._mic_cache = None
+                return True, f"микрофон переключён на {idx if idx is not None else 'системный'}"
+
+            if action == "mode":
+                new_mode = "auto" if value else "ptt"
+                if new_mode == s.mode:
+                    return True, f"режим уже {new_mode}"
+                s.mode = new_mode
+                store.save()
+                self._pref_auto = new_mode == "auto"
+                if self._pref_auto:
+                    self.recorder.on_utterance = self._on_utterance
+                    if self.recorder._stream is None:
+                        self.recorder.start_continuous()
+                    print("[myflow] режим: авто (слушаю постоянно)")
+                else:
+                    self.recorder.stop_continuous()
+                    print("[myflow] режим: PTT (F8)")
+                return True, f"режим: {'авто' if self._pref_auto else 'PTT'}"
+
+            if action == "insert":
+                method = "opencode" if value else "clipboard"
+                s.insert_method = method
+                store.save()
+                self.paster = (OpenCodeInjector(s.opencode_auto_enter)
+                               if method == "opencode" else ClipboardPaste())
+                return True, f"вставка: {method}"
+
+            if action == "style":
+                s.default_style = str(value)
+                self._style_override = None
+                store.save()
+                return True, f"стиль: {value}"
+
+            if action == "target":
+                self._toggle_target_lock()
+                return True, "цель вставки переключена"
+
+            if action == "voice_mode":
+                modes = ["auto", "always", "off"]
+                cur = s.voiceprint.mode if s.voiceprint.mode in modes else "auto"
+                nxt = modes[(modes.index(cur) + (1 if float(value) > 0 else -1)) % len(modes)]
+                s.voiceprint.mode = nxt
+                store.save()
+                print(f"[myflow] проверка голоса: режим {nxt}")
+                return True, f"проверка голоса: {nxt}"
+
+            if action == "vad_threshold":
+                applied = self.recorder.set_vad_threshold(float(value))
+                return True, f"порог VAD: {applied:.2f}"
+
+            if action == "module":
+                key = str(value)
+                return self._toggle_module(key)
+        except Exception as exc:  # noqa: BLE001 — панель не должна падать
+            return False, f"не удалось: {exc!r}"
+        return False, f"неизвестное действие: {action}"
+
+    def _toggle_module(self, key: str) -> tuple[bool, str]:
+        """Включить/выключить модуль на лету."""
+        s = self.settings.get()
+        flags = s.flags
+
+        if key == "asr":
+            # Меняем движок распознавания: gigaam <-> whisper.
+            cur = getattr(self.whisper, "backend_name", "whisper")
+            target = "whisper" if cur == "gigaam" else "gigaam"
+            s.asr.backend = target
+            self.settings.save()
+            client = make_asr_client(s.asr)
+            if target == "gigaam" and getattr(client, "backend_name", "") != "gigaam":
+                s.asr.backend = "whisper"
+                self.settings.save()
+                return False, "GigaAM недоступен (нет onnx-asr) — оставил whisper"
+            self.whisper = client
+            warm = getattr(client, "warmup", None)
+            if warm is not None:
+                threading.Thread(target=warm, daemon=True, name="asr-switch-warmup").start()
+            print(f"[myflow] ASR: {self._asr_label()}")
+            return True, f"ASR: {target}"
+
+        if key == "vad":
+            s.auto_stop_by_silence = not s.auto_stop_by_silence
+            self.settings.save()
+            self.recorder.on_auto_stop = (
+                self._on_auto_stop if (not self._pref_auto and s.auto_stop_by_silence) else None)
+            print(f"[myflow] VAD-автостоп: {'вкл' if s.auto_stop_by_silence else 'выкл'}")
+            return True, f"VAD-автостоп: {'вкл' if s.auto_stop_by_silence else 'выкл'}"
+
+        if key == "llm":
+            s.polish.enabled = not s.polish.enabled
+            self.settings.save()
+            print(f"[myflow] полировка: {'вкл' if s.polish.enabled else 'выкл'}")
+            return True, f"полировка: {'вкл' if s.polish.enabled else 'выкл'}"
+
+        if key == "voice":
+            s.voiceprint.enabled = not s.voiceprint.enabled
+            self.settings.save()
+            if self.voice is not None:
+                self.voice.enabled = s.voiceprint.enabled
+            print(f"[myflow] проверка голоса: {'вкл' if s.voiceprint.enabled else 'выкл'}")
+            return True, f"проверка голоса: {'вкл' if s.voiceprint.enabled else 'выкл'}"
+
+        if key == "ax":
+            if self._ax_ready:
+                self._ax_ready = False
+                try:
+                    self.ax.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+                return True, "AX выключен (правки — через буфер)"
+            self._start_ax()
+            return True, ("AX включён" if self._ax_ready else "AX недоступен")
+
+        if key in ("snippets", "learning", "overlay", "keep_audio"):
+            flags[key] = not flags.get(key, True)
+            self.settings.save()
+            if key == "overlay":
+                try:
+                    if flags[key]:
+                        self.overlay.start()
+                    else:
+                        self.overlay.hide()
+                except Exception:  # noqa: BLE001
+                    pass
+            label = {"snippets": "сниппеты", "learning": "обучение",
+                     "overlay": "оверлей", "keep_audio": "запись аудио фраз"}[key]
+            print(f"[myflow] {label}: {'вкл' if flags[key] else 'выкл'}")
+            return True, f"{label}: {'вкл' if flags[key] else 'выкл'}"
+
+        if key == "fastpath":
+            s.polish.skip_wellformed = not getattr(s.polish, "skip_wellformed", True)
+            self.settings.save()
+            state = "вкл" if s.polish.skip_wellformed else "выкл"
+            print(f"[myflow] быстрый путь: {state}")
+            return True, f"быстрый путь: {state}"
+
+        return False, f"неизвестный модуль: {key}"
 
     def stop(self) -> None:
         self._stopping.set()      # гасим фоновые петли (в т.ч. сэмплер фокуса)

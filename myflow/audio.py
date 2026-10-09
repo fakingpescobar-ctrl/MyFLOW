@@ -324,6 +324,24 @@ class DictationRecorder:
             stream.close()
         self._drain_work_queue()
 
+    def set_device(self, device: int | None) -> None:
+        """Сменить микрофон НА ЛЕТУ (без перезапуска приложения).
+
+        Если идёт постоянное прослушивание — переоткрываем поток на новом
+        устройстве; в PTT поток откроется при следующем нажатии.
+        """
+        self._device = device
+        if self._continuous and self._stream is not None:
+            self.stop_continuous()
+            self.start_continuous()
+
+    def set_vad_threshold(self, threshold: float) -> float:
+        """Порог Silero на лету: 0.05..0.95. Возвращает применённое значение."""
+        value = max(0.05, min(0.95, float(threshold)))
+        self.vad.threshold = value
+        self.vad_threshold = value
+        return value
+
     def force_finish(self) -> bool:
         """AUTO: ручной финиш текущей фразы (кнопка). True — фраза была."""
         trigger = False

@@ -19,7 +19,7 @@
 
 Запуск:  .venv\\Scripts\\python -m myflow.tui
 Флаги:   --no-servers (не поднимать серверы), --demo (витрина для скриншота),
-         --hold N (сколько секунд держать демо-кадр).
+         --screen panel|dashboard|settings, --hold N (секунд держать кадр).
 """
 from __future__ import annotations
 
@@ -906,6 +906,140 @@ def render_boot(rows: Sequence[str], w: int, h: int, spin: str, note: str = "") 
     return outer_frame("MyFLOW · запуск", body, w, h)
 
 
+def _module_row(item: dict, selected: bool, width: int, name_w: int = 13) -> str:
+    """Строка модуля: значок состояния, имя, значение, [вкл/выкл].
+
+    ВАЖНО: ширины считаем по ВИДИМОЙ длине (vlen/strip_ansi), иначе ANSI-коды
+    съедают место и значения обрезаются («GigaAM v3 (C»).
+    """
+    if item.get("on") and item.get("ok"):
+        mark, mcolor = "●", C_OK
+    elif item.get("on"):
+        mark, mcolor = "◐", C_WARN
+    else:
+        mark, mcolor = "○", C_DIM
+    toggle_plain = "[вкл]" if item.get("on") else "[выкл]"
+    toggle = (f"{C_OK}{toggle_plain}{RESET}" if item.get("on")
+              else f"{C_DIM}{toggle_plain}{RESET}")
+    prefix = "▸ " if selected else "  "
+    name = f"{item['label']:<{name_w}}"
+    room = max(6, width - 2 - 2 - name_w - len(toggle_plain) - 1)
+    value_txt = item.get("value", "")[:room]
+    pad = max(1, width - 2 - 2 - name_w - len(value_txt) - len(toggle_plain))
+    mark_plain = f"{prefix}{mark} {name}{value_txt}"
+    if selected:
+        return f"{C_INV}{mark_plain}{' ' * pad}{toggle_plain}{RESET}"
+    return (f"{C_DIM if not selected else C_TEXT}{prefix}{RESET}{mcolor}{mark}{RESET} "
+            f"{C_TEXT if selected else C_DIM}{name}{RESET}"
+            f"{C_DIM}{value_txt}{RESET}{' ' * pad}{toggle}")
+
+
+def _value_row(item: dict, selected: bool, width: int, name_w: int = 17) -> str:
+    """Строка управления: подпись и значение со стрелками ◀ ▶."""
+    prefix = "▸ " if selected else "  "
+    room = max(6, width - 2 - 2 - name_w - 6)
+    value = item.get("value", "")[:room]
+    label = f"{item['label']:<{name_w}}"
+    pad = max(1, width - 2 - 2 - name_w - len(value) - 4)
+    plain = f"{prefix}{label}◀ {value}{' ' * pad} ▶"
+    if selected:
+        return f"{C_INV}{plain}{RESET}"
+    arrows = f"{C_KEY}◀{RESET}"
+    arrows_r = f"{C_KEY}▶{RESET}"
+    return (f"{C_DIM}{prefix}{RESET}{C_TEXT}{label}{RESET}"
+            f" {arrows} {C_TEXT}{value}{RESET}{' ' * pad} {arrows_r}")
+
+
+def key_legend(width: int, module_hint: str | None = None) -> list[str]:
+    """Легенда клавиш с подписями (переносится по ширине, ничего не обрезается)."""
+    chips = [("↑↓", "строка"), ("←→", "значение"), ("Enter", "вкл/выкл"),
+             ("PgUp/PgDn", "журнал"), ("End", "живой лог"), ("s", "серверы"),
+             ("r", "мастер"), ("q", "выход"),
+             ("F6", "привязать окно"), ("F7", "стиль"), ("F8", "запись/стоп"),
+             ("F9", "отмена"), ("F10", "вставить отложенное"),
+             ("F5", "пересканировать микрофоны")]
+    lines = button_bar(chips, width)
+    if module_hint:
+        lines.append(f"{C_WARN}подсказка: {module_hint}{RESET}")
+    return lines
+
+
+def render_panel(snap: dict, w: int, h: int, cfg_line: str,
+                 journal: Sequence[str], scroll: int, sel: int,
+                 level: tuple[float, str] | None = None,
+                 status_line: str = "", counters: dict | None = None) -> list[str]:
+    """Единый пульт-центр: движки, управление, живой уровень, журнал, клавиши."""
+    modules = snap.get("modules", [])
+    values = snap.get("values", [])
+    rows = modules + values
+    counters = counters or {}
+
+    body: list[str] = []
+    # Живой уровень в шапке: видно, что микрофон работает, не уходя с экрана.
+    if level is not None:
+        peak, err = level
+        if err:
+            meter = f"{C_ERR}микрофон: нет доступа ({err}){RESET}"
+        else:
+            ok = peak >= 0.01
+            meter = (f"{C_DIM}уровень {RESET}"
+                     f"{C_OK if ok else C_WARN}{LevelMeter.bar(peak, width=14)}{RESET}"
+                     f"{C_DIM} {peak:.4f}{RESET}")
+    else:
+        meter = ""
+    body.append(f"  {cfg_line}")
+    body.append(f"  {meter}   {C_DIM}{status_line}{RESET}")
+    body.append("")
+
+    sel_key = rows[sel].get("key") if 0 <= sel < len(rows) else None
+    name_w_mod = max([len(m["label"]) for m in modules] or [12]) + 1
+    name_w_val = max([len(v["label"]) for v in values] or [16]) + 1
+
+    two_col = w >= 108
+    if two_col:
+        col = (w - 14) // 2
+        left = [_module_row(m, i == sel, col - 4, name_w_mod)
+                for i, m in enumerate(modules)]
+        right = [_value_row(v, (len(modules) + i) == sel, col - 4, name_w_val)
+                 for i, v in enumerate(values)]
+        height = max(len(left), len(right))
+        left += [""] * (height - len(left))
+        right += [""] * (height - len(right))
+        lblock = block("Движки и модули", left, col)
+        rblock = block("Управление (меняется на лету)", right, col)
+        for i in range(height + 2):
+            body.append(" " + (lblock[i] if i < len(lblock) else " " * col) + " " +
+                        (rblock[i] if i < len(rblock) else ""))
+    else:
+        body += [" " + x for x in block(
+            "Движки и модули", [_module_row(m, i == sel, w - 10, name_w_mod)
+                                for i, m in enumerate(modules)], w - 6)]
+        body.append("")
+        body += [" " + x for x in block(
+            "Управление (меняется на лету)",
+            [_value_row(v, (len(modules) + i) == sel, w - 10, name_w_val)
+             for i, v in enumerate(values)], w - 6)]
+
+    legend = key_legend(w - 6,
+                        rows[sel].get("hint") if 0 <= sel < len(rows) else None)
+    # Журнал забирает остаток высоты; окно строк считаем по отступу прокрутки
+    # (в рендере, а не в вызывающем коде — только тут известна реальная высота).
+    space = h - len(body) - len(legend) - 4 - 2      # 2 рамки кадра, 2 рамки блока
+    if space >= 3 and journal:
+        end = max(space, len(journal) - max(0, scroll))
+        start = max(0, end - space)
+        shown = list(journal[start:end])
+        if scroll > 0:
+            shown = [f"{C_WARN}↑ прокрутка: {scroll} строк назад "
+                     f"(End — в конец){RESET}"] + shown[1:]
+        body.append("")
+        body += ["  " + x for x in block(
+            "Журнал (PgUp/PgDn — листать)", [C_DIM + r + RESET for r in shown], w - 6)]
+    body.append("")
+    body += ["  " + line for line in legend]
+    return outer_frame("MyFLOW · пульт-центр", body, w, h)
+
+
 def render_dashboard(state: TuiState, w: int, h: int, cfg_line: str) -> list[str]:
     status_text, status_ansi, log, servers = state.snapshot()
     body: list[str] = ["", f"  {cfg_line}", ""]
@@ -1014,6 +1148,7 @@ class TuiApp:
         self._gfx = None
         self._overlay = None
         self._demo = False
+        self._force_settings = False   # --settings: показать мастер даже при готовом конфиге
 
     # ---- инфраструктура ----
     def _install_sink(self) -> None:
@@ -1060,6 +1195,8 @@ class TuiApp:
                     return "esc"
                 if ch == b"\r":
                     return "enter"
+                if ch == b" ":
+                    return "space"
                 if ch == b"\x03":
                     return "ctrl-c"
                 try:
@@ -1173,6 +1310,23 @@ class TuiApp:
         return False
 
     # ---- фаза 3: пульт ----
+    def _panel_header(self) -> str:
+        """Короткая шапка панели: микрофон/вставка/цель есть отдельными строками."""
+        s = self.store.get()
+        mode = "авто (слушает)" if s.mode == "auto" else "PTT (F8)"
+        target = "активное окно"
+        app = getattr(self, "app", None)
+        if app is not None:
+            locked = getattr(app, "_target_locked", None)
+            cur = getattr(app, "_target", None)
+            if locked is not None:
+                target = f"⚲ {locked.label[:24]}"
+            elif cur is not None:
+                target = cur.label[:24]
+        return (f"{C_TEXT}режим:{RESET} {C_ACCENT}{mode}{RESET}"
+                f"   {C_TEXT}стиль:{RESET} {C_ACCENT}{s.default_style}{RESET}"
+                f"   {C_TEXT}цель:{RESET} {C_ACCENT}{target}{RESET}")
+
     def _config_line(self) -> str:
         s = self.store.get()
         mic = s.asr.input_device
@@ -1228,11 +1382,31 @@ class TuiApp:
             pass
 
         self._start_health_poller()
+        # Панель-центр: выделенная строка + живой индикатор уровня текущего микрофона.
+        sel = 0
+        meter = LevelMeter()
         last_key = None
         try:
             while not self._stop.is_set():
                 w, h = self.console.size()
-                self.console.draw(render_dashboard(self.state, w, h, self._config_line()))
+                snap = self._control_snapshot()
+                rows = snap.get("modules", []) + snap.get("values", [])
+                sel = max(0, min(sel, max(0, len(rows) - 1)))
+                meter.switch(self.store.get().asr.input_device)
+                with self.state.lock:
+                    log_lines = list(self.state.log)
+                    offset = self.state.scroll
+                journal = log_lines or [f"{C_DIM}пока пусто — нажми F8 и говори{RESET}"]
+                status_line, status_ansi, _, _ = self.state.snapshot()
+                counters = snap.get("counters", {})
+                self.console.draw(render_panel(
+                    snap, w, h, self._panel_header(), journal, offset, sel,
+                    level=(meter.peak(), meter.error),
+                    status_line=(f"{status_ansi}{norm_text(status_line)}{RESET}"
+                                 f"  фраз: {counters.get('phrases', 0)}"
+                                 f" · отложено: {counters.get('pending', 0)}"
+                                 f" · в очереди: {counters.get('queue', 0)}"),
+                    counters=counters))
                 last_key = self._read_key(0.12)
                 if last_key in ("q", "ctrl-c"):
                     return "quit"
@@ -1246,15 +1420,102 @@ class TuiApp:
                         self.state.scroll = 0
                 elif last_key == "o":
                     self._toggle_gfx()
-                elif last_key in ("pageup", "pagedown", "home", "end", "up", "down"):
+                elif last_key in ("pageup", "pagedown", "home", "end"):
                     self._scroll_journal(last_key, h)
+                elif last_key in ("up", "down"):
+                    sel = (sel + (1 if last_key == "down" else -1)) % max(1, len(rows))
+                elif last_key in ("left", "right", "enter", "space"):
+                    sel = self._panel_apply(rows, sel, last_key)
         finally:
+            meter.stop()
             try:
                 self.app.stop()
             except Exception:  # noqa: BLE001
                 pass
             self.app = None
         return "quit"
+
+    def _control_snapshot(self) -> dict:
+        """Живое состояние от приложения; пустой снимок, если оно ещё не готово."""
+        app = self.app
+        if app is None or not hasattr(app, "control_snapshot"):
+            return {"modules": [], "values": [], "counters": {}}
+        try:
+            return app.control_snapshot()
+        except Exception as exc:  # noqa: BLE001 — панель не должна падать
+            self.state.add_log(f"панель: {exc!r}")
+            return {"modules": [], "values": [], "counters": {}}
+
+    def _panel_apply(self, rows: list[dict], sel: int, key: str) -> int:
+        """Применить нажатие к выделенной строке панели. Возвращает новый выбор."""
+        if not rows:
+            return sel
+        item = rows[sel]
+        key_name = item.get("key", "")
+        app = self.app
+        if app is None:
+            return sel
+        is_value_row = any(item is v for v in (app.control_snapshot().get("values") or []))
+        is_module = not is_value_row
+
+        try:
+            if is_module and key in ("enter", "space", "left", "right"):
+                action, value = "module", key_name
+                if key_name == "vad" and key == "right":
+                    action, value = "vad_threshold", self._vad_step(+0.05)
+                elif key_name == "vad" and key == "left":
+                    action, value = "vad_threshold", self._vad_step(-0.05)
+                elif key_name == "voice" and key in ("left", "right"):
+                    action, value = "voice_mode", (1 if key == "right" else -1)
+                ok, msg = app.control_apply(action, value)
+                self.state.add_log(f"{'✓' if ok else '✗'} {msg}")
+
+            elif is_value_row:
+                if key_name == "mic":
+                    self._cycle_mic(1 if key in ("right", "enter", "space") else -1)
+                elif key_name == "mode":
+                    ok, msg = app.control_apply("mode", not self.store.get().mode == "auto")
+                    self.state.add_log(f"{'✓' if ok else '✗'} {msg}")
+                elif key_name == "insert":
+                    ok, msg = app.control_apply(
+                        "insert", self.store.get().insert_method != "opencode")
+                    self.state.add_log(f"{'✓' if ok else '✗'} {msg}")
+                elif key_name == "style":
+                    self._cycle_style_live(1 if key == "right" else -1)
+                elif key_name == "target":
+                    ok, msg = app.control_apply("target")
+                    self.state.add_log(f"{'✓' if ok else '✗'} {msg}")
+        except Exception as exc:  # noqa: BLE001
+            self.state.add_log(f"ошибка панели: {exc!r}")
+        return sel
+
+    def _vad_step(self, delta: float) -> float:
+        cur = float(getattr(self.app.recorder, "vad_threshold", 0.30))
+        return round(max(0.10, min(0.60, cur + delta)), 2)
+
+    def _cycle_mic(self, direction: int) -> None:
+        """Переключить микрофон на лету по списку живых."""
+        try:
+            choices = self.app._mic_choices()
+        except Exception:  # noqa: BLE001
+            choices = []
+        if not choices:
+            self.state.add_log("живых микрофонов не найдено (F5 — пересканировать)")
+            return
+        cur = self.store.get().asr.input_device
+        idxs = [None] + [m["idx"] for m in choices]
+        pos = idxs.index(cur) if cur in idxs else 0
+        new = idxs[(pos + direction) % len(idxs)]
+        ok, msg = self.app.control_apply("mic", new)
+        self.state.add_log(f"{'✓' if ok else '✗'} {msg}")
+
+    def _cycle_style_live(self, direction: int) -> None:
+        styles = [s for s in ("plain", "casual", "formal", "terminal", "summarize")]
+        cur = self.store.get().default_style
+        pos = styles.index(cur) if cur in styles else 0
+        new = styles[(pos + direction) % len(styles)]
+        ok, msg = self.app.control_apply("style", new)
+        self.state.add_log(f"{'✓' if ok else '✗'} {msg}")
 
     def _scroll_journal(self, key: str, height: int) -> None:
         """Листание журнала в пульте (PgUp/PgDn/Home/End/↑/↓).
@@ -1327,7 +1588,12 @@ class TuiApp:
             self._boot_phase()
             if self._stop.is_set():
                 return 0
-            if not self._settings_phase():
+            # Мастер настройки нужен только на первом запуске: дальше всё
+            # меняется прямо на панели (микрофон/режим/вставка/стиль).
+            # Вернуться в мастер можно клавишей r.
+            from myflow.config import SETTINGS_FILE
+            first_run = not Path(SETTINGS_FILE).exists()
+            if (first_run or self._force_settings) and not self._settings_phase():
                 return 0
             while True:
                 self.console.clear()
@@ -1365,7 +1631,44 @@ class TuiApp:
 
 
 # ----------------------------------------------------------------- демо
-def demo_app(hold: float, screen: str = "dashboard") -> int:
+def _demo_snapshot() -> dict:
+    """Пример снимка для витрины панели (реальные данные — из приложения)."""
+    return {"modules": [
+        {"key": "asr", "label": "ASR", "value": "GigaAM v3 e2e (CPU)", "on": True,
+         "ok": True, "note": "", "hint": "Enter — сменить движок (GigaAM ↔ whisper)"},
+        {"key": "vad", "label": "VAD", "value": "Silero v6 · 0.30", "on": True, "ok": True,
+         "note": "", "hint": "←→ порог, Enter — автостоп по паузе"},
+        {"key": "llm", "label": "LLM", "value": "qwen3-4b · :8082", "on": True, "ok": True,
+         "note": "", "hint": "Enter — включить/выключить полировку"},
+        {"key": "voice", "label": "Голос", "value": "31 фраз · auto · 0.25", "on": True,
+         "ok": True, "note": "", "hint": "Enter вкл/выкл, ←→ режим (auto/always/off)"},
+        {"key": "ax", "label": "AX", "value": "UI Automation", "on": True, "ok": True,
+         "note": "", "hint": "Enter — включить/выключить UI Automation"},
+        {"key": "snippets", "label": "Сниппеты", "value": "фразы → готовый текст",
+         "on": True, "ok": True, "note": "", "hint": "Enter — включить/выключить"},
+        {"key": "fastpath", "label": "Быстрый путь", "value": "не звать LLM, если готово",
+         "on": True, "ok": True, "note": "", "hint": "Enter — включить/выключить"},
+        {"key": "learning", "label": "Обучение", "value": "словарь из правок", "on": True,
+         "ok": True, "note": "", "hint": "Enter — включить/выключить"},
+        {"key": "overlay", "label": "Оверлей", "value": "плашка статуса", "on": False,
+         "ok": True, "note": "", "hint": "Enter — включить/выключить"},
+        {"key": "keep_audio", "label": "Аудио фраз", "value": "последние 50", "on": True,
+         "ok": True, "note": "", "hint": "Enter — включить/выключить"},
+    ], "values": [
+        {"key": "mic", "label": "Микрофон", "value": "Ardor Gaming Vox [DS]",
+         "hint": "←→ сменить микрофон на лету (F5 — пересканировать)"},
+        {"key": "mode", "label": "Режим диктовки", "value": "авто (слушает)",
+         "hint": "←→ авто ↔ PTT"},
+        {"key": "insert", "label": "Куда вставлять", "value": "активное окно (Ctrl+V)",
+         "hint": "←→ сменить способ вставки"},
+        {"key": "style", "label": "Стиль текста", "value": "plain",
+         "hint": "←→ стиль по умолчанию (F7 — на лету)"},
+        {"key": "target", "label": "Цель вставки", "value": "⚲ Анализ и улучшение проекта",
+         "hint": "Enter — закрепить/снять окно (F6)"},
+    ], "counters": {"phrases": 12, "pending": 0, "queue": 0}}
+
+
+def demo_app(hold: float, screen: str = "panel") -> int:
     """Витрина: рисует пульт или экран настроек с примерными данными."""
     tui = TuiApp(no_servers=True)
     tui._demo = True
@@ -1403,8 +1706,15 @@ def demo_app(hold: float, screen: str = "dashboard") -> int:
             if screen == "settings":
                 tui.console.draw(render_settings(settings, tui.store, w, h,
                                                  level=(0.045, "")))
-            else:
+            elif screen == "dashboard":
                 tui.console.draw(render_dashboard(st, w, h, tui._config_line()))
+            else:
+                # Витрина единого пульта-центра: движки, управление, уровень, журнал.
+                tui.console.draw(render_panel(
+                    _demo_snapshot(), w, h, tui._panel_header(),
+                    [strip_ansi(x) for x in st.log],
+                    0, 3, level=(0.1027, ""),
+                    status_line="✓ вставлено  фраз: 12 · отложено: 0 · в очереди: 0"))
             time.sleep(0.2)
     finally:
         tui.console.clear()
@@ -1416,8 +1726,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="myflow.tui", description="MyFLOW: один TUI вместо трёх окон")
     ap.add_argument("--no-servers", action="store_true",
                     help="не поднимать whisper/llama (уже запущены вручную)")
+    ap.add_argument("--settings", action="store_true",
+                    help="показать мастер настройки, даже если конфиг уже есть")
     ap.add_argument("--demo", action="store_true", help="показать экран с примерными данными")
-    ap.add_argument("--screen", choices=("dashboard", "settings"), default="dashboard",
+    ap.add_argument("--screen", choices=("panel", "dashboard", "settings"),
+                    default="panel",
                     help="какой экран показывать в демо")
     ap.add_argument("--hold", type=float, default=8.0, help="сколько секунд держать демо-кадр")
     args = ap.parse_args(argv)
@@ -1429,7 +1742,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("[MyFLOW] нет интерактивной консоли: TUI не запустить. "
               "Запусти через start-myflow.bat или python -m myflow.main.")
         return 3
-    return TuiApp(no_servers=args.no_servers).run()
+    tui = TuiApp(no_servers=args.no_servers)
+    tui._force_settings = bool(args.settings)
+    return tui.run()
 
 
 if __name__ == "__main__":
