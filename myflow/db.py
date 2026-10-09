@@ -38,9 +38,33 @@ class DictationRecord:
 class Database:
     def __init__(self, path: Path = DB_FILE) -> None:
         self._lock = threading.Lock()
-        self._conn = sqlite3.connect(str(path), check_same_thread=False)
+        self._conn = sqlite3.connect(str(path), check_same_thread=False, timeout=10.0)
         self._conn.row_factory = sqlite3.Row
+        # WAL + busy_timeout: у watcher обучения своё соединение, без этого
+        # ловим "database is locked" на каждой правке.
+        try:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn.execute("PRAGMA busy_timeout=5000")
+        except sqlite3.DatabaseError:
+            pass  # :memory: и экзотика — не критично
         self._init_schema()
+
+    # Каноническая схема словаря. app_mask = '' значит «глобальная пара»:
+    # NULL в UNIQUE-индексе SQLite считает РАЗНЫМИ значениями, из-за чего
+    # ON CONFLICT не срабатывал и глобальные пары дублировались.
+    _DICT_DDL = """
+        CREATE TABLE IF NOT EXISTS dictionary (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_word TEXT NOT NULL COLLATE NOCASE,
+            target_word TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'manual',   -- manual | learned
+            app_mask TEXT NOT NULL DEFAULT '',       -- '' = глобальная пара
+            hit_count INTEGER NOT NULL DEFAULT 1,
+            last_used TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(source_word, app_mask)
+        );
+    """
 
     def _init_schema(self) -> None:
         with self._lock, self._conn:
@@ -61,44 +85,53 @@ class Database:
                     edit_distance INTEGER,
                     corrections_json TEXT
                 );
-                CREATE TABLE IF NOT EXISTS dictionary (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    source_word TEXT NOT NULL COLLATE NOCASE,
-                    target_word TEXT NOT NULL,
-                    source TEXT NOT NULL DEFAULT 'manual',   -- manual | learned
-                    app_mask TEXT,                            -- NULL = глобальный
-                    hit_count INTEGER NOT NULL DEFAULT 1,
-                    last_used TEXT NOT NULL DEFAULT (datetime('now')),
-                    UNIQUE(source_word, app_mask)
-                );
                 CREATE TABLE IF NOT EXISTS settings_kv (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
                 """
+                + self._DICT_DDL
             )
-            # Миграция старой схемы (без app_mask / с UNIQUE(source_word)):
-            # пересоздаём таблицу с парным уникальным ключом, сохраняя данные.
+            # Миграция словаря к канонической схеме:
+            #  - старая таблица без app_mask;
+            #  - app_mask nullable (NULL-дубли и неработающий ON CONFLICT);
+            #  - уже накопленные NULL-строки.
             cols = {r[1] for r in self._conn.execute("PRAGMA table_info(dictionary)")}
-            if "app_mask" not in cols:
+            has_app_mask = "app_mask" in cols
+            app_mask_notnull = any(
+                r[1] == "app_mask" and r[3] for r in self._conn.execute("PRAGMA table_info(dictionary)")
+            )
+            has_nulls = False
+            if has_app_mask:
+                has_nulls = self._conn.execute(
+                    "SELECT 1 FROM dictionary WHERE app_mask IS NULL LIMIT 1"
+                ).fetchone() is not None
+            if (not has_app_mask) or (not app_mask_notnull) or has_nulls:
+                mask_expr = "COALESCE(app_mask, '')" if has_app_mask else "''"
                 self._conn.executescript(
-                    """
-                    CREATE TABLE dictionary_new (
+                    f"""
+                    CREATE TABLE dictionary_mig (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         source_word TEXT NOT NULL COLLATE NOCASE,
                         target_word TEXT NOT NULL,
                         source TEXT NOT NULL DEFAULT 'manual',
-                        app_mask TEXT,
+                        app_mask TEXT NOT NULL DEFAULT '',
                         hit_count INTEGER NOT NULL DEFAULT 1,
                         last_used TEXT NOT NULL DEFAULT (datetime('now')),
                         UNIQUE(source_word, app_mask)
                     );
-                    INSERT INTO dictionary_new
-                        (source_word, target_word, source, hit_count, last_used)
-                        SELECT source_word, target_word, source, hit_count, last_used
-                        FROM dictionary;
+                    INSERT INTO dictionary_mig
+                        (source_word, target_word, source, app_mask, hit_count, last_used)
+                    SELECT source_word,
+                           target_word,
+                           CASE WHEN SUM(source = 'manual') > 0 THEN 'manual' ELSE 'learned' END,
+                           {mask_expr},
+                           SUM(hit_count),
+                           MAX(last_used)
+                      FROM dictionary
+                     GROUP BY LOWER(source_word), {mask_expr};
                     DROP TABLE dictionary;
-                    ALTER TABLE dictionary_new RENAME TO dictionary;
+                    ALTER TABLE dictionary_mig RENAME TO dictionary;
                     """
                 )
 
@@ -133,9 +166,10 @@ class Database:
                  source: str = "manual", app_mask: str | None = None) -> None:
         """Добавить пару слово -> замена. source: manual | learned.
 
-        app_mask=None — глобальный (все окна); иначе пара действует только
-        в окнах, чей заголовок содержит маску (lower).
+        app_mask=None/'' — глобальная пара (все окна); иначе пара действует
+        только в окнах, чей заголовок содержит маску (lower).
         """
+        mask = (app_mask or "").strip().lower()
         with self._lock, self._conn:
             self._conn.execute(
                 """INSERT INTO dictionary (source_word, target_word, source, app_mask)
@@ -145,36 +179,37 @@ class Database:
                      source=excluded.source,
                      hit_count=hit_count+1,
                      last_used=datetime('now')""",
-                (source_word.strip().lower(), target_word.strip(), source,
-                 (app_mask or "").strip().lower() or None),
+                (source_word.strip().lower(), target_word.strip(), source, mask),
             )
 
     def bump_word(self, source_word: str, app_mask: str | None = None) -> None:
         with self._lock, self._conn:
             self._conn.execute(
                 """UPDATE dictionary SET hit_count=hit_count+1, last_used=datetime('now')
-                   WHERE source_word=? AND app_mask IS ?""",
-                (source_word, None if not app_mask else app_mask.lower()),
+                   WHERE source_word=? AND app_mask=?""",
+                (source_word.strip().lower(), (app_mask or "").strip().lower()),
             )
 
     def get_dictionary(self, app_title: str | None = None) -> list[dict[str, Any]]:
         """Словарь для диктовки: глобальный + per-app для активного окна.
 
-        app_title — заголовок окна (lower-масок достаточно); None — только
-        глобальные пары. Per-app пары идут после глобальных (LLM применит
-        последнюю вхождение при дубликатах — специфичное перекрывает).
+        Сортировка по частоте: в промпт попадают самые полезные пары
+        (раньше [:50] резало произвольные строки).
         """
         with self._lock, self._conn:
             if app_title:
                 rows = self._conn.execute(
                     """SELECT source_word, target_word FROM dictionary
-                       WHERE app_mask IS NULL
-                          OR (? LIKE '%' || app_mask || '%')""",
+                       WHERE app_mask = ''
+                          OR (? LIKE '%' || app_mask || '%')
+                       ORDER BY hit_count DESC, last_used DESC""",
                     (app_title.lower(),),
                 ).fetchall()
             else:
                 rows = self._conn.execute(
-                    "SELECT source_word, target_word FROM dictionary WHERE app_mask IS NULL"
+                    """SELECT source_word, target_word FROM dictionary
+                       WHERE app_mask = ''
+                       ORDER BY hit_count DESC, last_used DESC"""
                 ).fetchall()
             return [dict(r) for r in rows]
 
@@ -196,6 +231,14 @@ class Database:
             )
 
     # ---- Statistics (для самодиагностики) ----
+
+    def close(self) -> None:
+        """Закрыть соединение (watcher обучения держит своё)."""
+        with self._lock:
+            try:
+                self._conn.close()
+            except sqlite3.Error:
+                pass
 
     def get_polished_text(self, history_id: int) -> str | None:
         """Текст диктовки, от которого юзер правил (для обучения)."""

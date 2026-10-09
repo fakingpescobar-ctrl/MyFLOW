@@ -193,6 +193,13 @@ class OpenCodeInjector:
     def __init__(self, auto_enter: bool = True) -> None:
         self.auto_enter = auto_enter
 
+    # Консольный инжект буфер обмена не использует: авто-обучение из правок
+    # в этом режиме невозможно (и main его не запускает).
+    can_read = False
+
+    def read(self) -> str:
+        return ""
+
     def paste(self, text: str) -> bool:
         """Отправить текст в чат OpenCode. True — ушло, False — не вышло."""
         if not text:

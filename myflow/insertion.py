@@ -74,19 +74,39 @@ class ClipboardPaste:
         if not text:
             return
         # Сохранить текущий буфер, чтобы не убить чужой контент пользователя.
+        saved = self._read_text()
         try:
-            saved = pyperclip.paste()
-        except pyperclip.PyperclipException:
-            saved = None
-        try:
-            pyperclip.copy(text)
-            time.sleep(0.05)  # дать буферу обмена устаканиться (cliboard race)
+            self._copy(text)
+            time.sleep(0.05)  # дать буферу обмена устаканиться (clipboard race)
             self._send_ctrl_v()
         finally:
-            # Вернуть буфер спустя паузу, чтобы вставка успела пройти.
-            if saved is not None:
+            # ВАЖНО: '' значит «в буфере НЕ текст» (картинка/файлы). Копирование
+            # '' вызывает EmptyClipboard и БЕЗВОЗВРАТНО уничтожает CF_HDROP/
+            # CF_BITMAP — поэтому пустую строку не восстанавливаем вообще.
+            if saved:
                 time.sleep(0.15)
-                pyperclip.copy(saved)
+                self._copy(saved, best_effort=True)
+
+    @staticmethod
+    def _read_text() -> str | None:
+        try:
+            return pyperclip.paste()
+        except pyperclip.PyperclipException:
+            return None
+
+    @staticmethod
+    def _copy(text: str, best_effort: bool = False) -> None:
+        """Копирование с ретраями: буфер бывает занят чужим процессом."""
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                pyperclip.copy(text)
+                return
+            except pyperclip.PyperclipException as exc:
+                last_exc = exc
+                time.sleep(0.05 * (attempt + 1))
+        if last_exc is not None and not best_effort:
+            raise last_exc
 
     def check_clipboard(self, expected: str) -> bool:
         """True, если в буфере сейчас всё ещё наш вставленный текст.
@@ -97,6 +117,19 @@ class ClipboardPaste:
             return pyperclip.paste() == expected
         except pyperclip.PyperclipException:
             return False
+
+    can_read = True
+
+    def read(self) -> str:
+        """Текущий ТЕКСТ буфера обмена (для авто-обучения). Буфер не меняет.
+
+        Возвращает '' для картинок/файлов и при недоступном буфере —
+        вызывающий код не должен трактовать '' как «пустой текст вставили».
+        """
+        try:
+            return pyperclip.paste() or ""
+        except pyperclip.PyperclipException:
+            return ""
 
     @staticmethod
     def _send_ctrl_v() -> None:

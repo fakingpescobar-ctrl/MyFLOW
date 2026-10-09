@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import threading
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields
 from pathlib import Path
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -28,7 +28,9 @@ class AsrConfig:
     language: str = "auto"          # auto | ru | en
     translate_to_english: bool = False
     temperature: float = 0.0
-    timeout_seconds: float = 60.0
+    timeout_seconds: float = 60.0   # общий (legacy)
+    timeout_connect: float = 3.0    # отдельный connect-таймаут
+    timeout_read: float = 45.0      # отдельный read-таймаут (инференс)
     input_device: int | None = None    # индекс sounddevice для записи; None = системный
     initial_prompt: str = ""           # подсказка для whisper (типичные фразы диктовки)
 
@@ -39,8 +41,10 @@ class PolishConfig:
     url: str = "http://127.0.0.1:8082/v1"   # qwen3-4b форматтер (быстрый)
     model: str = "gemma"
     enabled: bool = True            # фиче-флаг polish-provider
-    max_tokens: int = 512
+    max_tokens: int = 512           # верхняя граница ответа (реально — по бюджету)
     temperature: float = 0.2
+    top_p: float = 0.9
+    repeat_penalty: float = 1.05     # против дегенеративных повторов
     timeout_seconds: float = 60.0
 
 
@@ -51,6 +55,7 @@ class HotkeyConfig:
     # https://pynput.readthedocs.io/en/latest/keyboard.html#pynput.keyboard.Key
     cancel_key: str = "f9"          # отмена текущей диктовки
     style_cycle_key: str = "f7"     # переключение стиля (цикл plain→casual→formal→terminal→summarize)
+    suppress: bool = False          # True: не отдавать эти клавиши активному окну
 
 
 @dataclass
@@ -109,12 +114,25 @@ class SettingsStore:
                 raise ValueError("не объект")
             data = Settings()
             # Вложенные dataclass материализуем явно (Settings(**raw) с dict не работает).
+            # Неизвестные ключи внутри секции игнорируем (совместимость вперёд/назад),
+            # отсутствующие — берём из дефолтов dataclass.
             for name, cls in (("asr", AsrConfig), ("polish", PolishConfig), ("hotkey", HotkeyConfig)):
-                if name in raw:
-                    setattr(data, name, cls(**raw[name]))
+                section = raw.get(name)
+                if isinstance(section, dict):
+                    known = {f.name for f in fields(cls)}
+                    setattr(data, name, cls(**{k: v for k, v in section.items() if k in known}))
             for name, value in raw.items():
-                if name not in ("asr", "polish", "hotkey"):
-                    setattr(data, name, value)
+                if name in ("asr", "polish", "hotkey"):
+                    continue
+                if name == "flags":
+                    # MERGE с дефолтами, а не замена: иначе отсутствие нового
+                    # флага в старом settings.json = KeyError на каждой фразе.
+                    if isinstance(value, dict):
+                        data.flags.update(
+                            {k: bool(v) for k, v in value.items() if k in data.flags}
+                        )
+                    continue
+                setattr(data, name, value)
             return data
         except (json.JSONDecodeError, TypeError, ValueError):
             # Fail loud: не молча подставляем дефолты, а сообщаем о битой конфе.

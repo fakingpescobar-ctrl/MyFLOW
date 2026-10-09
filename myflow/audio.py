@@ -107,6 +107,8 @@ class DictationRecorder:
         self._phrase_peak = 0.0
         self._phrase_speech_ok_chunks = 0
         self._max_samples = MAX_DICTATION_SECONDS * sample_rate
+        self._hard_limit_fired = False
+        self._status_count = 0
         self._utter_ready = False
 
     # ---------- общий открытие/закрытие стрима ----------
@@ -162,6 +164,7 @@ class DictationRecorder:
         self._max_amp = 0.0
         self._silent_run = 0
         self._auto_stop_fired = False
+        self._hard_limit_fired = False
         self._prev_interval_samples = 0
         self.vad.reset()
 
@@ -170,15 +173,25 @@ class DictationRecorder:
         peak = float(np.max(np.abs(mono))) if len(mono) else 0.0
         is_speech = self.vad.process(mono) >= self.vad_threshold
         trigger = False
+        limit_hit = False
         interval = False
         with self._lock:
             self._total_samples += frames
-            self._buffer.append(_float_to_int16(mono))
-            self._max_amp = max(self._max_amp, peak)
+            if self._hard_limit_fired:
+                # Лимит диктовки уже достигнут: время считаем, аудио не копим
+                # (раньше при громком фоне буфер рос без границы — 32 КБ/с).
+                pass
+            else:
+                self._buffer.append(_float_to_int16(mono))
+                self._max_amp = max(self._max_amp, peak)
+                if self._total_samples >= self._max_samples:
+                    self._hard_limit_fired = True
+                    limit_hit = True
             # Live-превью: каждый интервал отдаём хвост записи для драфт-ASR.
             # Не на самом старте (мы — миним. период как у авто-стопа) и только
             # если уже была речь — иначе превью будет крутиться на тишине.
-            if (self.on_interval is not None
+            if (not self._hard_limit_fired
+                    and self.on_interval is not None
                     and self._max_amp >= self.silence_amplitude
                     and self._total_samples >= self._min_auto_stop_samples
                     and self._total_samples - self._prev_interval_samples
@@ -192,7 +205,8 @@ class DictationRecorder:
                 self._silent_run = 0
             else:
                 self._silent_run += 1
-            if (not self._auto_stop_fired
+            if (not self._hard_limit_fired
+                    and not self._auto_stop_fired
                     and self._max_amp >= self.silence_amplitude
                     and self._silent_run >= self._silence_chunks
                     and self._total_samples >= self._min_auto_stop_samples):
@@ -200,6 +214,11 @@ class DictationRecorder:
                 trigger = True
         if interval:
             self._emit_interval()
+        if limit_hit:
+            print(f"[audio] лимит диктовки {MAX_DICTATION_SECONDS}с — завершаю запись")
+            if self.on_auto_stop:
+                threading.Thread(target=self.on_auto_stop, name="hard-limit",
+                                 daemon=True).start()
         if trigger and self.on_auto_stop:
             threading.Thread(target=self.on_auto_stop, name="auto-stop",
                              daemon=True).start()
@@ -274,6 +293,7 @@ class DictationRecorder:
             self._phrase = []
             self._phrase_peak = 0.0
             self._phrase_speech_ok_chunks = 0
+            self._prev_interval_samples_in_phrase = 0
             self._utter_ready = False
 
     def _on_audio_continuous(self, indata: np.ndarray) -> None:
@@ -374,6 +394,9 @@ class DictationRecorder:
             self._phrase = []
             self._phrase_peak = 0.0
             self._phrase_speech_ok_chunks = 0
+            # Сброс счётчика превью на границе фразы: без него live-превью
+            # следующей фразы включалось только после длины предыдущей.
+            self._prev_interval_samples_in_phrase = 0
         # Отсев мусора: Silero-фраза без достаточной речи/длины/громкости — не фраза.
         if (speech_ms < self._min_speech_ms
                 or duration_ms < self._min_utterance_ms
@@ -388,7 +411,11 @@ class DictationRecorder:
 
     def _on_audio(self, indata: np.ndarray, frames: int, time_info, status) -> None:
         if status:
-            return  # не блокируем поток из-за underflow
+            # НЕ выбрасываем блок: overflow/underflow = дыра в речи, раньше
+            # она исчезала бесследно. Считаем и изредка сообщаем.
+            self._status_count += 1
+            if self._status_count <= 3 or self._status_count % 500 == 0:
+                print(f"[audio] статус потока: {status} (всего {self._status_count})")
         if self._continuous:
             self._on_audio_continuous(indata)
         else:

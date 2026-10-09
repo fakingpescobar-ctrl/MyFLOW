@@ -163,17 +163,24 @@ def _menu(title: str, items: list[tuple[str, object]], current_idx: int = 0,
 
 
 _DEFAULT_SYS = "__default__"  # sentinel пункта «системный по умолчанию»
+_CANCEL = object()           # отмена запуска; НЕ путать с None (системный!)
 
 
 # ---------- выбор микрофона ----------
 
-def _pick_mic_menu(store: SettingsStore) -> int | None:
-    """Меню микрофона. Возвращает выбранный idx (int|None=системный) или None=отмена."""
+def _pick_mic_menu(store: SettingsStore) -> int | None | object:
+    """Меню микрофона.
+
+    Возвращает: int (индекс устройства) | None (системный по умолчанию)
+    | _CANCEL (отмена пользователем / живых устройств нет).
+    Раньше отмена и «системный по умолчанию» обе возвращали None — выбор
+    системного микрофона приводил к «запуск отменён».
+    """
     print("== MyFLOW: проверка доступности микрофонов ==")
     mics = _gather()
     if not mics:
         print("[MyFLOW] реальных микрофонов не найдено! Проверь подключение (блютуз/USB).")
-        return None
+        return _CANCEL
 
     current = store.get().asr.input_device
     sys_default_ok = _probe(None)
@@ -201,7 +208,7 @@ def _pick_mic_menu(store: SettingsStore) -> int | None:
 
     if not live and not sys_default_ok:
         print("  Все микрофоны недоступны (выключены/отключены?). Проверь подключение.")
-        return None
+        return _CANCEL
 
     # Текущий выбираем по умолчанию, иначе первый живой.
     cur_idx = 0
@@ -221,7 +228,7 @@ def _pick_mic_menu(store: SettingsStore) -> int | None:
         hint="↑/↓ — выбор, Enter — принять, Esc — отмена запуска",
     )
     if picked is None:
-        return None
+        return _CANCEL
     if picked == _DEFAULT_SYS:
         return None  # системный по умолчанию: input_device = None
     return picked
@@ -273,7 +280,7 @@ def pick_mic() -> int:
     store = SettingsStore()
     print()
     device = _pick_mic_menu(store)
-    if device is None:
+    if device is _CANCEL:
         print("[MyFLOW] запуск отменён.")
         return 3
     print()
@@ -293,7 +300,8 @@ def pick_mic() -> int:
     store.save()
     mode_label = "авто (постоянно слушает)" if mode == "auto" else "по нажатию кнопки (F8)"
     insert_label = "в чат OpenCode" if insert == "opencode" else "в активное окно"
-    print(f"[MyFLOW] готово: микрофон #{device or 'системный'}, режим — {mode_label}, вставка — {insert_label}.")
+    dev_label = "системный" if device is None else f"#{device}"
+    print(f"[MyFLOW] готово: микрофон {dev_label}, режим — {mode_label}, вставка — {insert_label}.")
     print("[MyFLOW] запускаю MyFLOW...")
     return 0
 
