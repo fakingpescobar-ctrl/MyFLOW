@@ -184,6 +184,44 @@ def _hostapi_short(device: int) -> str:
 _API_RANK = {"DS": 0, "MME": 1, "WASAPI": 2, "WDM": 3}
 
 
+def fast_mic_list(limit: int = 12) -> list[dict]:
+    """Мгновенный список входов БЕЗ пробы звука (без записи и открытия потоков).
+
+    Нужен панели: полное сканирование `gather_mics()` занимает ~12 секунд
+    (проба каждого устройства), и делать это в цикле отрисовки нельзя — панель
+    вставала и клавиши не читались. Здесь только `query_devices()` + фильтр,
+    поэтому вызов стоит доли миллисекунды. Живость (alive) неизвестна.
+    """
+    out: list[dict] = []
+    try:
+        devices = sd.query_devices()
+        apis = sd.query_hostapis()
+    except Exception:  # noqa: BLE001
+        return out
+    seen: set[str] = set()
+    for i, d in enumerate(devices):
+        if d["max_input_channels"] <= 0:
+            continue
+        name = str(d["name"]).strip()
+        if not _is_mic(name):
+            continue
+        key = _cluster_key(name)
+        if any(key.startswith(s) or s.startswith(key) for s in seen):
+            continue
+        seen.add(key)
+        api = ""
+        try:
+            api = (str(apis[d["hostapi"]]["name"]).replace("Windows ", "")
+                   .replace("DirectSound", "DS").replace("WDM-KS", "WDM"))
+        except Exception:  # noqa: BLE001
+            pass
+        out.append({"name": name, "idx": i, "alive": None, "status": "не проверен",
+                    "api": api, "rms": 0.0})
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _cluster_key(name: str) -> str:
     """Ядро имени без пробелов/скобок — для склейки дублей одной физики."""
     return re.sub(r"[\s_()\[\]-]+", "", name.lower())

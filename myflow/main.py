@@ -34,6 +34,7 @@ from myflow.axtext import AxReader, AxWatcher
 from myflow.db import Database, DictationRecord
 from myflow.config import SettingsStore, DATA_DIR, DEFAULT_APP_CATEGORIES, detect_category
 from myflow.fastpath import fast_path_allowed
+from myflow.pick_mic import fast_mic_list
 from myflow.voiceprint import VoiceGate
 from myflow.winfocus import (FocusHistory, WindowRef, current_window,
                              focus_window, idle_seconds, window_exists)
@@ -258,6 +259,10 @@ class MyFlowApp:
         self._target: WindowRef | None = None
         self._target_locked: WindowRef | None = None   # явно закреплённая цель (F6)
         self._focus_thread: threading.Thread | None = None
+        # Микрофоны для панели: (список, время) + фоновое сканирование.
+        self._mic_cache: tuple[list[dict], float] | None = None
+        self._mic_thread: threading.Thread | None = None
+        self._mic_scanning = False
         # Отложенные вставки (пользователь был занят) — FIFO, ничего не теряем.
         self._pending: deque[tuple[str, WindowRef | None, int | None]] = deque()
         self._stopping = threading.Event()             # сигнал остановки фоновых петель
@@ -539,6 +544,7 @@ class MyFlowApp:
         ]
 
         counters = {
+            "mic_scanning": bool(getattr(self, "_mic_scanning", False)),
             "phrases": int(getattr(self, "_phrases", 0)),
             "pending": len(getattr(self, "_pending", [])),
             "queue": self._queue.qsize() if hasattr(self, "_queue") else 0,
@@ -546,18 +552,62 @@ class MyFlowApp:
         return {"modules": modules, "values": values, "counters": counters}
 
     def _mic_choices(self) -> list[dict]:
-        """Живые микрофоны для панели (кэш на 5 с, чтобы не сканировать каждый кадр)."""
+        """Список живых микрофонов для панели. НИКОГДА не блокирует отрисовку.
+
+        Полное сканирование с пробой звука занимает ~12 секунд (17 устройств ×
+        два замера). Раньше оно выполнялось прямо в `control_snapshot()`, то есть
+        в цикле панели: кадр вставал на 11+ секунд, клавиши не читались
+        («кнопки не работают»), а кэш был бесполезен — время бралось до скана,
+        и запись сразу считалась устаревшей.
+
+        Теперь: отдаём кэш мгновенно, а обновление запускаем в ФОНЕ.
+        """
         now = time.monotonic()
         cached = getattr(self, "_mic_cache", None)
-        if cached and now - cached[0] < 5.0:
-            return cached[1]
-        try:
-            from myflow.pick_mic import gather_mics
-            mics = [m for m in gather_mics() if m.get("alive")]
-        except Exception:  # noqa: BLE001 — панель не должна падать
-            mics = []
-        self._mic_cache = (now, mics)
-        return mics
+        if cached:
+            mics, started = cached
+            if mics or now - started < 30.0:     # пустой кэш обновляем по таймауту
+                return mics
+        # Кэша нет/устарел — отдаём мгновенный список без пробы и греем полный
+        # в фоне. Метку времени пишем сразу, иначе один скан запускался бы на
+        # каждый кадр (именно это и тормозило панель).
+        fast = fast_mic_list()
+        self._mic_cache = (fast, now)
+        self._mic_scanning = True
+        self._refresh_mics_async()
+        return fast
+
+    def _refresh_mics_async(self) -> None:
+        """Полное сканирование (проба звука) в фоне; результат кладём в кэш."""
+        if getattr(self, "_mic_thread", None) is not None and self._mic_thread.is_alive():
+            return
+
+        def worker() -> None:
+            try:
+                # Пока идёт запись, пробу не делаем: скан открывает потоки на тех
+                # же устройствах и дерётся с микрофоном («занят»).
+                if getattr(self.recorder, "_stream", None) is not None:
+                    self._mic_cache = (fast_mic_list(), time.monotonic())
+                    return
+                from myflow.pick_mic import gather_mics
+                current = self.settings.get().asr.input_device
+                alive = [m for m in gather_mics() if m.get("alive")]
+                if current is not None and not any(m["idx"] == current for m in alive):
+                    # Выбранное устройство могло не пройти пробу — оставляем его
+                    # в списке, чтобы можно было вернуться к нему стрелками.
+                    for m in fast_mic_list():
+                        if m["idx"] == current:
+                            alive.append(dict(m, alive=True, status="выбран"))
+                            break
+                self._mic_cache = (alive or fast_mic_list(), time.monotonic())
+            except Exception:  # noqa: BLE001 — панель не должна падать
+                self._mic_cache = (fast_mic_list(), time.monotonic())
+            finally:
+                self._mic_scanning = False
+
+        self._mic_thread = threading.Thread(target=worker, daemon=True,
+                                            name="mic-scan")
+        self._mic_thread.start()
 
     def control_apply(self, action: str, value=None) -> tuple[bool, str]:
         """Применить изменение с панели управления на лету. (ok, сообщение)."""
@@ -569,7 +619,9 @@ class MyFlowApp:
                 self.recorder.set_device(idx)
                 s.asr.input_device = idx
                 store.save()
-                self._mic_cache = None
+                # Кэш НЕ сбрасываем: полный скан — 12 секунд, а он нам тут не нужен.
+                # Выбранное устройство гарантированно окажется в списке после
+                # очередного фонового обновления; переключение работает мгновенно.
                 return True, f"микрофон переключён на {idx if idx is not None else 'системный'}"
 
             if action == "mode":
@@ -615,6 +667,11 @@ class MyFlowApp:
                 store.save()
                 print(f"[myflow] проверка голоса: режим {nxt}")
                 return True, f"проверка голоса: {nxt}"
+
+            if action == "rescan_mics":
+                self._mic_cache = None
+                self._refresh_mics_async()
+                return True, "сканирую микрофоны (живость проверяется в фоне)"
 
             if action == "vad_threshold":
                 applied = self.recorder.set_vad_threshold(float(value))

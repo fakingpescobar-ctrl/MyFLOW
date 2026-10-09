@@ -1310,9 +1310,19 @@ class TuiApp:
         return False
 
     # ---- фаза 3: пульт ----
+    def _store(self):
+        """Активные настройки: у работающего приложения и у TUI должен быть ОДИН
+        объект. Раньше TUI держал свою копию, поэтому панель меняла микрофон в
+        приложении, а читала старое значение из своей копии — «кнопки не работают».
+        """
+        app = getattr(self, "app", None)
+        if app is not None and getattr(app, "settings", None) is not None:
+            return app.settings
+        return self.store
+
     def _panel_header(self) -> str:
         """Короткая шапка панели: микрофон/вставка/цель есть отдельными строками."""
-        s = self.store.get()
+        s = self._store().get()
         mode = "авто (слушает)" if s.mode == "auto" else "PTT (F8)"
         target = "активное окно"
         app = getattr(self, "app", None)
@@ -1386,28 +1396,40 @@ class TuiApp:
         sel = 0
         meter = LevelMeter()
         last_key = None
+        snap: dict = {"modules": [], "values": [], "counters": {}}
+        snap_at = 0.0
         try:
             while not self._stop.is_set():
                 w, h = self.console.size()
-                snap = self._control_snapshot()
+                # Состояние модулей пересобираем не каждый кадр (0.4 с), а клавиши
+                # читаем часто (0.05 с): управление отзывчивое, а панель не тратит
+                # время на опрос серверов и сканирование микрофонов.
+                now = time.monotonic()
+                if now - snap_at > 0.4 or not snap["modules"]:
+                    snap = self._control_snapshot()
+                    snap_at = now
                 rows = snap.get("modules", []) + snap.get("values", [])
                 sel = max(0, min(sel, max(0, len(rows) - 1)))
-                meter.switch(self.store.get().asr.input_device)
+                meter.switch(self._store().get().asr.input_device)
                 with self.state.lock:
-                    log_lines = list(self.state.log)
+                    journal = list(self.state.log)
                     offset = self.state.scroll
-                journal = log_lines or [f"{C_DIM}пока пусто — нажми F8 и говори{RESET}"]
+                if not journal:
+                    journal = [f"{C_DIM}пока пусто — нажми F8 и говори{RESET}"]
                 status_line, status_ansi, _, _ = self.state.snapshot()
                 counters = snap.get("counters", {})
+                scan_note = ("  ·  сканирую микрофоны…"
+                             if counters.get("mic_scanning") else "")
                 self.console.draw(render_panel(
                     snap, w, h, self._panel_header(), journal, offset, sel,
                     level=(meter.peak(), meter.error),
                     status_line=(f"{status_ansi}{norm_text(status_line)}{RESET}"
                                  f"  фраз: {counters.get('phrases', 0)}"
                                  f" · отложено: {counters.get('pending', 0)}"
-                                 f" · в очереди: {counters.get('queue', 0)}"),
+                                 f" · в очереди: {counters.get('queue', 0)}"
+                                 f"{scan_note}"),
                     counters=counters))
-                last_key = self._read_key(0.12)
+                last_key = self._read_key(0.05)
                 if last_key in ("q", "ctrl-c"):
                     return "quit"
                 if last_key == "r":
@@ -1420,12 +1442,17 @@ class TuiApp:
                         self.state.scroll = 0
                 elif last_key == "o":
                     self._toggle_gfx()
+                elif last_key == "f5":
+                    ok, msg = (self.app.control_apply("rescan_mics")
+                               if self.app is not None else (False, "нет приложения"))
+                    self.state.add_log(f"{'✓' if ok else '✗'} {msg}")
                 elif last_key in ("pageup", "pagedown", "home", "end"):
                     self._scroll_journal(last_key, h)
                 elif last_key in ("up", "down"):
                     sel = (sel + (1 if last_key == "down" else -1)) % max(1, len(rows))
                 elif last_key in ("left", "right", "enter", "space"):
-                    sel = self._panel_apply(rows, sel, last_key)
+                    sel = self._panel_apply(snap.get("modules", []),
+                                             snap.get("values", []), sel, last_key)
         finally:
             meter.stop()
             try:
@@ -1446,16 +1473,25 @@ class TuiApp:
             self.state.add_log(f"панель: {exc!r}")
             return {"modules": [], "values": [], "counters": {}}
 
-    def _panel_apply(self, rows: list[dict], sel: int, key: str) -> int:
-        """Применить нажатие к выделенной строке панели. Возвращает новый выбор."""
+    def _panel_apply(self, modules: list[dict], values: list[dict],
+                     sel: int, key: str) -> int:
+        """Применить нажатие к выделенной строке панели. Возвращает новый выбор.
+
+        Тип строки определяем по позиции (индекс >= числа модулей). Раньше здесь
+        заново собирался снимок и строки сравнивались через `is` — объекты каждый
+        раз новые, поэтому строка микрофона считалась МОДУЛЕМ и нажатие уходило в
+        «неизвестный модуль: mic». Это и было «кнопки не работают».
+        """
+        rows = modules + values
         if not rows:
             return sel
+        sel = max(0, min(sel, len(rows) - 1))
         item = rows[sel]
         key_name = item.get("key", "")
         app = self.app
         if app is None:
             return sel
-        is_value_row = any(item is v for v in (app.control_snapshot().get("values") or []))
+        is_value_row = sel >= len(modules)
         is_module = not is_value_row
 
         try:
@@ -1474,11 +1510,11 @@ class TuiApp:
                 if key_name == "mic":
                     self._cycle_mic(1 if key in ("right", "enter", "space") else -1)
                 elif key_name == "mode":
-                    ok, msg = app.control_apply("mode", not self.store.get().mode == "auto")
+                    ok, msg = app.control_apply("mode", self._store().get().mode != "auto")
                     self.state.add_log(f"{'✓' if ok else '✗'} {msg}")
                 elif key_name == "insert":
                     ok, msg = app.control_apply(
-                        "insert", self.store.get().insert_method != "opencode")
+                        "insert", self._store().get().insert_method != "opencode")
                     self.state.add_log(f"{'✓' if ok else '✗'} {msg}")
                 elif key_name == "style":
                     self._cycle_style_live(1 if key == "right" else -1)
@@ -1494,24 +1530,37 @@ class TuiApp:
         return round(max(0.10, min(0.60, cur + delta)), 2)
 
     def _cycle_mic(self, direction: int) -> None:
-        """Переключить микрофон на лету по списку живых."""
+        """Переключить микрофон на лету по списку (мгновенно, без сканирования)."""
         try:
             choices = self.app._mic_choices()
         except Exception:  # noqa: BLE001
             choices = []
         if not choices:
-            self.state.add_log("живых микрофонов не найдено (F5 — пересканировать)")
+            from myflow.pick_mic import fast_mic_list
+            choices = fast_mic_list()
+        # WDM-KS-индексы нестабильны (после переподключений «устройство исчезло»),
+        # поэтому в перебор берём только те, что не помечены мёртвыми и не WDM.
+        good = [m for m in choices
+                if m.get("alive") is not False and m.get("api") != "WDM"]
+        choices = good or choices
+        if not choices:
+            self.state.add_log("микрофонов не найдено (F5 — пересканировать)")
             return
-        cur = self.store.get().asr.input_device
-        idxs = [None] + [m["idx"] for m in choices]
+        cur = self._store().get().asr.input_device
+        idxs: list[object] = [None]
+        for m in choices:                      # уникальные, в порядке появления
+            if m["idx"] not in idxs:
+                idxs.append(m["idx"])
         pos = idxs.index(cur) if cur in idxs else 0
         new = idxs[(pos + direction) % len(idxs)]
+        if new == cur and len(idxs) > 1:       # не «застреваем» на одном значении
+            new = idxs[(pos + 2 * direction) % len(idxs)]
         ok, msg = self.app.control_apply("mic", new)
         self.state.add_log(f"{'✓' if ok else '✗'} {msg}")
 
     def _cycle_style_live(self, direction: int) -> None:
         styles = [s for s in ("plain", "casual", "formal", "terminal", "summarize")]
-        cur = self.store.get().default_style
+        cur = self._store().get().default_style
         pos = styles.index(cur) if cur in styles else 0
         new = styles[(pos + direction) % len(styles)]
         ok, msg = self.app.control_apply("style", new)

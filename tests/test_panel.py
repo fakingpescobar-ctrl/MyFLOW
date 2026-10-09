@@ -32,8 +32,12 @@ def _app():
     app.paster = _Paster()
     app._tmp = tmp
     # Микрофоны не сканируем (это долго): подкладываем кэш панели.
-    app._mic_cache = (time.monotonic(), [
-        {"name": "Микрофон (Ardor Gaming Vox)", "idx": 13, "alive": True, "api": "DS"}])
+    # Кэш панели: (список, время) — порядок именно такой (см. _mic_choices).
+    app._mic_cache = ([
+        {"name": "Микрофон (Ardor Gaming Vox)", "idx": 13, "alive": True, "api": "DS"},
+        {"name": "Набор микрофонов (Kinect USB Audio)", "idx": 15, "alive": True,
+         "api": "DS"},
+    ], time.monotonic())
     store.get().asr.input_device = 13
     return app
 
@@ -201,6 +205,124 @@ class PanelRenderTest(unittest.TestCase):
         plain = "\n".join(T.strip_ansi(x) for x in frame)
         self.assertIn("выход", plain, "легенда целиком видна")
         self.assertIn("пересканировать микрофоны", plain)
+
+
+class PanelSpeedTest(unittest.TestCase):
+    """Регресс: панель вставала на 11 секунд (скан микрофонов в цикле отрисовки)."""
+
+    def setUp(self):
+        self.app = _app()
+
+    def tearDown(self):
+        self.app.db.close()
+        try:
+            self.app.ax.stop()
+        except Exception:
+            pass
+        self.app._stopping.set()
+        self.app._tmp.cleanup()
+
+    def test_snapshot_is_fast_without_cache(self):
+        self.app._mic_cache = None
+        t0 = time.perf_counter()
+        for _ in range(10):
+            self.app.control_snapshot()
+            self.app._mic_cache = None          # худший случай: кэша нет
+        elapsed = time.perf_counter() - t0
+        self.assertLess(elapsed, 2.0,
+                        f"снимок панели не должен сканировать микрофоны ({elapsed:.1f} с)")
+
+    def test_mic_switch_is_instant(self):
+        t0 = time.perf_counter()
+        ok, msg = self.app.control_apply("mic", 15)
+        elapsed = time.perf_counter() - t0
+        self.assertTrue(ok, msg)
+        self.assertLess(elapsed, 0.5, f"смена микрофона должна быть мгновенной ({elapsed:.2f} с)")
+
+    def test_rescan_returns_immediately(self):
+        t0 = time.perf_counter()
+        ok, msg = self.app.control_apply("rescan_mics")
+        elapsed = time.perf_counter() - t0
+        self.assertTrue(ok, msg)
+        self.assertLess(elapsed, 0.5, "F5 не должен блокировать панель")
+
+    def test_scan_is_skipped_while_recording(self):
+        from unittest import mock
+        self.app.recorder._stream = object()          # «идёт запись»
+        self.app._mic_cache = None
+        with mock.patch("myflow.pick_mic.gather_mics") as scan:
+            self.app._mic_choices()
+            self.app._refresh_mics_async()
+            if self.app._mic_thread is not None:
+                self.app._mic_thread.join(timeout=3.0)
+        scan.assert_not_called()
+        self.app.recorder._stream = None
+
+
+class PanelInteractTest(unittest.TestCase):
+    """Регресс: стрелки на строке микрофона не работали («кнопки не нажимаются»)."""
+
+    def setUp(self):
+        self.app = _app()
+        self.tui = T.TuiApp(no_servers=True)
+        self.tui.app = self.app
+        self.tui.store = self.app.settings        # как делает run(): один стор
+
+    def tearDown(self):
+        self.app.db.close()
+        try:
+            self.app.ax.stop()
+        except Exception:
+            pass
+        self.app._stopping.set()
+        self.app._tmp.cleanup()
+
+    def _rows(self):
+        snap = self.app.control_snapshot()
+        return snap["modules"], snap["values"]
+
+    def test_mic_row_is_treated_as_value_row(self):
+        """Строка микрофона — не модуль: раньше нажатие уходило в «неизвестный модуль»."""
+        modules, values = self._rows()
+        mic_index = len(modules) + next(i for i, v in enumerate(values)
+                                        if v["key"] == "mic")
+        before = self.app.settings.get().asr.input_device
+        self.tui._panel_apply(modules, values, mic_index, "right")
+        after = self.app.settings.get().asr.input_device
+        self.assertNotEqual(after, before, "←→ на строке микрофона должен её менять")
+        self.assertNotIn("неизвестный модуль", "\n".join(self.tui.state.log))
+
+    def test_mic_cycle_skips_dead_and_cycles_all(self):
+        self.app._mic_cache = ([
+            {"name": "Ardor Gaming Vox", "idx": 13, "alive": True, "api": "DS"},
+            {"name": "Kinect USB Audio", "idx": 15, "alive": True, "api": "DS"},
+            {"name": "Мёртвый", "idx": 2, "alive": False, "api": "MME"},
+        ], time.monotonic())
+        with mock.patch.object(M.MyFlowApp, "_refresh_mics_async", lambda self: None):
+            seen = []
+            for _ in range(3):
+                self.tui._cycle_mic(1)
+                seen.append(self.app.settings.get().asr.input_device)
+        self.assertEqual(seen, [15, None, 13],
+                         "цикл: 13 -> 15 -> системный -> 13, мёртвые пропускаем")
+
+    def test_module_toggle_from_panel(self):
+        modules, values = self._rows()
+        idx = next(i for i, m in enumerate(modules) if m["key"] == "snippets")
+        before = self.app.settings.get().flags["snippets"]
+        self.tui._panel_apply(modules, values, idx, "enter")
+        self.assertEqual(self.app.settings.get().flags["snippets"], not before)
+
+    def test_style_row_changes_style(self):
+        modules, values = self._rows()
+        idx = len(modules) + next(i for i, v in enumerate(values) if v["key"] == "style")
+        before = self.app.settings.get().default_style
+        self.tui._panel_apply(modules, values, idx, "right")
+        self.assertNotEqual(self.app.settings.get().default_style, before)
+
+    def test_tui_uses_app_store(self):
+        """TUI и приложение должны смотреть в ОДНИ настройки."""
+        self.assertIs(self.tui._store(), self.app.settings)
 
 
 if __name__ == "__main__":
