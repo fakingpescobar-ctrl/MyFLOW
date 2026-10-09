@@ -93,17 +93,20 @@ class PasteToTargetTest(unittest.TestCase):
         import tests.test_main_flow as tm
         self.tm = tm
 
-    def _app(self, target, current, insert_target="start", refocus=True, focus_ok=True):
+    def _app(self, target, current, insert_target="start", refocus=True,
+             focus_ok=True, idle=99.0, exists=True):
         app = self.tm.make_app()
         app.paster = _Paster()
         app.settings.get().insert_target = insert_target
         app.settings.get().refocus_on_insert = refocus
+        app.settings.get().insert_idle_seconds = 0.8
         app._target = target
-        p1 = mock.patch.object(M, "current_window", return_value=current)
-        p2 = mock.patch.object(M, "focus_window", return_value=focus_ok)
-        self.m1, self.m2 = p1.start(), p2.start()
-        self.addCleanup(p1.stop)
-        self.addCleanup(p2.stop)
+        self.m1 = mock.patch.object(M, "current_window", return_value=current).start()
+        self.m2 = mock.patch.object(M, "focus_window", return_value=focus_ok).start()
+        self.m3 = mock.patch.object(M, "idle_seconds", return_value=idle).start()
+        self.m4 = mock.patch.object(M, "window_exists", return_value=exists).start()
+        for m in (self.m1, self.m2, self.m3, self.m4):
+            self.addCleanup(m.stop)
         return app
 
     def test_no_refocus_when_already_there(self):
@@ -148,6 +151,82 @@ class PasteToTargetTest(unittest.TestCase):
         app._paste_to_target("текст")
         self.m2.assert_not_called()
         self.assertEqual(app.paster.calls, ["текст"])
+
+
+class PendingInsertTest(unittest.TestCase):
+    """Пользователь работает мышью -> вставка ждёт паузы, а не отбирает фокус."""
+
+    def setUp(self):
+        import tests.test_main_flow as tm
+        self.tm = tm
+
+    def _app(self, target, current, idle, exists=True):
+        app = self.tm.make_app()
+        app.paster = _Paster()
+        app.settings.get().insert_target = "start"
+        app.settings.get().refocus_on_insert = True
+        app.settings.get().insert_idle_seconds = 0.8
+        app._target = target
+        self.m1 = mock.patch.object(M, "current_window", return_value=current).start()
+        self.m2 = mock.patch.object(M, "focus_window", return_value=True).start()
+        self.m3 = mock.patch.object(M, "idle_seconds", return_value=idle).start()
+        self.m4 = mock.patch.object(M, "window_exists", return_value=exists).start()
+        for m in (self.m1, self.m2, self.m3, self.m4):
+            self.addCleanup(m.stop)
+        return app
+
+    def test_busy_user_defers_insert(self):
+        ref = WindowRef(hwnd=7, pid=42, title="Чат")
+        app = self._app(ref, _T(99), idle=0.1)     # активность 0.1 с назад
+        self.assertFalse(app._paste_to_target("текст"))
+        self.assertEqual(app.paster.calls, [], "фокус не отбираем")
+        self.m2.assert_not_called()
+        self.assertEqual(len(app._pending), 1, "фраза лежит в отложенных")
+        self.assertEqual(app._pending[0][0], "текст")
+
+    def test_delivers_on_pause(self):
+        ref = WindowRef(hwnd=7, pid=42, title="Чат")
+        app = self._app(ref, _T(99), idle=0.1)
+        app._paste_to_target("текст")
+        # пользователь отпустил мышь -> доставляем
+        self.m3.return_value = 3.0
+        self.assertTrue(app._deliver_pending_once())
+        self.assertEqual(app.paster.calls, ["текст"])
+        self.assertEqual(len(app._pending), 0)
+
+    def test_delivers_when_user_returns_to_chat(self):
+        ref = WindowRef(hwnd=7, pid=42, title="Чат")
+        app = self._app(ref, _T(99), idle=0.1)
+        app._paste_to_target("текст")
+        # пользователь сам вернулся в целевое окно -> вставляем без перехвата
+        self.m1.return_value = _T(7)
+        self.assertTrue(app._deliver_pending_once())
+        self.assertEqual(app.paster.calls, ["текст"])
+        self.assertEqual(len(app._pending), 0)
+
+    def test_target_closed_falls_back_to_active(self):
+        ref = WindowRef(hwnd=7, pid=42, title="Чат")
+        app = self._app(ref, _T(99), idle=0.1, exists=False)
+        app._paste_to_target("текст")
+        self.assertTrue(app._deliver_pending_once())
+        self.assertEqual(app.paster.calls, ["текст"], "текст не теряется")
+
+    def test_flush_delivers_everything_now(self):
+        ref = WindowRef(hwnd=7, pid=42, title="Чат")
+        app = self._app(ref, _T(99), idle=0.1)
+        app._paste_to_target("первая")
+        app._paste_to_target("вторая")
+        self.assertEqual(len(app._pending), 2)
+        self.assertEqual(app._flush_pending(), 2)
+        self.assertEqual(app.paster.calls, ["первая", "вторая"])
+        self.assertEqual(len(app._pending), 0)
+
+    def test_idle_app_not_delayed(self):
+        ref = WindowRef(hwnd=7, pid=42, title="Чат")
+        app = self._app(ref, _T(99), idle=5.0)     # пользователь давно ничего не делал
+        self.assertTrue(app._paste_to_target("текст"))
+        self.assertEqual(app.paster.calls, ["текст"])
+        self.assertEqual(len(app._pending), 0)
 
 
 class CaptureTargetTest(unittest.TestCase):

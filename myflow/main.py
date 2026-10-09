@@ -19,6 +19,7 @@ import queue
 import re
 import sys
 import threading
+from collections import deque
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,7 +35,8 @@ from myflow.db import Database, DictationRecord
 from myflow.config import SettingsStore, DATA_DIR, DEFAULT_APP_CATEGORIES, detect_category
 from myflow.fastpath import fast_path_allowed
 from myflow.voiceprint import VoiceGate
-from myflow.winfocus import FocusHistory, WindowRef, current_window, focus_window
+from myflow.winfocus import (FocusHistory, WindowRef, current_window,
+                             focus_window, idle_seconds, window_exists)
 from myflow.insertion import ClipboardPaste
 from myflow.opencode_inject import OpenCodeInjector
 from myflow.learning import record_edit_and_learn, watch_pasted_edit
@@ -250,6 +252,8 @@ class MyFlowApp:
         self._target: WindowRef | None = None
         self._target_locked: WindowRef | None = None   # явно закреплённая цель (F6)
         self._focus_thread: threading.Thread | None = None
+        # Отложенные вставки (пользователь был занят) — FIFO, ничего не теряем.
+        self._pending: deque[tuple[str, WindowRef | None, int | None]] = deque()
         self._stopping = threading.Event()             # сигнал остановки фоновых петель
         # Очередь фраз: worker обрабатывает последовательно, а recorder в
         # AUTO-режиме тем временем продолжает слушать (не теряем фразы).
@@ -309,10 +313,17 @@ class MyFlowApp:
             target=self._listener_watchdog_loop, daemon=True, name="listener-watchdog")
         self._listener_watchdog.start()
         self._start_focus_tracker()
+        self._pending_thread = threading.Thread(
+            target=self._pending_worker, daemon=True, name="pending-insert")
+        self._pending_thread.start()
         if (self.settings.get().insert_target or "start") == "start":
+            hk = self.settings.get().hotkey
             print("[myflow] цель вставки: окно, из которого начата диктовка "
                   "(клик мышью в сторону текст не уведёт; "
-                  f"{self.settings.get().hotkey.lock_target_key}=закрепить окно)")
+                  f"{hk.lock_target_key}=закрепить окно, "
+                  f"{hk.flush_pending_key}=вставить отложенное сейчас)")
+            print("[myflow] если в момент вставки ты сам работаешь мышью — "
+                  "вставка подождёт паузы и не отберёт управление")
         if self._pref_auto:
             self.recorder.start_continuous()
             print("[myflow] готов (AUTO: слушаю постоянно, фраза по паузе). "
@@ -433,6 +444,9 @@ class MyFlowApp:
             return
         if _matches(key, getattr(hk, "lock_target_key", "f6")):
             self._toggle_target_lock()
+            return
+        if _matches(key, getattr(hk, "flush_pending_key", "f10")):
+            self._flush_pending()
             return
         if _matches(key, hk.cancel_key):
             self._cancel_all()
@@ -979,18 +993,22 @@ class MyFlowApp:
             return
         if flags["auto_insert"]:
             try:
-                ok = self._paste_to_target(final_text)
-                self._last_insert_ts = time.monotonic()
+                ok = self._paste_to_target(final_text, history_id=history_id)
                 # Запоминаем процесс/окно, в которое вставили: наблюдатель
                 # правок должен убедиться, что читает то же самое окно.
-                self._remember_insert_target()
+                # (При отложенной вставке это сделает сама доставка.)
+                if ok:
+                    self._remember_insert_target()
                 if isinstance(self.paster, OpenCodeInjector) and not ok:
                     print("[myflow] ✗ инжект не прошёл: opencode не найден или консоль недоступна")
                     self.overlay.show("✗ инжект не прошёл", "#e5484d")
+                elif not ok:
+                    # Вставка отложена (пользователь занят) — оверлей уже сказал
+                    # «вставлю на паузе», не перекрываем его ложным «вставлено».
+                    print("[myflow] ⏳ фраза отложена до паузы (F10 — вставить сразу)")
                 else:
                     self.overlay.show("✓ вставлено", "#46a758")
-                if flags["learning"]:
-                    self._spawn_edit_watcher(history_id, final_text)
+                # Обучение запускает сама вставка (в т.ч. отложенная).
             except Exception as exc_in:
                 # Любое падение на вставке — отдельным маркером, НЕ валит worker
                 _tb_to_file("ОШИБКА ВСТАВКИ")
@@ -1061,18 +1079,39 @@ class MyFlowApp:
         print(f"[myflow] ⚲ цель закреплена: «{cur.label}» (F6 — снять)")
         self.overlay.show(f"⚲ вставляю в: {cur.label[:28]}", "#46a758")
 
-    def _paste_to_target(self, text: str) -> bool:
+    def _paste_to_target(self, text: str, history_id: int | None = None) -> bool:
         """Вставить текст в ЦЕЛЕВОЕ окно (где началась диктовка).
 
         Раньше вставка шла в то окно, которое активно в момент Ctrl+V: случайный
         клик мышью во время фразы — и текст уходил не туда («не в тот чат»).
         Теперь цель зафиксирована с начала диктовки, а перед вставкой фокус
-        возвращается в неё (настройка refocus_on_insert).
+        возвращается в неё.
+
+        ВАЖНО: фокус не отбирается, пока пользователь сам работает мышью или
+        клавиатурой. Если он в этот момент открывает документы/переключает окна,
+        вставка откладывается (status=pending) и выполняется на естественной
+        паузе или когда он сам вернётся в целевое окно — управление не теряется.
         """
         target = self._target if (self.settings.get().insert_target or "start") == "start" else None
+        cur = current_window()
+        needs_move = bool(target) and (cur is None or cur.hwnd != target.hwnd)
+        if needs_move:
+            idle = idle_seconds()
+            if idle < float(self.settings.get().insert_idle_seconds):
+                # Пользователь занят: не мешаем, положим в отложенные.
+                self._pending.append((text, target, history_id))
+                print(f"[myflow] ⏳ пользователь занят ({idle:.1f} с назад была активность) — "
+                      f"вставлю в «{target.label}» на паузе (F10 — вставить сразу)")
+                self.overlay.show("⏳ вставлю на паузе", "#f5c542")
+                return False
+        return self._deliver(text, target, history_id)
+
+    def _deliver(self, text: str, target: WindowRef | None, history_id: int | None) -> bool:
+        """Непосредственная вставка (без проверки занятости)."""
         restored = False
         if target is not None:
-            if not current_window() or current_window().hwnd != target.hwnd:
+            cur = current_window()
+            if cur is None or cur.hwnd != target.hwnd:
                 if self.settings.get().refocus_on_insert:
                     restored = focus_window(target.hwnd)
                     if restored:
@@ -1092,7 +1131,66 @@ class MyFlowApp:
             self._remember_insert_target()
         if target is not None and restored:
             print(f"[myflow]   вставлено в «{target.label}» (фокус возвращён)")
+        if history_id is not None and self.settings.get().flags.get("learning", False):
+            self._spawn_edit_watcher(history_id, text)
         return ok
+
+    def _deliver_pending_once(self) -> bool:
+        """Одна попытка доставить отложенную вставку. True — что-то вставили.
+
+        Отдельный метод (а не тело цикла) — чтобы поведение проверялось тестами
+        без запуска фонового потока.
+        """
+        if not self._pending:
+            return False
+        text, target, history_id = self._pending[0]
+        cur = current_window()
+        if target is not None and not window_exists(target.hwnd):
+            print(f"[myflow] ! целевое окно «{target.label}» закрылось — "
+                  "вставляю в активное")
+            self._pending.popleft()
+            self._deliver(text, None, history_id)
+            return True
+        if target is None or (cur is not None and cur.hwnd == target.hwnd):
+            self._pending.popleft()
+            self._deliver(text, target, history_id)
+            return True
+        idle = idle_seconds()
+        if idle >= float(self.settings.get().insert_idle_seconds):
+            self._pending.popleft()
+            print(f"[myflow] ⏳ пауза {idle:.1f} с — вставляю отложенное в "
+                  f"«{target.label}»")
+            self._deliver(text, target, history_id)
+            return True
+        return False
+
+    def _pending_worker(self) -> None:
+        """Отложенная вставка: ждём паузу пользователя или возврат в цель.
+
+        Отложенное никогда не теряется: если целевое окно закрылось — вставляем
+        в активное (и пишем об этом); если пользователь вернулся в цель — вставляем
+        без перехвата фокуса; если он сам ничего не делает — вставляем на паузе.
+        """
+        while not self._stopping.is_set():
+            self._stopping.wait(0.2)
+            try:
+                self._deliver_pending_once()
+            except Exception as exc:  # noqa: BLE001 — воркер не должен падать
+                print(f"[myflow] отложенная вставка: {exc!r}")
+
+    def _flush_pending(self) -> int:
+        """F10: вставить отложенное немедленно (явная команда пользователя)."""
+        count = 0
+        while self._pending:
+            text, target, history_id = self._pending.popleft()
+            self._deliver(text, target, history_id)
+            count += 1
+        if count:
+            print(f"[myflow] ⏎ вставил отложенное вручную: {count} фраз(ы)")
+            self.overlay.show("✓ отложенное вставлено", "#46a758")
+        else:
+            print("[myflow] отложенных вставок нет")
+        return count
 
     def _remember_insert_target(self) -> None:
         """Запомнить pid окна, куда вставили (для AX-наблюдения за правкой)."""

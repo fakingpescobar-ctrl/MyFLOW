@@ -153,6 +153,41 @@ def focus_window(hwnd: int) -> bool:
         return False
 
 
+def idle_seconds() -> float:
+    """Сколько секунд назад пользователь последний раз трогал мышь/клавиатуру.
+
+    Берём системный `GetLastInputInfo` — видно активность в ЛЮБОМ приложении и
+    не нужны хуки. Нам это нужно, чтобы не отбирать фокус, пока человек сам
+    что-то делает: вставку ждём до естественной паузы.
+    """
+    if not _IS_WINDOWS:
+        return 999.0
+    try:
+        class _LastInputInfo(ctypes.Structure):
+            _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+
+        info = _LastInputInfo()
+        info.cbSize = ctypes.sizeof(info)
+        if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+            return 999.0
+        # GetTickCount может переполниться через 49 суток — это нормально:
+        # разница считается по модулю 32 бит.
+        ticks = ctypes.windll.kernel32.GetTickCount()
+        delta = (ticks - info.dwTime) & 0xFFFFFFFF
+        return delta / 1000.0
+    except Exception:  # noqa: BLE001
+        return 999.0
+
+
+def window_exists(hwnd: int) -> bool:
+    if not _IS_WINDOWS or not hwnd:
+        return False
+    try:
+        return bool(ctypes.windll.user32.IsWindow(hwnd))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 class FocusHistory:
     """Кольцевой буфер замеров фокуса: «какое окно было активно тогда-то».
 

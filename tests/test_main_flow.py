@@ -61,6 +61,7 @@ class _Settings:
     style_by_category = {"terminal": "terminal", "chat": "casual", "email": "formal"}
     audio_keep = 10
     insert_target = "focus"          # в тестах окон нет -> вставляем «в активное»
+    insert_idle_seconds = 0.8
     refocus_on_insert = False
 
     def __init__(self):
@@ -211,6 +212,8 @@ def make_app(auto=False, busy=False, gen=0, polish_enabled=False, paster=None):
     app._target = None
     app._target_locked = None
     app._stopping = threading.Event()
+    app._pending = __import__('collections').deque()
+    app._last_insert_ts = 0.0
     app.polish = types.SimpleNamespace(
         cfg=types.SimpleNamespace(enabled=polish_enabled, url="http://127.0.0.1:8082/v1"),
         polish=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("LLM лежит")),
@@ -228,7 +231,9 @@ def make_app(auto=False, busy=False, gen=0, polish_enabled=False, paster=None):
                  "_save_audio", "_record_failure", "_try_snippet",
                  "_remember_insert_target", "_watch_with_ax", "_watch_with_clipboard",
                  "retry_pending", "_log_stats", "_refresh_asr_prompt",
-                 "_paste_to_target", "_toggle_target_lock", "_on_utterance"):
+                 "_paste_to_target", "_toggle_target_lock", "_on_utterance",
+                 "_deliver", "_pending_worker", "_flush_pending",
+                 "_deliver_pending_once"):
         setattr(app, name, types.MethodType(getattr(MyFlowApp, name), app))
     app._guard_polish = MyFlowApp._guard_polish
     return app
