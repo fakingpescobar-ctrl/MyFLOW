@@ -64,6 +64,10 @@ class DictationRecorder:
                  min_utterance_ms: int = _MIN_UTTERANCE_MS,
                  vad_threshold: float = 0.30,
                  vad: SileroStreamVad | None = None,
+                 adaptive_noise_gate: bool = True,
+                 noise_ratio: float = 2.5,
+                 noise_max_gate: float = 0.04,
+                 noise_min_floor: float = 0.012,
                  on_auto_stop: Callable[[], None] | None = None,
                  on_utterance: Callable[[Recording], None] | None = None,
                  on_interval: Callable[[np.ndarray], None] | None = None,
@@ -83,6 +87,18 @@ class DictationRecorder:
         self.vad_threshold = self.vad.threshold
         self.silence_pause_seconds = silence_pause_seconds
         self.silence_amplitude = silence_amplitude
+        # Адаптивный порог по фоновому шуму: если в комнате играет телевизор
+        # (пик 0.026 при голосе 0.317), фиксированный порог 0.01 пропускает
+        # «фразу» из фоновой речи. Оцениваем уровень не-речевых чанков и требуем,
+        # чтобы пик фразы был заметно выше. Потолок (0.04) защищает тихую речь:
+        # замеры на своих записях — реальная речь 0.13-1.06, фон 0.017-0.040.
+        self.adaptive_noise_gate = adaptive_noise_gate
+        self.noise_ratio = noise_ratio
+        self.noise_max_gate = noise_max_gate
+        self.noise_min_floor = noise_min_floor
+        self._noise_floor = 0.0        # пик не-речевых чанков (медленно затухает)
+        self._noise_chunks = 0         # сколько не-речевых чанков видели
+        self._noise_rejects = 0        # сколько фраз отсек адаптивный порог
         self.on_auto_stop = on_auto_stop
         self.on_utterance = on_utterance
         # Live-превью: каждые interval_seconds отдаём хвост записи
@@ -178,6 +194,9 @@ class DictationRecorder:
         self._auto_stop_fired = False
         self._hard_limit_fired = False
         self._prev_interval_samples = 0
+        # Фон пересчитываем заново: устройство/устройство-микшер могло смениться.
+        self._noise_floor = 0.0
+        self._noise_chunks = 0
         self.vad.reset()
 
     def _on_audio_ptt(self, indata: np.ndarray, frames: int) -> None:
@@ -330,11 +349,36 @@ class DictationRecorder:
             self._prev_interval_samples_in_phrase = 0
             self._utter_ready = False
 
+    def _track_noise_floor(self, peak: float, is_speech: bool) -> None:
+        """Оценить уровень фона по не-речевым чанкам.
+
+        Берём ПИК чанка (а не RMS): фоновая речь из телевизора в тихих местах
+        даёт RMS заметно ниже пика, и порог по RMS не отсекал бы её.
+        Затухание медленное (0.5 % на чанк ≈ 4 с), чтобы одиночный стук не
+        держал порог высоко; сверху всё ограничено noise_max_gate.
+        """
+        if not self.adaptive_noise_gate or is_speech:
+            return
+        self._noise_chunks += 1
+        self._noise_floor = max(peak, self._noise_floor * 0.995)
+
+    def noise_gate(self) -> float:
+        """Минимальный пик фразы: фиксированный порог или адаптивный по фону."""
+        required = self.silence_amplitude
+        if not self.adaptive_noise_gate:
+            return required
+        # Пока не набрали статистику по фону (~0.6 с не-речи) — не рискуем.
+        if self._noise_chunks < 15 or self._noise_floor < self.noise_min_floor:
+            return required
+        return min(max(required, self._noise_floor * self.noise_ratio),
+                   self.noise_max_gate)
+
     def _on_audio_continuous(self, indata: np.ndarray) -> None:
         mono = _float_to_int16(indata[:, 0])          # храним Int16 (как раньше)
         peak = float(np.max(np.abs(indata[:, 0]))) if len(indata) else 0.0
         prob = self.vad.process(np.ascontiguousarray(indata[:, 0], dtype=np.float32))
         is_speech = prob >= self.vad_threshold
+        self._track_noise_floor(peak, is_speech)
         emit = False
         interval = False
         with self._lock:
@@ -432,9 +476,16 @@ class DictationRecorder:
             # следующей фразы включалось только после длины предыдущей.
             self._prev_interval_samples_in_phrase = 0
         # Отсев мусора: Silero-фраза без достаточной речи/длины/громкости — не фраза.
-        if (speech_ms < self._min_speech_ms
-                or duration_ms < self._min_utterance_ms
-                or peak < self.silence_amplitude):
+        # Громкость сравниваем с адаптивным порогом по фону: в комнате с
+        # телевизором фиксированные 0.01 пропускали фоновую речь.
+        required = self.noise_gate()
+        if speech_ms < self._min_speech_ms or duration_ms < self._min_utterance_ms:
+            return
+        if peak < required:
+            if required > self.silence_amplitude:
+                self._noise_rejects += 1
+                print(f"[recorder] ○ тише фонового шума: пик {peak:.3f} < порога "
+                      f"{required:.3f} (фон {self._noise_floor:.3f}) — фраза отброшена")
             return
         if self.on_utterance:
             rec = Recording(pcm_int16=pcm, duration_ms=duration_ms, max_amplitude=peak)

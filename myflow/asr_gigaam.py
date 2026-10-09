@@ -32,6 +32,10 @@ DEFAULT_QUANTIZATION = "int8"
 class GigaAmClient:
     """GigaAM через onnx-asr: модель грузится один раз, инференс на CPU."""
 
+    # Имя бэкенда: main использует его, чтобы решить, можно ли идти «быстрым
+    # путём» (GigaAM e2e сам ставит пунктуацию и заглавные — whisper нет).
+    backend_name = "gigaam"
+
     def __init__(self, cfg: AsrConfig) -> None:
         self.cfg = cfg
         self._model = None

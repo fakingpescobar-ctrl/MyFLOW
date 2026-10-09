@@ -41,6 +41,8 @@ def pcm_int16_to_wav(pcm: np.ndarray, sample_rate: int = SAMPLE_RATE) -> bytes:
 
 
 class WhisperClient:
+    backend_name = "whisper"     # whisper не ставит пунктуацию -> быстрый путь недоступен
+
     def __init__(self, cfg: AsrConfig) -> None:
         self.cfg = cfg        # Keep-alive + ретраи: единичный сетевой сбой не должен терять фразу.
         # Ретраим только connect/502-504 (read-timeout не ретраим: повторный

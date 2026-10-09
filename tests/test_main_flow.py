@@ -35,6 +35,11 @@ class _Flags(dict):
     pass
 
 
+class _PolishCfg:
+    def __init__(self, skip_wellformed=False):
+        self.skip_wellformed = skip_wellformed
+
+
 class _AsrCfg:
     initial_prompt = ""
     prompt_from_dictionary = True
@@ -44,6 +49,7 @@ class _AsrCfg:
 class _Settings:
     hotkey = _HK()
     asr = _AsrCfg()
+    polish = _PolishCfg()
     use_ax_observation = False          # в тестах AX не поднимаем
     observation_seconds = 0.2
     app_categories = None                # -> DEFAULT_APP_CATEGORIES
@@ -54,6 +60,7 @@ class _Settings:
         self.style_by_app = {}
         self.default_style = "plain"
         self.asr = _AsrCfg()
+        self.polish = _PolishCfg()
         self.flags = _Flags(auto_insert=True, learning=False, overlay=False,
                             live_preview=False, beep_on_start=False,
                             snippets=True, keep_audio=False, ax_observation=False)
@@ -622,6 +629,66 @@ class RetryFlowTest(unittest.TestCase):
             status = db._conn.execute("SELECT status FROM history").fetchone()[0]
             self.assertEqual(status, "audio_missing")
             db.close()
+
+
+class FastPathFlowTest(unittest.TestCase):
+    """Быстрый путь в оркестраторе: оформленный текст GigaAM — без LLM."""
+
+    def setUp(self):
+        self.p1 = mock.patch("myflow.main._tb_to_file")
+        self.p1.start()
+        self.addCleanup(self.p1.stop)
+
+    @staticmethod
+    def _rec():
+        return Recording(pcm_int16=np.zeros(16000, dtype=np.int16),
+                         duration_ms=1000, max_amplitude=0.5)
+
+    def _app(self, text, skip_wellformed=True, style="plain"):
+        from myflow.polish import PolishResult
+        app = make_app(polish_enabled=True)      # быстрый путь — альтернатива полировке
+        app.whisper = _Whisper(text)
+        app.whisper.backend_name = "gigaam"
+        app.settings.get().polish.skip_wellformed = skip_wellformed
+        # Стиль фиксируем: в тестах активное окно — терминал, иначе стиль
+        # определился бы как terminal (быстрый путь для него не работает).
+        app._resolve_style = lambda app_descriptor=None, _s=style: _s
+        # LLM подменена: тесты проверяют, ЗВАЛИ её или нет, а не её ответ.
+        app.polish.polish = mock.Mock(return_value=PolishResult(
+            text=text + " [LLM]", latency_ms=5))
+        return app
+
+    def test_wellformed_text_skips_llm(self):
+        app = self._app("Сегодня отличная погода.")
+        app._process_recording(0, self._rec())
+        self.assertFalse(app.polish.polish.called, "LLM звать не нужно")
+        self.assertEqual(app.paster.calls, ["Сегодня отличная погода."])
+        self.assertEqual(app.db.records[-1].status, "fast_path")
+        self.assertEqual(app.db.records[-1].divergence, 0.0)
+
+    def test_text_needing_polish_uses_llm(self):
+        app = self._app("сегодня отличная погода")      # без пунктуации
+        app._process_recording(0, self._rec())
+        self.assertTrue(app.polish.polish.called, "текст без пунктуации идёт через LLM")
+        self.assertEqual(app.db.records[-1].status, "ok")
+
+    def test_whisper_backend_not_fast_pathed(self):
+        app = self._app("Сегодня отличная погода.")
+        app.whisper.backend_name = "whisper"
+        app._process_recording(0, self._rec())
+        self.assertTrue(app.polish.polish.called,
+                        "whisper не ставит пунктуацию — идём через LLM")
+
+    def test_flag_disables_fast_path(self):
+        app = self._app("Сегодня отличная погода.", skip_wellformed=False)
+        app._process_recording(0, self._rec())
+        self.assertTrue(app.polish.polish.called)
+
+    def test_terminal_style_never_fast_pathed(self):
+        """Для стиля terminal полировка реально переформатирует текст."""
+        app = self._app("Сегодня отличная погода.", style="terminal")
+        app._process_recording(0, self._rec())
+        self.assertTrue(app.polish.polish.called)
 
 
 class AsrPromptTest(unittest.TestCase):

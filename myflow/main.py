@@ -32,6 +32,7 @@ from myflow.audio_store import AudioStore
 from myflow.axtext import AxReader, AxWatcher
 from myflow.db import Database, DictationRecord
 from myflow.config import SettingsStore, DATA_DIR, DEFAULT_APP_CATEGORIES, detect_category
+from myflow.fastpath import fast_path_allowed
 from myflow.insertion import ClipboardPaste
 from myflow.opencode_inject import OpenCodeInjector
 from myflow.learning import record_edit_and_learn, watch_pasted_edit
@@ -195,6 +196,10 @@ class MyFlowApp:
         self.recorder = DictationRecorder(
             device=cfg.asr.input_device,
             silence_pause_seconds=cfg.silence_pause_seconds,
+            silence_amplitude=cfg.silence_amplitude,
+            adaptive_noise_gate=cfg.adaptive_noise_gate,
+            noise_ratio=cfg.noise_ratio,
+            noise_max_gate=cfg.noise_max_gate,
             on_auto_stop=self._on_auto_stop if (not self._pref_auto and cfg.auto_stop_by_silence) else None,
             on_utterance=self._on_utterance if self._pref_auto else None,
             on_interval=self._on_live_preview if cfg.flags.get("live_preview", True) else None,
@@ -798,26 +803,45 @@ class MyFlowApp:
 
         dic = self.db.get_dictionary(app) if flags["learning"] else []
         style = self._resolve_style(app)
-        if self.polish.cfg.enabled:
-            self.overlay.show("⚙ полировка…", "#f5c542")
-        # _polish_safe: любая ошибка LLM -> сырой ASR, фраза не теряется.
-        fails_before = self._polish_fails
-        polished: PolishResult = self._polish_safe(asr.text, style, dic)
-        polish_failed = self._polish_fails > fails_before
-        if polished.skipped or polished.truncated:
-            final_text = asr.text
-            if polished.truncated:
-                print("[myflow]   WARNING: ответ LLM обрезан (max_tokens) — вставлен сырой ASR")
-        else:
-            final_text = self._guard_polish(asr.text, polished.text, style)
 
-        # Метрика расхождения ASR <-> LLM (аналог formattingDivergenceScore).
-        divergence = divergence_score(asr.text, final_text)
+        # Быстрый путь: GigaAM e2e уже отдаёт текст с пунктуацией и заглавными,
+        # и если он оформлен (нет филлеров и чисел словами) — LLM не нужен.
+        # Экономит 110-180 мс на фразе (полировка дороже распознавания).
+        fast_ok, fast_reason = False, ""
+        cfg_polish = self.settings.get().polish
+        if self.polish.cfg.enabled and getattr(cfg_polish, "skip_wellformed", True):
+            fast_ok, fast_reason = fast_path_allowed(
+                getattr(self.whisper, "backend_name", ""), style, asr.text)
+        if fast_ok:
+            final_text = asr.text
+            divergence = 0.0
+            polish_failed = False
+            record_status = "fast_path"
+        else:
+            if self.polish.cfg.enabled:
+                self.overlay.show("⚙ полировка…", "#f5c542")
+            # _polish_safe: любая ошибка LLM -> сырой ASR, фраза не теряется.
+            fails_before = self._polish_fails
+            polished: PolishResult = self._polish_safe(asr.text, style, dic)
+            polish_failed = self._polish_fails > fails_before
+            if polished.skipped or polished.truncated:
+                final_text = asr.text
+                if polished.truncated:
+                    print("[myflow]   WARNING: ответ LLM обрезан (max_tokens) — вставлен сырой ASR")
+            else:
+                final_text = self._guard_polish(asr.text, polished.text, style)
+
+            # Метрика расхождения ASR <-> LLM (аналог formattingDivergenceScore).
+            divergence = divergence_score(asr.text, final_text)
+            record_status = "polish_error" if polish_failed else "ok"
+
         e2e_ms = int((time.perf_counter() - started) * 1000)
 
         # Видимость полировки: показываем исходный ASR и результат LLM,
         # чтобы было понятно, что именно изменила модель.
-        if polished.skipped:
+        if fast_ok:
+            print(f"[myflow]   LLM: быстрый путь ({fast_reason}) — полировка не нужна")
+        elif polished.skipped:
             print("[myflow]   LLM: выключена — вставлен сырой ASR")
         elif final_text == asr.text:
             print(f"[myflow]   LLM: текст не изменён (divergence={divergence:.2f})")
@@ -835,7 +859,7 @@ class MyFlowApp:
                 e2e_latency_ms=e2e_ms,
                 detected_language=asr.language,
                 style=style,
-                status="polish_error" if polish_failed else "ok",
+                status=record_status,
                 app_category=app_category,
                 divergence=divergence,
                 audio_path=str(audio_path) if audio_path else None,
@@ -870,7 +894,8 @@ class MyFlowApp:
                 print(f"[myflow] ✗ ОШИБКА ВСТАВКИ: {exc_in!r}")
         else:
             self.overlay.show("✓ готово", "#46a758")
-        print(f"[myflow] e2e={e2e_ms} мс (asr={asr.latency_ms}, polish={polished.latency_ms})")
+        polish_ms = 0 if fast_ok else polished.latency_ms
+        print(f"[myflow] e2e={e2e_ms} мс (asr={asr.latency_ms}, polish={polish_ms})")
 
     def _refresh_asr_prompt(self, force: bool = False) -> None:
         """Подмешать словарь в подсказку whisper (имена, термины, топонимы).
