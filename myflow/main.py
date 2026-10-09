@@ -172,7 +172,8 @@ def _health_check_llm(polish: PolishClient) -> bool:
 
 
 class MyFlowApp:
-    def __init__(self) -> None:
+    def __init__(self, overlay: StatusOverlay | None = None) -> None:
+        """overlay — свой статус-слой (TUI подставляет свой); None = обычная плашка."""
         self.settings = SettingsStore()
         cfg = self.settings.get()
         self.db = Database()
@@ -202,7 +203,7 @@ class MyFlowApp:
                 f"неизвестный insert_method: {cfg.insert_method!r} "
                 "(допустимо: 'clipboard' | 'opencode')"
             )
-        self.overlay = StatusOverlay()
+        self.overlay = overlay if overlay is not None else StatusOverlay()
         self._last_insert_ts: float = 0.0    # момент последней вставки (delete_last: защита <60с)
         # Очередь фраз: worker обрабатывает последовательно, а recorder в
         # AUTO-режиме тем временем продолжает слушать (не теряем фразы).

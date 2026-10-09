@@ -331,5 +331,11 @@ def main() -> None:
     sys.exit(pick_mic())
 
 
+# Публичные алиасы для TUI (внутренние имена оставлены, чтобы ничего не ломать).
+gather_mics = _gather
+probe_device = _probe
+is_mic_device = _is_mic
+
+
 if __name__ == "__main__":
     main()
