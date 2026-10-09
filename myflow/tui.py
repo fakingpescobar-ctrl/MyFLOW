@@ -54,6 +54,8 @@ def fg(n: int) -> str:
 C_TEXT = fg(252)
 C_DIM = fg(244)
 C_ACCENT = fg(45)
+C_INV = CSI + "7m"       # инверсия — для главной «кнопки» и выделения
+C_KEY = fg(250)          # цвет скобок вокруг клавиш
 C_OK = fg(114)
 C_WARN = fg(214)
 C_ERR = fg(203)
@@ -199,6 +201,62 @@ def map_vt_sequence(seq: str) -> str | None:
     return _VT_KEYS.get(text)
 
 
+def fit_width(line: str, width: int) -> str:
+    """Обрезать строку до видимой ширины, не ломая ANSI-последовательности.
+
+    Нужно как страховка: если строка окажется шире окна, терминал перенесёт её
+    на следующую строку и кадр «поедет» (именно так ломалась отрисовка, когда
+    ширина считалась по буферу консоли, а не по видимому окну).
+    """
+    if width <= 0 or vlen(line) <= width:
+        return line
+    out: list[str] = []
+    visible = 0
+    i = 0
+    while i < len(line) and visible < width:
+        ch = line[i]
+        if ch == "\x1b":
+            m = re.match(r"\x1b\[[0-9;?]*[A-Za-z]", line[i:])
+            if m:
+                out.append(m.group(0))
+                i += len(m.group(0))
+                continue
+        out.append(ch)
+        visible += 1
+        i += 1
+    return "".join(out) + RESET
+
+
+def button_bar(buttons: Sequence[tuple[str, str]], width: int,
+               primary: str | None = None) -> list[str]:
+    """Полоска «кнопок»: [F5] пересканировать  [Enter] запустить …
+
+    buttons — пары (клавиша, подпись). primary — клавиша главного действия,
+    её подсвечиваем инверсией. Подписи не выбрасываем: если не влезает в одну
+    строку — переносим на следующую (раньше хвост молча обрезался вместе с
+    подписями, из-за чего казалось, что «кнопок нет»).
+    """
+    def render(key: str, label: str) -> str:
+        if primary and key == primary:
+            return f"{C_INV}{BOLD} {key} {label} {RESET}"
+        return (f"{C_KEY}[{RESET}{C_ACCENT}{key}{RESET}{C_KEY}]{RESET}"
+                f"{C_DIM} {label} {RESET}")
+
+    lines: list[str] = []
+    current = ""
+    for key, label in buttons:
+        chunk = render(key, label)
+        sep = "  " if current else ""
+        if current and vlen(strip_ansi(current + sep + chunk)) > width:
+            lines.append(current)
+            current = chunk
+        else:
+            current += sep + chunk
+    if current:
+        lines.append(current)
+    return lines or [""]
+
+
 # ----------------------------------------------------------------- консоль
 class Console:
     """Низкоуровневый вывод кадра: VT-режим, размер, курсор."""
@@ -228,6 +286,37 @@ class Console:
             return False
 
     def size(self) -> tuple[int, int]:
+        """Размер ВИДИМОГО окна консоли (не буфера!).
+
+        ВАЖНО: `shutil.get_terminal_size()`/`os.get_terminal_size()` на Windows
+        отдают размер буфера (`dwSize`), а он часто ШИРЕ окна (у пользователя
+        буфер был ~230 колонок при окне ~120). Кадр рисовался на 230 символов,
+        терминал переносил строки — отсюда каша и «два пульта» на экране.
+        Берём `srWindow` из GetConsoleScreenBufferInfo.
+        """
+        try:
+            class _Coord(ctypes.Structure):
+                _fields_ = [("X", ctypes.c_short), ("Y", ctypes.c_short)]
+
+            class _SmallRect(ctypes.Structure):
+                _fields_ = [("Left", ctypes.c_short), ("Top", ctypes.c_short),
+                            ("Right", ctypes.c_short), ("Bottom", ctypes.c_short)]
+
+            class _Csbi(ctypes.Structure):
+                _fields_ = [("dwSize", _Coord), ("dwCursorPosition", _Coord),
+                            ("wAttributes", ctypes.c_ushort), ("srWindow", _SmallRect),
+                            ("dwMaximumWindowSize", _Coord)]
+
+            handle = ctypes.windll.kernel32.GetStdHandle(-11)
+            info = _Csbi()
+            if ctypes.windll.kernel32.GetConsoleScreenBufferInfo(handle,
+                                                                 ctypes.byref(info)):
+                width = info.srWindow.Right - info.srWindow.Left + 1
+                height = info.srWindow.Bottom - info.srWindow.Top + 1
+                if width > 0 and height > 0:
+                    return max(60, int(width)), max(18, int(height) - 1)
+        except Exception:  # noqa: BLE001 — не Windows/нет консоли: падаем на fallback
+            pass
         try:
             sz = shutil.get_terminal_size((100, 30))
             return max(60, int(sz.columns)), max(18, int(sz.lines) - 1)
@@ -245,9 +334,15 @@ class Console:
             self.out.write("\n".join(strip_ansi(x) for x in lines) + "\n")
             self.out.flush()
             return
+        # Защита от «поехавшего» кадра: строка шире окна заставляет терминал
+        # переносить её (и затирать следующие), а лишние строки прокручивают
+        # экран. Поэтому жёстко обрезаем по видимому размеру окна.
+        w, h = self.size()
+        visible = list(lines)[:h]
         buf = [CSI + "H"]
-        for i, ln in enumerate(lines):
-            buf.append(f"{CSI}{i + 1};1H{ln}{CSI}K")
+        for i, ln in enumerate(visible):
+            buf.append(f"{CSI}{i + 1};1H{fit_width(ln, w)}{CSI}K")
+        buf.append(f"{CSI}{len(visible) + 1};1H{CSI}0J")   # чистим хвост экрана
         self.out.write("".join(buf))
         self.out.flush()
 
@@ -337,6 +432,21 @@ class TuiState:
     started_at: float = field(default_factory=time.monotonic)
     phrases: int = 0
     last_e2e_ms: int = 0
+    # Прокрутка журнала: 0 — «живой» режим (видно последние строки),
+    # N — на сколько строк отступили вверх от конца. Новые строки не сбивают
+    # позицию: пользователь может спокойно читать историю.
+    scroll: int = 0
+
+    def scroll_by(self, delta: int, page: int, total: int) -> None:
+        """Прокрутить журнал: delta — строки (или страница), total — длина лога."""
+        with self.lock:
+            max_offset = max(0, total - max(1, page))
+            self.scroll = max(0, min(max_offset, self.scroll + delta))
+
+    def scroll_to(self, offset: int, page: int, total: int) -> None:
+        with self.lock:
+            max_offset = max(0, total - max(1, page))
+            self.scroll = max(0, min(max_offset, offset))
 
     def add_log(self, line: str) -> None:
         text = norm_text(line).rstrip()
@@ -775,13 +885,15 @@ def render_settings(state: SettingsState, store, w: int, h: int,
     cur = store.get()
     info = (f"{C_DIM}сейчас: микрофон {cur.asr.input_device if cur.asr.input_device is not None else 'системный'}"
             f" · режим {cur.mode} · вставка {cur.insert_method}{RESET}")
-    if h > len(body) + 6:
+    if h > len(body) + 8:
         body += ["", info, ""]
-    body.append(f"{C_ACCENT}↑/↓{RESET}{C_DIM} выбор в блоке   {RESET}"
-                f"{C_ACCENT}←/→{RESET}{C_DIM} другой блок   {RESET}"
-                f"{C_ACCENT}Enter{RESET}{C_DIM} старт   {RESET}"
-                f"{C_ACCENT}Esc{RESET}{C_DIM} выход   {RESET}"
-                f"{C_ACCENT}F5{RESET}{C_DIM} пересканировать микрофоны{RESET}")
+    body += ["   " + line for line in button_bar([
+        ("↑↓", "выбор"),
+        ("←→", "раздел"),
+        ("F5", "пересканировать"),
+        ("Enter", "запустить"),
+        ("Esc", "выход"),
+    ], inner_w - 4, primary="Enter")]
     return outer_frame("MyFLOW · настройки запуска", body, w, h)
 
 
@@ -794,8 +906,7 @@ def render_boot(rows: Sequence[str], w: int, h: int, spin: str, note: str = "") 
     return outer_frame("MyFLOW · запуск", body, w, h)
 
 
-def render_dashboard(state: TuiState, w: int, h: int, cfg_line: str,
-                     hint: str = "q выход · r настройки · s перезапуск серверов · c очистить журнал") -> list[str]:
+def render_dashboard(state: TuiState, w: int, h: int, cfg_line: str) -> list[str]:
     status_text, status_ansi, log, servers = state.snapshot()
     body: list[str] = ["", f"  {cfg_line}", ""]
 
@@ -812,8 +923,19 @@ def render_dashboard(state: TuiState, w: int, h: int, cfg_line: str,
     body.append("")
 
     inner_w = w - 8
-    rows_room = max(4, h - len(body) - 8)
-    tail = log[-rows_room:] if log else ["пока пусто — нажми F8 и говори"]
+    # Ниже журнала ещё: статус, пустая строка, полоска кнопок (2 строки) и рамка.
+    rows_room = max(4, h - len(body) - 9)
+    with state.lock:
+        offset = state.scroll
+    if log:
+        end = max(rows_room, len(log) - offset)
+        start = max(0, end - rows_room)
+        tail = log[start:end]
+        if offset > 0:
+            tail = ([f"{C_WARN}↑ прокрутка: {offset} строк назад "
+                     f"(End — в конец){RESET}"] + tail[1:])
+    else:
+        tail = [f"{C_DIM}пока пусто — нажми F8 и говори{RESET}"]
     body += ["   " + x for x in block("Журнал", [C_DIM + r + RESET for r in tail], inner_w + 2)]
     body.append("")
     uptime = int(time.monotonic() - state.started_at)
@@ -821,7 +943,14 @@ def render_dashboard(state: TuiState, w: int, h: int, cfg_line: str,
                 f"    {C_DIM}фраз: {state.phrases} · последняя e2e: {state.last_e2e_ms} мс"
                 f" · сессия {uptime // 60} мин{RESET}")
     body.append("")
-    body.append(f"   {C_DIM}{hint}{RESET}")
+    body += ["   " + line for line in button_bar([
+        ("PgUp/PgDn", "журнал"),
+        ("End", "в конец"),
+        ("r", "настройки"),
+        ("s", "серверы"),
+        ("c", "очистить"),
+        ("q", "выход"),
+    ], inner_w - 4, primary="q")]
     return outer_frame("MyFLOW · пульт", body, w, h)
 
 
@@ -1114,8 +1243,11 @@ class TuiApp:
                 elif last_key == "c":
                     with self.state.lock:
                         self.state.log = ["журнал очищен"]
+                        self.state.scroll = 0
                 elif last_key == "o":
                     self._toggle_gfx()
+                elif last_key in ("pageup", "pagedown", "home", "end", "up", "down"):
+                    self._scroll_journal(last_key, h)
         finally:
             try:
                 self.app.stop()
@@ -1123,6 +1255,28 @@ class TuiApp:
                 pass
             self.app = None
         return "quit"
+
+    def _scroll_journal(self, key: str, height: int) -> None:
+        """Листание журнала в пульте (PgUp/PgDn/Home/End/↑/↓).
+
+        Позиция хранится как отступ от конца, поэтому новые строки не «дёргают»
+        то, что ты читаешь: чтобы вернуться к живому логу — End.
+        """
+        page = max(3, height - 12)
+        with self.state.lock:
+            total = len(self.state.log)
+        if key == "pageup":
+            self.state.scroll_by(page, page, total)
+        elif key == "pagedown":
+            self.state.scroll_by(-page, page, total)
+        elif key == "up":
+            self.state.scroll_by(1, page, total)
+        elif key == "down":
+            self.state.scroll_by(-1, page, total)
+        elif key == "home":
+            self.state.scroll_to(total, page, total)
+        elif key == "end":
+            self.state.scroll_to(0, page, total)
 
     def _toggle_gfx(self) -> None:
         from myflow.overlay import StatusOverlay
@@ -1232,9 +1386,12 @@ def demo_app(hold: float, screen: str = "dashboard") -> int:
         "e2e=1240 мс (asr=520, polish=236)",
     ]:
         st.add_log(line)
-    mics = [{"name": "Микрофон (USB Audio Device)", "idx": 1, "alive": True},
-            {"name": "Микрофон (Realtek(R) Audio)", "idx": 3, "alive": True},
-            {"name": "Микрофон (ATK Mercury I)", "idx": 5, "alive": False}]
+    mics = [{"name": "Микрофон (USB Audio Device)", "idx": 1, "alive": True,
+             "status": "жив (rms=0.0121)", "api": "DS"},
+            {"name": "Микрофон (Realtek(R) Audio)", "idx": 3, "alive": True,
+             "status": "тихий вход (rms=0.00061) — подними усиление?", "api": "MME"},
+            {"name": "Набор микрофонов (Kinect USB Audio)", "idx": 5, "alive": False,
+             "status": "нет сигнала (rms=0.000015)", "api": "MME"}]
     settings = build_choices(tui.store, mics, True)
     settings.focus = 0
     tui.console.clear()
@@ -1244,7 +1401,8 @@ def demo_app(hold: float, screen: str = "dashboard") -> int:
         while time.monotonic() < end:
             w, h = tui.console.size()
             if screen == "settings":
-                tui.console.draw(render_settings(settings, tui.store, w, h))
+                tui.console.draw(render_settings(settings, tui.store, w, h,
+                                                 level=(0.045, "")))
             else:
                 tui.console.draw(render_dashboard(st, w, h, tui._config_line()))
             time.sleep(0.2)

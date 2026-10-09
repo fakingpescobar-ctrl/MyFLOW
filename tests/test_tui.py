@@ -467,7 +467,8 @@ class ScreensTest(unittest.TestCase):
         self.assertIn("ОШИБКА", plain)
         self.assertIn("запись…", plain)
         self.assertIn("Журнал", plain)
-        self.assertIn("q выход", plain)
+        self.assertIn("настройки", plain)
+        self.assertIn("выход", plain)
         for ln in frame:
             self.assertEqual(T.vlen(ln), 100)
 
@@ -483,6 +484,121 @@ class ScreensTest(unittest.TestCase):
         plain = "\n".join(T.strip_ansi(x) for x in frame)
         self.assertIn("whisper-server не отвечает", plain)
         self.assertIn("Enter", plain)
+
+
+class FitWidthTest(unittest.TestCase):
+    """Строка шире окна заставляет терминал переносить её — кадр «едет»."""
+
+    def test_truncates_visible_length(self):
+        line = "абвгдеёжзийклмнопрст"
+        cut = T.fit_width(line, 5)
+        self.assertLessEqual(T.vlen(cut), 5 + len(T.RESET))
+        self.assertEqual(T.vlen(T.strip_ansi(cut)), 5)
+
+    def test_keeps_ansi_and_resets(self):
+        line = f"{T.C_OK}зелёный{T.RESET} текст"
+        cut = T.fit_width(line, 7)
+        self.assertTrue(cut.startswith(T.C_OK), "ANSI-код сохраняется")
+        self.assertTrue(cut.endswith(T.RESET), "в конце сброс цвета")
+        self.assertEqual(T.vlen(T.strip_ansi(cut)), 7)
+
+    def test_short_line_untouched(self):
+        line = f"{T.C_DIM}ок{T.RESET}"
+        self.assertEqual(T.fit_width(line, 20), line)
+
+    def test_zero_width(self):
+        self.assertEqual(T.fit_width("текст", 0), "текст")
+
+
+class ButtonBarTest(unittest.TestCase):
+    def test_contains_keys_and_labels(self):
+        bar = "\n".join(T.button_bar([("F5", "пересканировать"),
+                                        ("Enter", "запустить")], 80))
+        plain = T.strip_ansi(bar)
+        self.assertIn("F5", plain)
+        self.assertIn("пересканировать", plain)
+        self.assertIn("Enter", plain)
+        self.assertIn("запустить", plain)
+
+    def test_primary_is_highlighted(self):
+        bar = "\n".join(T.button_bar([("Enter", "запустить")], 80, primary="Enter"))
+        self.assertIn(T.C_INV, bar, "главная кнопка выделяется инверсией")
+
+    def test_fits_width(self):
+        lines = T.button_bar([("PgUp/PgDn", "журнал"), ("End", "в конец"),
+                              ("r", "настройки"), ("q", "выход")], 40)
+        for line in lines:
+            self.assertLessEqual(T.vlen(T.strip_ansi(line)), 40)
+        joined = T.strip_ansi("\n".join(lines))
+        for label in ("журнал", "в конец", "настройки", "выход"):
+            self.assertIn(label, joined, "подписи не выбрасываем даже на узком окне")
+
+
+class JournalScrollTest(unittest.TestCase):
+    """Прокрутка журнала: можно вернуться и прочитать прошлое."""
+
+    def test_scroll_by_and_clamp(self):
+        st = T.TuiState()
+        st.scroll_by(5, page=10, total=100)
+        self.assertEqual(st.scroll, 5)
+        st.scroll_by(-50, page=10, total=100)
+        self.assertEqual(st.scroll, 0, "ниже нуля не уходим")
+        st.scroll_to(999, page=10, total=100)
+        self.assertEqual(st.scroll, 90, "выше конца не уходим")
+
+    def test_render_shows_older_lines_and_indicator(self):
+        st = T.TuiState()
+        for i in range(40):
+            st.add_log(f"строка {i}")
+        st.scroll_by(10, page=8, total=40)
+        frame = T.render_dashboard(st, 100, 30, "cfg")
+        plain = "\n".join(T.strip_ansi(x) for x in frame)
+        self.assertIn("прокрутка", plain, "видно, что журнал прокручен")
+        self.assertNotIn("строка 39", plain, "самая свежая строка ушла из вида")
+        for ln in frame:
+            self.assertEqual(T.vlen(ln), 100)
+
+    def test_live_mode_shows_tail(self):
+        st = T.TuiState()
+        for i in range(40):
+            st.add_log(f"строка {i}")
+        frame = T.render_dashboard(st, 100, 30, "cfg")
+        plain = "\n".join(T.strip_ansi(x) for x in frame)
+        self.assertIn("строка 39", plain)
+        self.assertNotIn("прокрутка", plain)
+
+
+class ConsoleDrawTest(unittest.TestCase):
+    """draw() обязан обрезать кадр по ВИДИМОМУ окну (а не по буферу)."""
+
+    class _Out:
+        def __init__(self):
+            self.data = ""
+
+        def write(self, s):
+            self.data += s
+
+        def flush(self):
+            pass
+
+    def test_draw_clips_width_and_height(self):
+        console = T.Console.__new__(T.Console)      # без реальной консоли
+        console.out = self._Out()
+        console.vt = True
+        console.size = lambda: (20, 3)              # окно 20x3
+        console.draw(["x" * 50, "y" * 50, "z" * 50, "лишняя", "ещё"])
+        data = console.out.data
+        self.assertNotIn("x" * 50, data, "длинная строка обрезана")
+        self.assertIn(f"{T.CSI}4;1H", data, "строки сверх высоты не рисуем")
+        self.assertIn(f"{T.CSI}0J", data, "хвост экрана очищается")
+
+    def test_draw_plain_when_no_vt(self):
+        console = T.Console.__new__(T.Console)
+        console.out = self._Out()
+        console.vt = False
+        console.draw([f"{T.C_OK}привет{T.RESET}"])
+        self.assertIn("привет", console.out.data)
+        self.assertNotIn(T.C_OK, console.out.data, "без VT цвета не пишем")
 
 
 class PhaseTest(unittest.TestCase):
