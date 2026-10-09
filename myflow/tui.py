@@ -160,6 +160,45 @@ def status_label(state: str) -> str:
             "down": "не запущен", "error": "ОШИБКА"}.get(state, state)
 
 
+# ---- разбор клавиш ----
+# msvcrt отдаёт «расширенные» клавиши как префикс + скан-код. ВАЖНО: у стрелок
+# префикс \xe0, у функциональных клавиш — \x00; раньше обе группы шли через одну
+# таблицу {H,P,K,M}, поэтому F5 (\x00 + «?») не распознавался и «пересканировать
+# микрофоны» не срабатывало вообще.
+_EXT_KEYS: dict[int, dict[bytes, str]] = {
+    0x00: {   # \x00 — функциональные клавиши
+        b";": "f1", b"<": "f2", b"=": "f3", b">": "f4", b"?": "f5",
+        b"@": "f6", b"A": "f7", b"B": "f8", b"C": "f9", b"D": "f10",
+        b"W": "f11", b"X": "f12", b"S": "delete", b"G": "home", b"O": "end",
+    },
+    0xE0: {   # \xe0 — стрелки и навигация
+        b"H": "up", b"P": "down", b"K": "left", b"M": "right",
+        b"S": "delete", b"G": "home", b"O": "end",
+    },
+}
+
+# Windows Terminal (VT-ввод) может прислать F5 как ESC-последовательность \x1b[15~
+_VT_KEYS: dict[str, str] = {
+    "A": "up", "B": "down", "C": "right", "D": "left",
+    "H": "home", "F": "end", "2~": "insert", "3~": "delete",
+    "5~": "pageup", "6~": "pagedown",
+    "11~": "f1", "12~": "f2", "13~": "f3", "14~": "f4", "15~": "f5",
+    "17~": "f6", "18~": "f7", "19~": "f8", "20~": "f9", "21~": "f10",
+    "23~": "f11", "24~": "f12",
+}
+
+
+def map_extended_key(prefix: int, code: bytes) -> str | None:
+    """Скан-код расширенной клавиши -> имя ('f5', 'up', …). Чистая функция."""
+    return _EXT_KEYS.get(prefix, {}).get(code)
+
+
+def map_vt_sequence(seq: str) -> str | None:
+    """Хвост ESC-последовательности ('15~', '[15~', 'A') -> имя клавиши."""
+    text = seq.strip().lstrip("[")
+    return _VT_KEYS.get(text)
+
+
 # ----------------------------------------------------------------- консоль
 class Console:
     """Низкоуровневый вывод кадра: VT-режим, размер, курсор."""
@@ -561,9 +600,12 @@ def build_choices(store, mics: list[dict], system_ok: bool) -> SettingsState:
     current = s.asr.input_device
 
     mic_opts: list[tuple[str, object]] = [("системный по умолчанию", None)]
-    mic_notes: list[str] = ["осн." if system_ok else "нет сигнала"]
+    mic_notes: list[str] = ["жив" if system_ok else "нет сигнала"]
     for m in mics:
-        mark = "живой" if m["alive"] else "нет сигнала"
+        mark = "жив" if m["alive"] else (m.get("status") or "нет сигнала")
+        api = m.get("api") or ""
+        if api:
+            mark = f"{mark} [{api}]"
         mic_opts.append((m["name"], m["idx"]))
         mic_notes.append(mark)
     mic_idx = 0
@@ -762,11 +804,22 @@ class TuiApp:
                 ch = msvcrt.getch()
                 if ch in (b"\x00", b"\xe0"):
                     nxt = msvcrt.getch()
-                    return {b"H": "up", b"P": "down", b"K": "left", b"M": "right"}.get(nxt)
+                    return map_extended_key(ch[0], nxt)
+                if ch == b"\x1b":
+                    # Может быть ESC-последовательность (F5 = \x1b[15~ в VT-режиме).
+                    seq = ""
+                    deadline = time.monotonic() + 0.05
+                    while time.monotonic() < deadline and len(seq) < 6:
+                        if not msvcrt.kbhit():
+                            break
+                        nxt = msvcrt.getch()
+                        seq += nxt.decode("latin-1", "ignore")
+                        name = map_vt_sequence(seq[1:] if seq.startswith("[") else seq)
+                        if name:
+                            return name
+                    return "esc"
                 if ch == b"\r":
                     return "enter"
-                if ch == b"\x1b":
-                    return "esc"
                 if ch == b"\x03":
                     return "ctrl-c"
                 try:

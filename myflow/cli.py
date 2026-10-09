@@ -366,6 +366,72 @@ def cmd_voice(args) -> int:
     return 1
 
 
+def cmd_mic(args) -> int:
+    """Диагностика входных устройств: кто жив, кто занят, почему."""
+    from myflow.pick_mic import _BLACKLIST, _has_mic_hint, gather_mics
+    from myflow.config import SettingsStore
+    import sounddevice as sd
+
+    cur = SettingsStore().get().asr.input_device
+    _out("== Входные устройства звука ==")
+    _out(f"  сейчас выбран: {'#' + str(cur) if cur is not None else 'системный по умолчанию'}")
+    if args.all:
+        apis = sd.query_hostapis()
+        _out("\n  все входы (включая скрытые как «мусор»):")
+        for i, d in enumerate(sd.query_devices()):
+            if d["max_input_channels"] <= 0:
+                continue
+            hidden = [b for b in _BLACKLIST if b in d["name"].lower()]
+            api = apis[d["hostapi"]]["name"].replace("Windows ", "")
+            mark = "скрыт: " + ",".join(hidden) if hidden else (
+                "микрофон" if _has_mic_hint(d["name"]) else "прочий вход")
+            _out(f"    #{i:<3} {api:<14} {d['name'][:46]:<48} {mark}")
+
+    mics = gather_mics()
+    if not mics:
+        _out("\n  входов не найдено")
+        return 1
+    _out("\n  отобранные (одна запись на устройство, живые первыми):")
+    for m in mics:
+        state = "ЖИВ " if m["alive"] else "мёртв"
+        chosen = "  <- выбран" if m["idx"] == cur else ""
+        _out(f"    {state} #{m['idx']:<3} [{m.get('api', ''):<7}] "
+             f"{m['name'][:42]:<44} {m.get('status', '')}{chosen}")
+    alive = [m for m in mics if m["alive"]]
+    _out("")
+    if not alive:
+        _out("  Живых микрофонов нет: проверь, не занят ли микрофон другим "
+             "приложением и не убавлена ли громкость входа.")
+        return 1
+    if cur is not None and not any(m["idx"] == cur for m in alive):
+        from myflow.pick_mic import _cluster_key
+        best = alive[0]
+        same_phys = False
+        try:
+            cur_name = sd.query_devices(cur)["name"]
+            a, b = _cluster_key(best["name"]), _cluster_key(cur_name)
+            same_phys = a.startswith(b) or b.startswith(a)
+        except Exception:  # noqa: BLE001
+            pass
+        hint = ("это ТО ЖЕ устройство, просто другой драйвер (API) — выбери его"
+                if same_phys else "другое устройство")
+        _out(f"  Выбранный #{cur} не даёт сигнала. Лучший вариант: "
+             f"#{best['idx']} «{best['name']}» ({best.get('api', '')}) — {hint}")
+        _out(f"  Поставить: python -m myflow.cli mic --set {best['idx']}")
+        return 1
+    _out("  Всё в порядке.")
+    return 0
+
+
+def cmd_mic_set(index: int) -> int:
+    from myflow.config import SettingsStore
+    store = SettingsStore()
+    store.get().asr.input_device = index
+    store.save()
+    _out(f"Микрофон сохранён: #{index}")
+    return 0
+
+
 # ---------------------------------------------------------------- CLI
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="myflow.cli", description="MyFLOW: служебные команды")
@@ -406,6 +472,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     doc = sub.add_parser("doctor", help="проверка окружения")
     doc.set_defaults(func=cmd_doctor)
+
+    mc = sub.add_parser("mic", help="диагностика микрофонов (кто жив, кто занят)")
+    mc.add_argument("--all", action="store_true", help="показать и скрытые входы")
+    mc.add_argument("--set", type=int, default=None, metavar="ИНДЕКС",
+                    help="сохранить микрофон по индексу и выйти")
+    mc.set_defaults(func=lambda a: cmd_mic_set(a.set) if a.set is not None else cmd_mic(a))
 
     vp = sub.add_parser("voice", help="профиль голоса (speaker verification)")
     vp_sub = vp.add_subparsers(dest="action", required=True)

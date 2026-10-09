@@ -25,6 +25,7 @@ import msvcrt
 import re
 import sys
 import threading
+import time
 
 import numpy as np
 import sounddevice as sd
@@ -35,55 +36,127 @@ from myflow.config import SettingsStore, SAMPLE_RATE
 _BLACKLIST = (
     "переназначение", "первичный драйвер", "первичный звуковой",
     "cable output", "cable input", "vb-audio", "stereo mixer", "стерио микшер",
-    "spdif", "волновой", "wave out", "mapper", "loopback", "что слышно",
-    "наушники", "headphones", "динамики", "speakers", "output", "монитор",
+    "стерео микшер", "микшер", "spdif", "волновой", "wave out", "mapper",
+    "loopback", "что слышно", "наушники", "headphones", "динамики", "speakers",
+    "output", "монитор",
 )
 
-# Реальный микрофон = в имени есть «микрофон» или «mic» и нет мусора.
-_MIC_HINT = ("микрофон", "mic")
+# Признаки микрофона в имени — только ДЛЯ ПОДСКАЗКИ в сортировке. Раньше по ним
+# устройство отбрасывалось целиком, и микрофон с нестандартным именем
+# (например, USB-интерфейс «Ardor Gaming») не попадал в список вообще.
+_MIC_HINT = ("микрофон", "mic", "набор микрофонов")
 
-_DEAD_RMS = 0.0001  # порог «живости»: мёртвое ~1.5e-5, живое ~5e-4+
+# Порог «живости»: полностью мёртвое устройство даёт цифровую тишину ~1.5e-5,
+# поэтому 3e-5 отделяет «нет сигнала» от «что-то идёт». Всё, что между 3e-5 и
+# 1e-3, помечаем живым, но с предупреждением: это либо очень тихая комната,
+# либо убавленное усиление входа — и тогда фразы будут отсекаться как «тишина»
+# (в рантайме порог пика 0.01).
+_DEAD_RMS = 3e-5
+_QUIET_RMS = 1e-3
+# Проба: короткий 0.25 с недостаточно — USB-интерфейсы и BT-микрофоны
+# «раскачиваются» не мгновенно. Пишем 0.45 с и меряем RMS по хвосту.
+_PROBE_SECONDS = 0.45
+_PROBE_SKIP_SECONDS = 0.15
+
+
+def _has_mic_hint(name: str) -> bool:
+    """Похоже ли имя на микрофон (для приоритета в списке, не для фильтра)."""
+    low = name.lower()
+    return any(h in low for h in _MIC_HINT)
 
 
 def _is_mic(name: str) -> bool:
-    low = name.lower()
-    if not any(h in low for h in _MIC_HINT):
-        return False
-    return not any(b in low for b in _BLACKLIST)
+    """Показывать ли устройство в списке входов.
 
-
-def _probe(device: int | None, timeout: float = 1.5) -> bool:
-    """Действительно ли устройство даёт сигнал (живой микрофон).
-
-    Открытие потока НЕ достаточно: MME/DirectSound «открываются» даже
-    на выключенном блютуз-устройстве и молча отдают нули. Поэтому
-    записываем ~0.25 c и смотрим RMS: мёртвое даёт ~0.000015, живой
-    микрофон — шум комнаты ~0.0005+.
-
-    Зависший BT-драйвер раньше вешал весь запуск (sd.wait без границы) —
-    поэтому проба идёт в отдельном потоке с таймаутом.
+    Критерий — «это вход, а не выход/виртуальный мусор». Раньше требовалось
+    слово «микрофон» в имени: микрофоны с другим именем исчезали из списка
+    (реальный кейс: «Ardor Gaming Vox» показывался только как «Kinect»).
     """
-    result = {"ok": False}
+    low = name.lower()
+    if any(b in low for b in _BLACKLIST):
+        return False
+    return True
 
-    def _run() -> None:
+
+def _probe_status(device: int | None, timeout: float = 2.5) -> tuple[bool, str]:
+    """(жив_ли, причина). Причина важна: «занят» и «тишина» — разные проблемы.
+
+    Открытие потока НЕ достаточно: MME/DirectSound «открываются» даже на
+    выключенном блютуз-устройстве и молча отдают нули — поэтому смотрим RMS.
+    Но и «не открылось» нельзя путать с «молчит»: первое обычно значит, что
+    устройство занято другим приложением.
+    """
+    result: dict[str, object] = {"alive": False, "reason": "нет сигнала"}
+
+    def _attempt() -> None:
         try:
-            rec = sd.rec(
-                int(SAMPLE_RATE * 0.25), samplerate=SAMPLE_RATE,
-                channels=1, dtype="float32", device=device,
-            )
+            n = int(SAMPLE_RATE * _PROBE_SECONDS)
+            rec = sd.rec(n, samplerate=SAMPLE_RATE, channels=1, dtype="float32",
+                         device=device)
             sd.wait()
             x = np.nan_to_num(rec[:, 0]) if len(rec) else np.zeros(0)
             if not len(x):
+                result["reason"] = "нет данных от устройства"
                 return
-            rms = float(np.sqrt(np.mean(x ** 2)))
-            result["ok"] = rms > _DEAD_RMS
-        except Exception:  # noqa: BLE001 — мёртвое так и помечаем
-            pass
+            skip = int(SAMPLE_RATE * _PROBE_SKIP_SECONDS)
+            tail = x[skip:] if len(x) > skip else x
+            rms = float(np.sqrt(np.mean(tail ** 2)))
+            if rms > _QUIET_RMS:
+                result["alive"] = True
+                result["reason"] = f"жив (rms={rms:.4f})"
+            elif rms > _DEAD_RMS:
+                # Сигнал есть, но тихий: микрофон рабочий, однако проверь
+                # громкость входа — иначе фразы будут отсекаться как «тишина».
+                result["alive"] = True
+                result["reason"] = f"тихий вход (rms={rms:.5f}) — подними усиление?"
+            else:
+                result["reason"] = f"нет сигнала (rms={rms:.6f})"
+        except Exception as exc:  # noqa: BLE001 — мёртвое/занятое так и помечаем
+            msg = str(exc)
+            short = msg.split("[PaErrorCode")[0].strip()
+            short = short.replace("Error opening InputStream:", "").strip() or "ошибка"
+            if "Invalid sample rate" in msg:
+                result["reason"] = "не умеет 16 кГц — смени API"
+            elif "busy" in msg.lower() or "unavailable" in msg.lower():
+                result["reason"] = "занят другим приложением"
+            elif "Invalid device" in msg:
+                result["reason"] = "устройство исчезло (пересканируй)"
+            else:
+                reason = f"не открылся: {short}"
+                result["reason"] = reason[:40]
+
+    def _run() -> None:
+        _attempt()
+        if not result["alive"]:
+            # Один повтор: сразу после старта/BT-пробуждения первый заход часто
+            # падает, хотя устройство рабочее.
+            time.sleep(0.15)
+            _attempt()
 
     t = threading.Thread(target=_run, daemon=True, name="mic-probe")
     t.start()
     t.join(timeout)
-    return result["ok"]
+    if t.is_alive():
+        return False, "таймаут (драйвер завис)"
+    return bool(result["alive"]), str(result["reason"])
+
+
+def _probe(device: int | None, timeout: float = 2.5) -> bool:
+    """Совместимость: просто «жив ли». Подробности — _probe_status()."""
+    return _probe_status(device, timeout)[0]
+
+
+def _hostapi_short(device: int) -> str:
+    """Короткое имя host API устройства (MME/WASAPI/…) — для диагностики."""
+    try:
+        api = sd.query_devices(device)["hostapi"]
+        name = sd.query_hostapis(api)["name"]
+        return (name.replace("Windows ", "")
+                    .replace("DirectSound", "DS")
+                    .replace("WDM-KS", "WDM")
+                    .strip())
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def _cluster_key(name: str) -> str:
@@ -92,9 +165,9 @@ def _cluster_key(name: str) -> str:
 
 
 def _gather() -> list[dict]:
-    """Реальные микрофоны: одна запись на физику, с живостью.
+    """Входные устройства: одна запись на физику, с живостью и причиной.
 
-    Возвращает [{"name", "idx", "alive"}], живые — первыми.
+    Возвращает [{"name", "idx", "alive", "status", "api"}], живые — первыми.
     Обрезанные имена сопоставляем префиксом: «...DualSense W» ⊆
     «...DualSense Wireless Controller».
     """
@@ -108,18 +181,25 @@ def _gather() -> list[dict]:
     if not cands:
         return []
 
-    alive = {i: _probe(i) for i, _ in cands}
+    probed = {i: _probe_status(i) for i, _ in cands}
 
     groups: list[dict] = []
-    for idx, name in sorted(cands, key=lambda c: -len(c[1])):
+    # Сначала имена с «микрофон/mic», потом остальные входы (Line In и т.п.)
+    ordered = sorted(cands, key=lambda c: (not _has_mic_hint(c[1]), -len(c[1])))
+    for idx, name in ordered:
         key = _cluster_key(name)
         match = next((g for g in groups
                       if g["key"].startswith(key) or key.startswith(g["key"])), None)
+        alive, reason = probed[idx]
         if match is None:
-            groups.append({"key": key, "name": name, "idx": idx, "alive": alive[idx]})
+            groups.append({"key": key, "name": name, "idx": idx, "alive": alive,
+                           "status": reason, "api": _hostapi_short(idx)})
         else:
-            if alive[idx] and not match["alive"]:
+            # Дубли одной физики в разных API: берём первый ЖИВОЙ вариант,
+            # его причину и его API (Ardor: MME живой, WASAPI не умеет 16 кГц).
+            if alive and not match["alive"]:
                 match["idx"], match["alive"] = idx, True
+                match["status"], match["api"] = reason, _hostapi_short(idx)
             if len(match["name"]) < len(name):
                 match["name"], match["key"] = name, key
     groups.sort(key=lambda g: (not g["alive"], g["idx"]))
@@ -209,10 +289,12 @@ def _pick_mic_menu(store: SettingsStore) -> int | None | object:
     items: list[tuple[str, object]] = []
     for m in live:
         mark = "  [сейчас]" if m["idx"] == current else ""
-        items.append((f"\x1b[32m✓\x1b[0m {m['name']}{mark}", m["idx"]))
+        api = f" [{m['api']}]" if m.get("api") else ""
+        items.append((f"\x1b[32m✓\x1b[0m {m['name']}{api}{mark}", m["idx"]))
     for m in mics:
         if not m["alive"]:
-            items.append((f"\x1b[31m✗\x1b[0m {m['name']}", m["idx"]))
+            why = f" — {m['status']}" if m.get("status") else ""
+            items.append((f"\x1b[31m✗\x1b[0m {m['name']}\x1b[90m{why}\x1b[0m", m["idx"]))
     if sys_default_ok:
         items.append(("системный по умолчанию", _DEFAULT_SYS))
     else:

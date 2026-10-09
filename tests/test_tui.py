@@ -28,6 +28,58 @@ class FakeStore:
 
 
 # ---------------------------------------------------------------- утилиты
+class KeyMappingTest(unittest.TestCase):
+    """F5 (пересканировать микрофоны) не работал: скан-код \\x00 + '?' не
+    распознавался, потому что стрелки (\\xe0) и функциональные клавиши (\\x00)
+    обрабатывались одной таблицей."""
+
+    def test_function_keys(self):
+        expected = {b"?": "f5", b"B": "f8", b"A": "f7", b"C": "f9", b"D": "f10",
+                    b"W": "f11", b"X": "f12"}
+        for code, name in expected.items():
+            self.assertEqual(T.map_extended_key(0x00, code), name, code)
+
+    def test_arrows(self):
+        self.assertEqual(T.map_extended_key(0xE0, b"H"), "up")
+        self.assertEqual(T.map_extended_key(0xE0, b"P"), "down")
+        self.assertEqual(T.map_extended_key(0xE0, b"K"), "left")
+        self.assertEqual(T.map_extended_key(0xE0, b"M"), "right")
+
+    def test_prefixes_do_not_collide(self):
+        """'A'/'B' — это F7/F8 под префиксом \\x00, но не стрелки."""
+        self.assertEqual(T.map_extended_key(0x00, b"A"), "f7")
+        self.assertIsNone(T.map_extended_key(0xE0, b"A"))
+
+    def test_unknown_code(self):
+        self.assertIsNone(T.map_extended_key(0x00, b"\xff"))
+
+    def test_vt_sequences(self):
+        """Windows Terminal может прислать F5 как ESC[15~."""
+        self.assertEqual(T.map_vt_sequence("15~"), "f5")
+        self.assertEqual(T.map_vt_sequence("[15~"), "f5")
+        self.assertEqual(T.map_vt_sequence("A"), "up")
+        self.assertEqual(T.map_vt_sequence("3~"), "delete")
+        self.assertIsNone(T.map_vt_sequence("999"))
+
+
+class MicNoteTest(unittest.TestCase):
+    """Строка микрофона в настройках показывает причину и host API."""
+
+    def test_note_contains_status_and_api(self):
+        store = FakeStore()
+        mics = [{"name": "Микрофон (Ardor Gaming Vox)", "idx": 1, "alive": True,
+                 "status": "жив (rms=0.0021)", "api": "MME"},
+                {"name": "Микрофон (Vault )", "idx": 2, "alive": False,
+                 "status": "нет сигнала (rms=0.000015)", "api": "MME"}]
+        state = T.build_choices(store, mics, system_ok=True)
+        mic = next(c for c in state.choices if c.key == "mic")
+        labels = [c[0] for c in mic.options]
+        self.assertIn("Ardor", " ".join(labels))
+        self.assertEqual(mic.note(0), "жив")
+        self.assertIn("MME", mic.note(1))
+        self.assertIn("нет сигнала", mic.note(2))
+
+
 class TextHelpersTest(unittest.TestCase):
     def test_strip_ansi_and_vlen(self):
         s = f"{T.C_OK}готово{T.RESET}"
@@ -322,7 +374,7 @@ class ScreensTest(unittest.TestCase):
         self.assertIn("Режим диктовки", plain)
         self.assertIn("Куда вставлять", plain)
         self.assertIn("[x]", plain)
-        self.assertIn("живой", plain)
+        self.assertIn("жив", plain)
         for ln in frame:
             self.assertEqual(T.vlen(ln), 96)
 
