@@ -35,6 +35,10 @@ class _Flags(dict):
     pass
 
 
+class _VoiceCfg:
+    mode = "always"          # в тестах проверяем сам факт вызова гейта
+
+
 class _PolishCfg:
     def __init__(self, skip_wellformed=False):
         self.skip_wellformed = skip_wellformed
@@ -50,6 +54,7 @@ class _Settings:
     hotkey = _HK()
     asr = _AsrCfg()
     polish = _PolishCfg()
+    voiceprint = _VoiceCfg()
     use_ax_observation = False          # в тестах AX не поднимаем
     observation_seconds = 0.2
     app_categories = None                # -> DEFAULT_APP_CATEGORIES
@@ -61,6 +66,8 @@ class _Settings:
         self.default_style = "plain"
         self.asr = _AsrCfg()
         self.polish = _PolishCfg()
+        # Своя копия на каждый тест: иначе правка mode протекает между тестами.
+        self.voiceprint = _VoiceCfg()
         self.flags = _Flags(auto_insert=True, learning=False, overlay=False,
                             live_preview=False, beep_on_start=False,
                             snippets=True, keep_audio=False, ax_observation=False)
@@ -739,6 +746,32 @@ class VoiceGateFlowTest(unittest.TestCase):
         args, kwargs = app.voice.maybe_auto_enroll.call_args
         self.assertTrue(kwargs.get("accepted"))
         self.assertAlmostEqual(kwargs.get("score"), 0.72)
+
+    def test_ptt_mode_skips_voice_check_by_default(self):
+        """В PTT (удержание F8) — явное намерение, лишний отказ вреднее."""
+        app = make_app(auto=False)                      # PTT
+        app.settings.get().voiceprint.mode = "auto"
+        app.voice.check.return_value = (False, 0.05, "чужой голос")
+        app.whisper = _Whisper("Проверка PTT.")
+        app._process_recording(0, self._rec())
+        self.assertFalse(app.voice.check.called, "в PTT проверку не делаем")
+        self.assertEqual(app.paster.calls, ["Проверка PTT."])
+
+    def test_auto_mode_checks_voice(self):
+        app = make_app(auto=True)                       # AUTO: слушает постоянно
+        app.settings.get().voiceprint.mode = "auto"
+        app.voice.check.return_value = (False, 0.05, "чужой голос")
+        app._process_recording(0, self._rec())
+        self.assertTrue(app.voice.check.called)
+        self.assertEqual(app.db.records[-1].status, "other_speaker")
+
+    def test_mode_off_skips_check_everywhere(self):
+        app = make_app(auto=True)
+        app.settings.get().voiceprint.mode = "off"
+        app.voice.check.return_value = (False, 0.05, "чужой голос")
+        app.whisper = _Whisper("Проверка off.")
+        app._process_recording(0, self._rec())
+        self.assertFalse(app.voice.check.called)
 
 
 class AsrPromptTest(unittest.TestCase):

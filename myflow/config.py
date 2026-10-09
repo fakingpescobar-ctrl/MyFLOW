@@ -130,6 +130,13 @@ class VoicePrintConfig:
     enabled: bool = True
     threshold: float = 0.25          # косинус к профилю; ниже -> фраза не наша
     min_seconds: float = 0.8         # короче — эмбеддинг ненадёжен, не проверяем
+    # Где проверять:
+    #   "auto"   — только в AUTO-режиме (микрофон слушает постоянно, и чужую
+    #              речь надо отсекать). В PTT не проверяем: удержание F8 — это
+    #              явное намерение пользователя, лишний отказ там вреднее.
+    #   "always" — всегда (в т.ч. PTT);
+    #   "off"    — выключено.
+    mode: str = "auto"
     auto_enroll: bool = True         # пополнять профиль своими удачными фразами
     enroll_min_score: float = 0.45   # в авто-режиме берём только уверенно «свои»
     # Пути: пусто = $MYFLOW_VOICEPRINT_MODEL / $MYFLOW_VOICEPRINT_PROFILE,

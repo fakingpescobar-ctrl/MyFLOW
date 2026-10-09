@@ -787,7 +787,13 @@ class MyFlowApp:
 
         # Проверка голоса ДО распознавания: если фразу сказал не владелец
         # (телевизор, коллега, видео) — не тратим ASR/LLM и ничего не вставляем.
-        voice_ok, voice_score, voice_reason = self.voice.check(recording.pcm_int16)
+        # В PTT-режиме по умолчанию не проверяем: удержание F8 — явное намерение.
+        voice_cfg = self.settings.get().voiceprint
+        voice_active = (voice_cfg.mode == "always"
+                        or (voice_cfg.mode == "auto" and self._pref_auto))
+        voice_ok, voice_score, voice_reason = (True, None, "проверка не в этом режиме")
+        if voice_active:
+            voice_ok, voice_score, voice_reason = self.voice.check(recording.pcm_int16)
         if not voice_ok:
             e2e_ms = int((time.perf_counter() - started) * 1000)
             print(f"[myflow] ✗ {voice_reason} — фраза пропущена "
