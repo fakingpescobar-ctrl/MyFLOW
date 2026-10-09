@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import re
 import threading
-from dataclasses import dataclass, field, asdict, fields
+from dataclasses import dataclass, field, asdict, fields, is_dataclass
 from pathlib import Path
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
@@ -242,17 +242,29 @@ class SettingsStore:
             if not isinstance(raw, dict):
                 raise ValueError("не объект")
             data = Settings()
-            # Вложенные dataclass материализуем явно (Settings(**raw) с dict не работает).
-            # Неизвестные ключи внутри секции игнорируем (совместимость вперёд/назад),
-            # отсутствующие — берём из дефолтов dataclass.
-            for name, cls in (("asr", AsrConfig), ("polish", PolishConfig), ("hotkey", HotkeyConfig)):
-                section = raw.get(name)
-                if isinstance(section, dict):
-                    known = {f.name for f in fields(cls)}
-                    setattr(data, name, cls(**{k: v for k, v in section.items() if k in known}))
-            for name, value in raw.items():
-                if name in ("asr", "polish", "hotkey"):
+            # Вложенные dataclass материализуем АВТОМАТИЧЕСКИ по аннотациям
+            # Settings. Раньше секции были перечислены руками (asr/polish/hotkey),
+            # и добавление voiceprint привело к падению: из JSON приходил dict,
+            # а код ждал dataclass ('dict' object has no attribute 'enabled').
+            # Неизвестные ключи внутри секции игнорируем (совместимость
+            # вперёд/назад), отсутствующие — берём из дефолтов dataclass.
+            from typing import get_type_hints
+            hints = get_type_hints(Settings)
+            nested: set[str] = set()
+            for f in fields(Settings):
+                cls = hints.get(f.name)
+                if not (isinstance(cls, type) and is_dataclass(cls)):
                     continue
+                nested.add(f.name)
+                section = raw.get(f.name)
+                if isinstance(section, dict):
+                    known = {ff.name for ff in fields(cls)}
+                    setattr(data, f.name,
+                            cls(**{k: v for k, v in section.items() if k in known}))
+            field_names = {f.name for f in fields(Settings)}
+            for name, value in raw.items():
+                if name in nested:
+                    continue        # уже материализовано выше
                 if name == "flags":
                     # MERGE с дефолтами, а не замена: иначе отсутствие нового
                     # флага в старом settings.json = KeyError на каждой фразе.
@@ -261,6 +273,8 @@ class SettingsStore:
                             {k: bool(v) for k, v in value.items() if k in data.flags}
                         )
                     continue
+                if name not in field_names:
+                    continue        # посторонние ключи не тащим в объект
                 setattr(data, name, value)
             return data
         except (json.JSONDecodeError, TypeError, ValueError):

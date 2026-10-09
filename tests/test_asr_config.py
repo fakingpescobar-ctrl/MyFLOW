@@ -124,6 +124,58 @@ class ConfigTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             SettingsStore(path)
 
+    def test_all_nested_sections_are_materialized(self):
+        """Регресс: 'dict' object has no attribute 'enabled'.
+
+        `save()` пишет вложенные dataclass как dict (asdict), поэтому после
+        сохранения и следующей загрузки каждая секция ОБЯЗАНА снова стать
+        dataclass. Раньше секции были перечислены руками, и добавление
+        voiceprint ломало запуск приложения сразу после сохранения настроек.
+        """
+        from dataclasses import fields as dc_fields, is_dataclass
+        from typing import get_type_hints
+        from myflow.config import Settings
+
+        path = self._write({})
+        store = SettingsStore(path)
+        store.save()                     # пишем ВСЕ секции в файл
+        reloaded = SettingsStore(path).get()
+        hints = get_type_hints(Settings)
+        checked = 0
+        for f in dc_fields(Settings):
+            cls = hints.get(f.name)
+            value = getattr(reloaded, f.name)
+            if isinstance(cls, type) and is_dataclass(cls):
+                checked += 1
+                self.assertIsInstance(
+                    value, cls,
+                    f"секция {f.name} должна быть {cls.__name__}, а не {type(value).__name__}")
+        self.assertGreaterEqual(checked, 4, "все вложенные секции должны проверяться")
+
+    def test_voiceprint_section_from_json(self):
+        """Секция voiceprint читается из файла и остаётся dataclass."""
+        path = self._write({"voiceprint": {"enabled": False, "threshold": 0.4,
+                                           "mode": "always", "мусор": 1}})
+        vp = SettingsStore(path).get().voiceprint
+        self.assertFalse(vp.enabled)
+        self.assertAlmostEqual(vp.threshold, 0.4)
+        self.assertEqual(vp.mode, "always")
+        self.assertTrue(vp.auto_enroll, "незаданные поля берутся из дефолтов")
+        self.assertFalse(hasattr(vp, "мусор"), "неизвестные поля игнорируем")
+
+    def test_voiceprint_survives_roundtrip(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / "settings.json"
+        store = SettingsStore(path)
+        store.get().voiceprint.enabled = False
+        store.get().voiceprint.threshold = 0.33
+        store.save()
+        vp = SettingsStore(path).get().voiceprint
+        self.assertFalse(vp.enabled)
+        self.assertAlmostEqual(vp.threshold, 0.33)
+        self.assertEqual(vp.mode, "auto", "дефолт режима сохраняется")
+
     def test_roundtrip_save(self):
         path = self._write({"mode": "auto"})
         store = SettingsStore(path)
