@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import queue
 import threading
 from dataclasses import dataclass
 from typing import Callable
@@ -112,7 +113,15 @@ class DictationRecorder:
         self._max_samples = MAX_DICTATION_SECONDS * sample_rate
         self._hard_limit_fired = False
         self._status_count = 0
+        self._dropped_chunks = 0
         self._utter_ready = False
+        # Тяжёлая работа (ONNX-инференс VAD + конверсия в Int16) вынесена из
+        # PortAudio-callback в отдельный поток: в колбэке только копия буфера.
+        # Раньше инференс шёл в RT-потоке и рядом с whisper/llama давал underflow.
+        self._work_q: queue.Queue = queue.Queue(maxsize=512)
+        self._worker = threading.Thread(target=self._work_loop, daemon=True,
+                                        name="audio-worker")
+        self._worker.start()
 
     # ---------- общий открытие/закрытие стрима ----------
 
@@ -237,11 +246,32 @@ class DictationRecorder:
             raise RuntimeError("нет активной записи")
         stream.stop()
         stream.close()
+        self._drain_work_queue()
         with self._lock:
             pcm = np.concatenate(self._buffer) if self._buffer else np.zeros(0, dtype=np.int16)
             duration_ms = int(len(pcm) * 1000 / self.sample_rate)
             max_amp = self._max_amp
         return Recording(pcm_int16=pcm, duration_ms=duration_ms, max_amplitude=max_amp)
+
+    def _drain_work_queue(self, timeout: float = 0.5) -> None:
+        """Дождаться, пока воркер разберёт уже принятые чанки.
+
+        Иначе хвост фразы (последние 40-80 мс) остаётся в очереди и не
+        попадает в запись: колбэк теперь только кладёт чанк.
+        join() ждём в отдельном потоке — у Queue нет таймаута на join.
+        """
+        done = threading.Event()
+
+        def _joiner() -> None:
+            try:
+                self._work_q.join()
+            except Exception:  # noqa: BLE001
+                pass
+            finally:
+                done.set()
+
+        threading.Thread(target=_joiner, daemon=True, name="audio-drain").start()
+        done.wait(timeout)
 
     def too_long(self) -> bool:
         """Лимит диктовки (Wispr: DICTATION_DURATION_TIMEOUT=19мин, мы меньше)."""
@@ -273,6 +303,7 @@ class DictationRecorder:
         if stream is not None:
             stream.stop()
             stream.close()
+        self._drain_work_queue()
 
     def force_finish(self) -> bool:
         """AUTO: ручной финиш текущей фразы (кнопка). True — фраза была."""
@@ -413,13 +444,31 @@ class DictationRecorder:
     # ---------- диспетчер callback ----------
 
     def _on_audio(self, indata: np.ndarray, frames: int, time_info, status) -> None:
+        """PortAudio-callback: только копия буфера, никакой тяжёлой работы."""
         if status:
             # НЕ выбрасываем блок: overflow/underflow = дыра в речи, раньше
             # она исчезала бесследно. Считаем и изредка сообщаем.
             self._status_count += 1
             if self._status_count <= 3 or self._status_count % 500 == 0:
                 print(f"[audio] статус потока: {status} (всего {self._status_count})")
-        if self._continuous:
-            self._on_audio_continuous(indata)
-        else:
-            self._on_audio_ptt(indata, frames)
+        try:
+            self._work_q.put_nowait((indata.copy(), frames, status))
+        except queue.Full:
+            self._dropped_chunks += 1
+            if self._dropped_chunks <= 3 or self._dropped_chunks % 500 == 0:
+                print(f"[audio] очередь обработки переполнена "
+                      f"(потеряно чанков: {self._dropped_chunks})")
+
+    def _work_loop(self) -> None:
+        """Разбор чанков вне RT-потока: VAD, Int16, состояние фразы."""
+        while True:
+            indata, frames, status = self._work_q.get()
+            try:
+                if self._continuous:
+                    self._on_audio_continuous(indata)
+                else:
+                    self._on_audio_ptt(indata, frames)
+            except Exception as exc:  # noqa: BLE001 — воркер не должен умирать
+                print(f"[audio] ошибка обработки чанка: {exc!r}")
+            finally:
+                self._work_q.task_done()

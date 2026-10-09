@@ -139,6 +139,27 @@ class TestHistory(unittest.TestCase):
             self.assertEqual(db.stats()["dictations"], 1)
             db.close()
 
+    def test_prune_history_retention(self):
+        """P2-11: история не растёт вечно (приватность + размер)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            from myflow.db import DictationRecord
+            db = Database(Path(tmp) / "h.sqlite")
+            fresh = db.insert_history(DictationRecord(
+                asr_text="сегодня", polished_text="Сегодня.", app_window="t",
+                duration_ms=1000, e2e_latency_ms=100))
+            old = db.insert_history(DictationRecord(
+                asr_text="давно", polished_text="Давно.", app_window="t",
+                duration_ms=1000, e2e_latency_ms=100))
+            db._conn.execute("UPDATE history SET created_at = datetime('now','-200 days') WHERE id=?",
+                             (old,))
+            db._conn.commit()
+            removed = db.prune_history(90)
+            self.assertEqual(removed, 1)
+            self.assertIsNone(db.get_polished_text(old))
+            self.assertEqual(db.get_polished_text(fresh), "Сегодня.")
+            self.assertEqual(db.prune_history(0), 0, "0 = хранить вечно")
+            db.close()
+
 
 if __name__ == "__main__":
     unittest.main()

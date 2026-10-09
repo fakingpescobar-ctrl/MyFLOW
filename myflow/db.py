@@ -89,6 +89,8 @@ class Database:
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
+                CREATE INDEX IF NOT EXISTS ix_history_created ON history(created_at);
+                CREATE INDEX IF NOT EXISTS ix_history_app ON history(app_window);
                 """
                 + self._DICT_DDL
             )
@@ -239,6 +241,20 @@ class Database:
                 self._conn.close()
             except sqlite3.Error:
                 pass
+
+    def prune_history(self, keep_days: int = 90) -> int:
+        """Удалить историю старше keep_days (0/None = не чистить).
+
+        Приватность (в истории — полный текст диктовок) и размер файла.
+        """
+        if not keep_days or keep_days <= 0:
+            return 0
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "DELETE FROM history WHERE created_at < datetime('now', ?)",
+                (f"-{int(keep_days)} days",),
+            )
+            return int(cur.rowcount or 0)
 
     def get_polished_text(self, history_id: int) -> str | None:
         """Текст диктовки, от которого юзер правил (для обучения)."""

@@ -4,6 +4,7 @@
 реальный Silero здесь не нужен (его качество проверяют tools/bench_vad.py и
 tools/validate_silero.py), а зависимость от ONNX делала тесты хрупкими.
 """
+import queue
 import time
 import unittest
 
@@ -203,6 +204,28 @@ class RecorderFsmTest(unittest.TestCase):
         rec, out = self._auto()
         rec._on_audio(SPEECH, 640, None, "input overflow")
         self.assertEqual(rec._status_count, 1)
+
+    def test_callback_path_reaches_worker(self):
+        """P2-2: колбэк только кладёт чанк, состояние обновляет воркер."""
+        rec, out = self._auto()
+        rec._continuous = True
+        for _ in range(20):
+            rec._on_audio(SPEECH, 640, None, None)
+        rec._drain_work_queue()
+        self.assertTrue(rec._ring, "воркер не наполнил кольцо pre-roll")
+        self.assertEqual(rec._state, "speech", "воркер не перевёл FSM в речь")
+
+    def test_worker_drop_counter_on_overflow(self):
+        """При переполнении очереди считаем потерянные чанки, не теряя поток.
+
+        Подменяем очередь на maxsize=1: воркер остался ждать на СТАРОЙ
+        очереди, поэтому новая гарантированно переполняется.
+        """
+        rec, out = self._auto()
+        rec._work_q = queue.Queue(maxsize=1)
+        for _ in range(3):
+            rec._on_audio(SPEECH, 640, None, None)
+        self.assertGreaterEqual(rec._dropped_chunks, 1)
 
 
 if __name__ == "__main__":

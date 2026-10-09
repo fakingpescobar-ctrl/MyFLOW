@@ -4,6 +4,7 @@
 заглушки, у реального MyFlowApp берутся только методы.
 """
 import queue
+import threading
 import types
 import unittest
 from unittest import mock
@@ -142,6 +143,8 @@ def make_app(auto=False, busy=False, gen=0, polish_enabled=False, paster=None):
     app._last_history_id = None
     app._last_insert_ts = 0.0
     app._queue = queue.Queue()
+    app._preview_lock = threading.Lock()
+    app._preview_slot = None
     app.settings = _Settings()
     app.recorder = _Recorder()
     app.overlay = _Overlay()
@@ -159,7 +162,8 @@ def make_app(auto=False, busy=False, gen=0, polish_enabled=False, paster=None):
                  "_polish_watchdog_loop", "_worker_loop", "_process_recording",
                  "_dispatch_voice_command", "_run_command", "_resolve_style",
                  "_spawn_edit_watcher", "_process_preview", "_cycle_style",
-                 "_require_last_insert", "_press_key", "_listener_watchdog_loop"):
+                 "_require_last_insert", "_press_key", "_listener_watchdog_loop",
+                 "_take_preview", "_on_live_preview"):
         setattr(app, name, types.MethodType(getattr(MyFlowApp, name), app))
     app._guard_polish = MyFlowApp._guard_polish
     return app
@@ -414,9 +418,44 @@ class CancelTest(unittest.TestCase):
         self.assertEqual(app._gen, 1)
 
 
+class PreviewPriorityTest(unittest.TestCase):
+    """P2-1: превью живёт в одном слоте и не стоит впереди реальных фраз."""
+
+    def test_latest_preview_wins(self):
+        app = make_app()
+        app._on_live_preview(np.zeros(640, dtype=np.int16))
+        app._on_live_preview(np.zeros(320, dtype=np.int16))
+        job = app._take_preview()
+        self.assertIsNotNone(job)
+        self.assertEqual(len(job.item.pcm_int16), 320, "должен остаться свежий драфт")
+        self.assertIsNone(app._take_preview(), "слот должен опустошаться")
+
+    def test_cancel_clears_preview(self):
+        app = make_app()
+        app._on_live_preview(np.zeros(640, dtype=np.int16))
+        app._cancel_all()
+        self.assertIsNone(app._take_preview(), "после отмены драфт не показываем")
+
+    def test_real_phrase_has_priority_in_queue(self):
+        """Фраза идёт через очередь, превью — только когда очередь пуста."""
+        import time
+        app = make_app()
+        rec = Recording(pcm_int16=np.zeros(16000, dtype=np.int16),
+                        duration_ms=1000, max_amplitude=0.5)
+        app.polish.cfg.enabled = False
+        app._enqueue(rec)                      # реальная фраза
+        app._on_live_preview(np.zeros(640, dtype=np.int16))   # драфт в слот
+        threading.Thread(target=app._worker_loop, daemon=True).start()
+        time.sleep(0.4)
+        self.assertEqual(len(app.paster.calls), 1, "фраза должна быть обработана")
+        self.assertEqual(len(app.db.records), 1)
+        self.assertEqual(app.whisper.calls, 2, "после фразы воркер берёт драфт")
+        self.assertIsNone(app._take_preview())
+
+
 # ---------- P0-3 (интеграция): watcher не запускается для opencode ----------
 
-class WatsonTest(unittest.TestCase):
+class WatcherTest(unittest.TestCase):
     def test_watcher_skipped_without_read_api(self):
         paster = _Paster()
         paster.can_read = False
@@ -424,6 +463,44 @@ class WatsonTest(unittest.TestCase):
         with mock.patch("myflow.main.threading.Thread") as thread:
             app._spawn_edit_watcher(1, "текст")
         thread.assert_not_called()
+
+
+class HelperTest(unittest.TestCase):
+    """P1-7 / P2-8 / P2-9: вспомогательные функции оркестратора."""
+
+    def test_app_descriptor_has_process_and_title(self):
+        import myflow.main as M
+        with mock.patch.object(M, "active_window_title", return_value="main.py — Code"), \
+             mock.patch.object(M, "active_process_name", return_value="code.exe"):
+            self.assertEqual(M.app_descriptor(), "code.exe | main.py — Code")
+        with mock.patch.object(M, "active_window_title", return_value="unknown"), \
+             mock.patch.object(M, "active_process_name", return_value=""):
+            self.assertEqual(M.app_descriptor(), "unknown")
+
+    def test_rotate_log(self):
+        import tempfile
+        from pathlib import Path as _P
+        import myflow.main as M
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _P(tmp) / "main.log"
+            path.write_text("x" * 100, encoding="utf-8")
+            M._rotate_log(path, max_bytes=50)
+            self.assertFalse(path.exists())
+            self.assertTrue(_P(tmp, "main.log.1").exists())
+            # маленький файл не ротируется
+            path.write_text("y", encoding="utf-8")
+            M._rotate_log(path, max_bytes=50)
+            self.assertTrue(path.exists())
+
+    def test_console_handler_installs_without_crash(self):
+        import myflow.main as M
+        calls = []
+        M._install_console_handler(lambda: calls.append(1))
+        self.assertFalse(calls, "обработчик не должен звать exit при установке")
+
+    def test_ansi_stripped_for_log(self):
+        import myflow.main as M
+        self.assertEqual(M._ANSI_RE.sub("", "\x1b[31mкрасный\x1b[0m"), "красный")
 
 
 if __name__ == "__main__":

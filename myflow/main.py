@@ -114,6 +114,44 @@ def active_window_title() -> str:
     return buf.value[:64] or "unknown"
 
 
+def active_process_name() -> str:
+    """Имя процесса активного окна ("code.exe") — надёжная маска per-app.
+
+    Заголовок окна меняется при смене файла/чата/вкладки, поэтому маски
+    словаря по заголовку почти никогда не совпадали. Имя процесса стабильно.
+    """
+    try:
+        hwnd = ctypes.windll.user32.GetForegroundWindow()
+        pid = ctypes.c_ulong()
+        ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if not pid.value:
+            return ""
+        h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid.value)  # QUERY_LIMITED
+        if not h:
+            return ""
+        try:
+            buf = ctypes.create_unicode_buffer(1024)
+            size = ctypes.c_ulong(len(buf))
+            if ctypes.windll.kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+                return Path(buf.value).name.lower()
+        finally:
+            ctypes.windll.kernel32.CloseHandle(h)
+    except Exception:  # noqa: BLE001 — Windows-only, не критично
+        return ""
+    return ""
+
+
+def app_descriptor() -> str:
+    """Строка для history.app_window: «процесс | заголовок».
+
+    Маски per-app (словарь и стили) ищутся как подстрока, поэтому работают
+    и по имени процесса, и по фрагменту заголовка (обратная совместимость).
+    """
+    title = active_window_title()
+    proc = active_process_name()
+    return f"{proc} | {title}" if proc else title
+
+
 def _health_check(whisper: WhisperClient) -> bool:
     """Fail fast на старте: если сервер лежит, сказать громко и упасть."""
     import requests
@@ -170,6 +208,11 @@ class MyFlowApp:
         # AUTO-режиме тем временем продолжает слушать (не теряем фразы).
         self._queue: queue.Queue[_Job] = queue.Queue()
         self._gen = 0                    # поколение отмены (см. _Job)
+        # Live-превью держим в ОДНОМ слоте (последнее побеждает) и разбираем
+        # только когда очередь фраз пуста: драфты не должны стоять впереди
+        # реальной диктовки и тормозить вставку.
+        self._preview_lock = threading.Lock()
+        self._preview_slot: _Job | None = None
         self._worker: threading.Thread | None = None
         self._busy = False
         self._ptt_held = False           # логически «идёт PTT-запись»
@@ -202,6 +245,13 @@ class MyFlowApp:
             self._ensure_polish_watchdog()
         if self.settings.get().flags["overlay"]:
             self.overlay.start()
+        # Приватность/размер: чистим историю старше retention (по умолчанию 90 дней).
+        try:
+            removed = self.db.prune_history(self.settings.get().history_retention_days)
+            if removed:
+                print(f"[myflow] история: удалено старых диктовок — {removed}")
+        except Exception as exc:  # noqa: BLE001 — не мешает запуску
+            print(f"[myflow] не удалось почистить историю: {exc!r}")
         self._worker = threading.Thread(target=self._worker_loop, daemon=True,
                                         name="phrase-worker")
         self._worker.start()
@@ -324,6 +374,8 @@ class MyFlowApp:
         self._gen += 1
         self._key_down = False
         self._ptt_held = False
+        with self._preview_lock:
+            self._preview_slot = None   # отменённый драфт не показываем
         if self._pref_auto:
             try:
                 self.recorder.discard()
@@ -390,7 +442,7 @@ class MyFlowApp:
     def _begin_recording(self) -> None:
         self.recorder.start()
         self._auto_stopped = False
-        print(f"[myflow] ● запись начата (окно: {active_window_title()})")
+        print(f"[myflow] ● запись начата (окно: {app_descriptor()})")
         self.overlay.show("● запись…", "#f5c542")
 
     def _cancel_recording(self) -> None:
@@ -440,14 +492,35 @@ class MyFlowApp:
         self._enqueue(rec)
 
     def _on_live_preview(self, pcm_int16) -> None:
-        """Инкрементальный ASR: драфт-кусок в ту же очередь (worker разберёт)."""
-        self._enqueue(_LivePreview(pcm_int16=pcm_int16))
+        """Инкрементальный ASR: кладём драфт в единственный слот.
+
+        Свежий драфт вытесняет предыдущий (устаревшие кадры бесполезны), а
+        реальные фразы идут через основную очередь и всегда обрабатываются
+        первыми. Раньше превью лежали в общей FIFO и задерживали вставку.
+        """
+        with self._preview_lock:
+            self._preview_slot = _Job(gen=self._gen, item=_LivePreview(pcm_int16=pcm_int16))
+
+    def _take_preview(self) -> _Job | None:
+        with self._preview_lock:
+            slot, self._preview_slot = self._preview_slot, None
+        return slot
 
     # ---- worker: последовательный пайплайн ----
 
     def _worker_loop(self) -> None:
         while True:
-            job = self._queue.get()
+            try:
+                job = self._queue.get(timeout=0.25)
+            except queue.Empty:
+                # Очередь фраз пуста — можно показать свежий драфт.
+                preview = self._take_preview()
+                if preview is not None and preview.gen == self._gen:
+                    try:
+                        self._process_preview(preview.item)
+                    except Exception as exc:  # noqa: BLE001 — драфт не критичен
+                        print(f"[myflow] preview: {exc!r}")
+                continue
             self._busy = True
             try:
                 if isinstance(job.item, _LivePreview):
@@ -593,7 +666,7 @@ class MyFlowApp:
             self.overlay.show("○ тишина", "#9aa0a6")
             return
 
-        app = active_window_title()
+        app = app_descriptor()
         print(f"[myflow] ⚙ распознавание ({recording.duration_ms} мс)...")
         self.overlay.show("⚙ распознавание…", "#f5c542")
 
@@ -806,6 +879,36 @@ def _matches(key, hotkey_name: str) -> bool:
         return False
 
 
+_CTRL_HANDLERS: list = []   # держим ссылки: без них ctypes-колбэк соберёт GC
+
+
+def _install_console_handler(on_exit) -> None:
+    """Закрытие окна консоли / logoff / shutdown: успеть остановить запись.
+
+    Без этого процесс убивался системой, минуя app.stop(): микрофон и
+    потоки не освобождались, а очередь фраз терялась.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        handler_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_ulong)
+
+        def _handler(event: int) -> bool:
+            # 2 = CTRL_CLOSE_EVENT, 5 = LOGOFF, 6 = SHUTDOWN
+            if event in (2, 5, 6):
+                try:
+                    on_exit()
+                except Exception:  # noqa: BLE001
+                    pass
+            return False
+
+        cb = handler_type(_handler)
+        _CTRL_HANDLERS.append(cb)
+        ctypes.windll.kernel32.SetConsoleCtrlHandler(cb, True)
+    except Exception:  # noqa: BLE001 — не критично для работы
+        pass
+
+
 def _acquire_single_instance() -> bool:
     """True, если этот процесс — первый. Синглтон через TCP-порт 127.0.0.1:8765.
 
@@ -825,32 +928,66 @@ def _acquire_single_instance() -> bool:
     return True
 
 
-def _tee_log() -> None:
-    """Дублируем stdout в data/main.log — чтобы я мог читать окно main из своих тестов."""
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+
+def _rotate_log(path: Path, max_bytes: int = 2_000_000) -> None:
+    """Простая ротация: main.log -> main.log.1 (не даём файлу расти вечно)."""
+    try:
+        if path.exists() and path.stat().st_size > max_bytes:
+            backup = path.with_name(path.name + ".1")
+            if backup.exists():
+                backup.unlink()
+            path.rename(backup)
+    except OSError:
+        pass
+
+
+def _tee_log(max_bytes: int = 2_000_000) -> None:
+    """Дублируем stdout в data/main.log — чтобы читать окно main из тестов.
+
+    Пишем без ANSI-последовательностей (TUI pick_mic их сыпет), под локом
+    (пишут несколько потоков) и с ротацией по размеру.
+    """
     import io
     import sys
     log_path = Path(__file__).resolve().parent.parent / "data" / "main.log"
+    _rotate_log(log_path, max_bytes)
 
     class _Tee(io.TextIOBase):
         def __init__(self, real) -> None:
             self.real = real
-            self.fh = open(log_path, "a", encoding="utf-8")
+            self.fh = open(log_path, "a", encoding="utf-8", errors="replace")
+            self._lock = threading.Lock()
 
         def write(self, s: str) -> int:
-            self.fh.write(s)
-            self.fh.flush()
-            try:
-                return self.real.write(s)
-            except OSError:
-                return len(s)  # консоль умерла (напр. FreeConsole/закрыт поток) — не ронять main
+            with self._lock:
+                try:
+                    clean = _ANSI_RE.sub("", s)
+                    if clean:
+                        self.fh.write(clean)
+                        self.fh.flush()
+                except Exception:  # noqa: BLE001 — логирование не роняет main
+                    pass
+                try:
+                    return self.real.write(s)
+                except (OSError, ValueError, AttributeError):
+                    return len(s)  # консоль умерла (FreeConsole/закрыт поток)
 
         def flush(self) -> None:
-            self.real.flush()
+            with self._lock:
+                for stream in (self.fh, self.real):
+                    try:
+                        stream.flush()
+                    except Exception:  # noqa: BLE001
+                        pass
 
         def isatty(self) -> bool:
             return False
 
     sys.stdout = _Tee(sys.stdout)
+    print(f"\n=== сессия {time.strftime('%Y-%m-%d %H:%M:%S')} "
+          f"(python {sys.version.split()[0]}) ===")
 
 
 def main() -> None:
@@ -881,6 +1018,7 @@ def main() -> None:
     except RuntimeError as exc:
         print(f"[myflow] FATAL: {exc}")
         return
+    _install_console_handler(app.stop)
     try:
         while True:
             time.sleep(1.0)

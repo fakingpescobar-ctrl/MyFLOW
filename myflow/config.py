@@ -81,6 +81,8 @@ class Settings:
     silence_pause_seconds: float = 0.9
     # Стиль по умолчанию: минимум форматирования, как в терминале.
     default_style: str = "plain"
+    # Сколько дней хранить историю диктовок (в ней полный текст; 0 = вечно).
+    history_retention_days: int = 90
     # Стили per-app (аналог Wispr PersonalizationStyleSettings):
     # маска заголовка окна -> стиль. Первое совпадение побеждает (case-insensitive).
     style_by_app: dict[str, str] = field(default_factory=lambda: {

@@ -58,10 +58,26 @@ powershell -File scripts\start-llm.ps1      # llama-server   :8082
 (активное окно / чат OpenCode).
 
 **Тесты:** `.venv\Scripts\python -m unittest discover -s tests -t .`
-(112 тестов, без серверов/микрофона/GUI; pytest тоже подойдёт — конфиг в `pyproject.toml`).
+(122 теста, без серверов/микрофона/GUI; pytest тоже подойдёт — конфиг в `pyproject.toml`).
 
 **Проба пайплайна с микрофоном:** `.venv\Scripts\python -X utf8 tools\e2e_mic.py 4`
 (пишет 4 с → распознаёт, учитывает `asr.input_device` из настроек).
+
+### Настройки (`data/settings.json`)
+
+Ключевые ручки (остальное — в `myflow/config.py`):
+
+| Ключ | Смысл |
+|---|---|
+| `hotkey.ptt_key` / `cancel_key` / `style_cycle_key` | клавиши PTT/отмены/стиля (`f8`/`f9`/`f7`) |
+| `hotkey.suppress` | `true` — не отдавать эти клавиши активному окну (в IDE F8 = шаг отладки) |
+| `mode` | `ptt` (по кнопке) или `auto` (слушает постоянно) |
+| `insert_method` | `clipboard` (Ctrl+V) или `opencode` (инжект в консоль) |
+| `silence_pause_seconds` | пауза, завершающая фразу (0.9 с) |
+| `history_retention_days` | сколько дней хранить историю (0 = вечно) |
+| `flags.live_preview` / `learning` / `overlay` / `auto_insert` | фиче-флаги |
+| `polish.top_p` / `repeat_penalty` / `max_tokens` | параметры LLM-полировки |
+| `style_by_app` | маска окна/процесса → стиль (например `"code.exe": "terminal"`) |
 
 ## Структура
 
