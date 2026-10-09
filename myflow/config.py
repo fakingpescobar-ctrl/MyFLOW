@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 from dataclasses import dataclass, field, asdict, fields
 from pathlib import Path
@@ -19,6 +20,58 @@ SAMPLE_RATE = 16_000          # RECORDING_SAMPLE_RATE (Wispr: S=16e3)
 CHUNK_SAMPLES = 640           # 40 мс на чанк (Wispr: CHUNK_DURATION_MS=40)
 MAX_DICTATION_SECONDS = 60    # жёсткий лимит одной диктовки
 MAX_DICTATION_WARN_SECONDS = 50
+
+# Категории приложений (аналог personalizationAppType у Wispr): маска по
+# имени процесса/заголовку -> категория. Первое совпадение побеждает.
+# Матч по подстроке в нижнем регистре, поэтому "code" поймает "code.exe" и
+# "visual studio code", но не "encode".
+DEFAULT_APP_CATEGORIES: dict[str, tuple[str, ...]] = {
+    "terminal": ("windowsterminal", "powershell", "pwsh", "cmd.exe", "conhost",
+                 "wt.exe", "alacritty", "wezterm", "mintty", "git-bash"),
+    "code": ("code.exe", "devenv", "pycharm", "idea64", "webstorm", "goland",
+             "sublime_text", "notepad++", "cursor", "rider64", "clion"),
+    "chat": ("telegram", "whatsapp", "discord", "slack", "teams", "skype",
+             "signal", "viber", "element", "happ"),
+    "email": ("outlook", "thunderbird", "mail.exe", "thebat", "em client"),
+    "notes": ("notepad", "obsidian", "logseq", "joplin", "onenote", "evernote"),
+    "docs": ("winword", "excel", "powerpnt", "acrobat", "libreoffice", "wps"),
+    "browser": ("chrome", "browser", "msedge", "firefox", "opera", "brave", "yandex"),
+}
+
+# Категория -> стиль полировки по умолчанию (у Wispr 4 стиля: default/formal/
+# casual/very casual; у нас 6 промптов, поэтому маппинг шире).
+DEFAULT_CATEGORY_STYLES: dict[str, str] = {
+    "terminal": "terminal",
+    "code": "plain",
+    "chat": "casual",
+    "email": "formal",
+    "notes": "plain",
+    "docs": "formal",
+    "browser": "plain",
+    "other": "plain",
+}
+
+
+def detect_category(app_descriptor: str,
+                    categories: dict[str, list[str]] | None = None) -> str:
+    """Определить категорию приложения по «процесс | заголовок».
+
+    Аналог их personalizationAppType: стиль подбирается по КАТЕГОРИИ, а не по
+    полному заголовку окна (который меняется при смене файла/вкладки).
+
+    Матч по границам слов, а не «просто подстрока»: иначе «encode.exe»
+    попадал бы в категорию code по подстроке «code.exe».
+    """
+    text = (app_descriptor or "").lower()
+    rules = categories or DEFAULT_APP_CATEGORIES
+    for category, masks in rules.items():
+        for mask in masks:
+            if not mask:
+                continue
+            pattern = r"(?<![a-z0-9])" + re.escape(str(mask).lower()) + r"(?![a-z0-9])"
+            if re.search(pattern, text):
+                return category
+    return "other"
 
 
 @dataclass
@@ -91,6 +144,18 @@ class Settings:
         "cmd": "terminal",
         "command prompt": "terminal",
     })
+    # Категория приложения -> стиль (приоритетнее style_by_app): как у Wispr,
+    # где стиль задаётся типом приложения, а не заголовком окна.
+    style_by_category: dict[str, str] = field(
+        default_factory=lambda: dict(DEFAULT_CATEGORY_STYLES))
+    # Свои маски категорий: {"terminal": ["windowsterminal", "my-shell"]}.
+    # Дополняют дефолтные (не заменяют), матч по границам слов.
+    app_categories: dict[str, list[str]] = field(default_factory=dict)
+    # Наблюдение за полем ввода через UI Automation (обучение из правок без Ctrl+C).
+    use_ax_observation: bool = True
+    observation_seconds: float = 6.0
+    # Сколько последних фраз держать в аудио-хранилище (перераспознавание упавших).
+    audio_keep: int = 50
     # Фиче-флаги (у Wispr: cloud-sync, edge-proxy, dark-mode ...).
     flags: dict[str, bool] = field(default_factory=lambda: {
         "auto_insert": True,      # вставлять текст сразу после распознавания
@@ -98,6 +163,9 @@ class Settings:
         "beep_on_start": False,   # звуковой сигнал начала записи
         "overlay": True,          # Ф6: статус-оверлей в углу экрана
         "live_preview": True,     # инкрементальный ASR: превью во время записи
+        "snippets": True,         # голосовые сниппеты (фраза -> готовый текст)
+        "keep_audio": True,       # хранить аудио последних фраз (для retry)
+        "ax_observation": True,   # наблюдать поле через UIA (иначе — буфер обмена)
     })
 
 

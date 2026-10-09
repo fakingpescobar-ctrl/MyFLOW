@@ -28,14 +28,17 @@ from pynput import keyboard
 
 from myflow.audio import DictationRecorder, Recording
 from myflow.asr import WhisperClient, AsrResult
+from myflow.audio_store import AudioStore
+from myflow.axtext import AxReader, AxWatcher
 from myflow.db import Database, DictationRecord
-from myflow.config import SettingsStore
+from myflow.config import SettingsStore, DATA_DIR, DEFAULT_APP_CATEGORIES, detect_category
 from myflow.insertion import ClipboardPaste
 from myflow.opencode_inject import OpenCodeInjector
 from myflow.learning import record_edit_and_learn, watch_pasted_edit
 from myflow.overlay import StatusOverlay
 from myflow.pick_mic import pick_mic
 from myflow.polish import PolishClient, PolishResult, STYLE_PROMPTS
+from myflow.textdiff import divergence_score, MAX_DIVERGENCE
 from myflow.commands import (
     classify as cmd_classify,
     is_llm_intent_candidate,
@@ -204,6 +207,12 @@ class MyFlowApp:
                 "(допустимо: 'clipboard' | 'opencode')"
             )
         self.overlay = overlay if overlay is not None else StatusOverlay()
+        # Аудио последних фраз: позволяет перераспознать упавшую фразу (retry).
+        self.audio = AudioStore(DATA_DIR / "audio", keep=cfg.audio_keep)
+        # Наблюдение за полем ввода через UI Automation (обучение без Ctrl+C).
+        self.ax = AxReader()
+        self._ax_ready = False
+        self._last_insert_pid = 0
         self._last_insert_ts: float = 0.0    # момент последней вставки (delete_last: защита <60с)
         # Очередь фраз: worker обрабатывает последовательно, а recorder в
         # AUTO-режиме тем временем продолжает слушать (не теряем фразы).
@@ -246,6 +255,7 @@ class MyFlowApp:
             self._ensure_polish_watchdog()
         if self.settings.get().flags["overlay"]:
             self.overlay.start()
+        self._start_ax()
         # Приватность/размер: чистим историю старше retention (по умолчанию 90 дней).
         try:
             removed = self.db.prune_history(self.settings.get().history_retention_days)
@@ -270,6 +280,42 @@ class MyFlowApp:
                   f"PTT={self.settings.get().hotkey.ptt_key} (держи — диктуешь), "
                   f"cancel={self.settings.get().hotkey.cancel_key}, "
                   f"style={self.settings.get().hotkey.style_cycle_key} (цикл стилей)")
+        self._log_stats()
+
+    def _log_stats(self) -> None:
+        """Сводка надёжности по истории (аналог их телеметрии: ошибки/перцентили)."""
+        try:
+            st = self.db.stats()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[myflow] статистика недоступна: {exc!r}")
+            return
+        if not st["dictations"]:
+            return
+        print(f"[myflow] история: {st['dictations']} фраз, ошибок {st['errors']} "
+              f"({st['error_rate'] * 100:.2f}%), p50={st['p50_latency_ms']} мс, "
+              f"p90={st['p90_latency_ms']} мс, p99={st['p99_latency_ms']} мс, "
+              f"avg divergence={st['avg_divergence']}")
+        if st["by_status"]:
+            print("[myflow]   статусы: " + ", ".join(
+                f"{k}={v}" for k, v in st["by_status"].items()))
+
+    def _start_ax(self) -> None:
+        """Поднять AX-хелпер (UI Automation) для наблюдения за полем ввода."""
+        if not self.settings.get().use_ax_observation:
+            return
+        if not self.settings.get().flags.get("ax_observation", True):
+            return
+        try:
+            self._ax_ready = self.ax.start()
+            if self._ax_ready:
+                print("[myflow] наблюдение за полем ввода: UI Automation активен "
+                      "(правки ловим без Ctrl+C)")
+            else:
+                print(f"[myflow] UI Automation недоступен ({self.ax.last_error}) — "
+                      "правки ловим через буфер обмена")
+        except Exception as exc:  # noqa: BLE001
+            self._ax_ready = False
+            print(f"[myflow] AX-хелпер не поднялся: {exc!r}")
 
     def stop(self) -> None:
         if self._listener:
@@ -281,6 +327,10 @@ class MyFlowApp:
                 self.recorder.stop()
             except RuntimeError:
                 pass
+        try:
+            self.ax.stop()
+        except Exception:  # noqa: BLE001
+            pass
         self.overlay.stop()
 
     # ---- хоткеи ----
@@ -667,15 +717,42 @@ class MyFlowApp:
             self.overlay.show("○ тишина", "#9aa0a6")
             return
 
+        flags = self.settings.get().flags
         app = app_descriptor()
-        print(f"[myflow] ⚙ распознавание ({recording.duration_ms} мс)...")
+        app_category = self._resolve_category(app)
+        # Аудио фразы сохраняем ДО распознавания: если ASR/LLM упадут,
+        # фразу можно будет перераспознать (myflow.cli retry).
+        audio_path = None
+        if flags.get("keep_audio", True):
+            audio_path = self._save_audio(recording)
+
+        print(f"[myflow] ⚙ распознавание ({recording.duration_ms} мс, {app_category})...")
         self.overlay.show("⚙ распознавание…", "#f5c542")
 
-        asr: AsrResult = self.whisper.transcribe(recording.pcm_int16)
+        try:
+            asr: AsrResult = self.whisper.transcribe(recording.pcm_int16)
+        except Exception as exc_asr:
+            # Раньше ошибка ASR просто теряла фразу: в истории её не было,
+            # а в статистике — ни следа. Теперь это строка со статусом.
+            _tb_to_file("ОШИБКА ASR")
+            print(f"[myflow] ✗ ASR не справился: {exc_asr}")
+            self.overlay.show("✗ ASR ошибка", "#e5484d")
+            self._record_failure("asr_error", app, app_category, recording, audio_path)
+            return
         if not asr.text:
             print("[myflow] ✗ пустой результат распознавания")
             self.overlay.show("✗ не распознано", "#e5484d")
+            self._record_failure("empty_asr", app, app_category, recording, audio_path,
+                                 asr_latency_ms=asr.latency_ms)
             return
+
+        # СНИППЕТЫ — ДО команд и полировки: явная пользовательская фраза
+        # («мой email», «организуй мысли») должна подставить готовый текст.
+        if flags.get("snippets", True):
+            snippet = self._try_snippet(asr.text, app, app_category, recording,
+                                        audio_path, asr, gen)
+            if snippet:
+                return
 
         # Голосовые команды (после распознавания, до полировки): если это
         # команда — обрабатываем и выходим (никакой вставки/БД).
@@ -686,20 +763,23 @@ class MyFlowApp:
                   + f" ({cmd.source})")
             return
 
-        dic = self.db.get_dictionary(app) if self.settings.get().flags["learning"] else []
+        dic = self.db.get_dictionary(app) if flags["learning"] else []
         style = self._resolve_style(app)
         if self.polish.cfg.enabled:
             self.overlay.show("⚙ полировка…", "#f5c542")
         # _polish_safe: любая ошибка LLM -> сырой ASR, фраза не теряется.
+        fails_before = self._polish_fails
         polished: PolishResult = self._polish_safe(asr.text, style, dic)
-        if polished.skipped:
+        polish_failed = self._polish_fails > fails_before
+        if polished.skipped or polished.truncated:
             final_text = asr.text
-        elif polished.truncated:
-            print("[myflow]   WARNING: ответ LLM обрезан (max_tokens) — вставлен сырой ASR")
-            final_text = asr.text
+            if polished.truncated:
+                print("[myflow]   WARNING: ответ LLM обрезан (max_tokens) — вставлен сырой ASR")
         else:
             final_text = self._guard_polish(asr.text, polished.text, style)
 
+        # Метрика расхождения ASR <-> LLM (аналог formattingDivergenceScore).
+        divergence = divergence_score(asr.text, final_text)
         e2e_ms = int((time.perf_counter() - started) * 1000)
 
         # Видимость полировки: показываем исходный ASR и результат LLM,
@@ -707,10 +787,11 @@ class MyFlowApp:
         if polished.skipped:
             print("[myflow]   LLM: выключена — вставлен сырой ASR")
         elif final_text == asr.text:
-            print("[myflow]   LLM: текст не изменён (уже чистый)")
+            print(f"[myflow]   LLM: текст не изменён (divergence={divergence:.2f})")
         else:
             print(f"[myflow]   ASR : {asr.text}")
-            print(f"[myflow]   LLM : {final_text}  (style={style}, polish={polished.latency_ms} мс)")
+            print(f"[myflow]   LLM : {final_text}  (style={style}, "
+                  f"divergence={divergence:.2f}, polish={polished.latency_ms} мс)")
 
         history_id = self.db.insert_history(
             DictationRecord(
@@ -721,6 +802,10 @@ class MyFlowApp:
                 e2e_latency_ms=e2e_ms,
                 detected_language=asr.language,
                 style=style,
+                status="polish_error" if polish_failed else "ok",
+                app_category=app_category,
+                divergence=divergence,
+                audio_path=str(audio_path) if audio_path else None,
             )
         )
         self._last_history_id = history_id
@@ -732,16 +817,19 @@ class MyFlowApp:
             print("[myflow] ○ отменено во время обработки — вставлять не буду (текст в истории)")
             self.overlay.show("○ отменено", "#9aa0a6")
             return
-        if self.settings.get().flags["auto_insert"]:
+        if flags["auto_insert"]:
             try:
                 ok = self.paster.paste(final_text)
                 self._last_insert_ts = time.monotonic()
+                # Запоминаем процесс/окно, в которое вставили: наблюдатель
+                # правок должен убедиться, что читает то же самое окно.
+                self._remember_insert_target()
                 if isinstance(self.paster, OpenCodeInjector) and not ok:
                     print("[myflow] ✗ инжект не прошёл: opencode не найден или консоль недоступна")
                     self.overlay.show("✗ инжект не прошёл", "#e5484d")
                 else:
                     self.overlay.show("✓ вставлено", "#46a758")
-                if self.settings.get().flags["learning"]:
+                if flags["learning"]:
                     self._spawn_edit_watcher(history_id, final_text)
             except Exception as exc_in:
                 # Любое падение на вставке — отдельным маркером, НЕ валит worker
@@ -751,13 +839,126 @@ class MyFlowApp:
             self.overlay.show("✓ готово", "#46a758")
         print(f"[myflow] e2e={e2e_ms} мс (asr={asr.latency_ms}, polish={polished.latency_ms})")
 
+    # ---- сниппеты / аудио / статистика неудач ----
+
+    def _remember_insert_target(self) -> None:
+        """Запомнить pid окна, куда вставили (для AX-наблюдения за правкой)."""
+        self._last_insert_pid = 0
+        if not (self._ax_ready and self.ax.available):
+            return
+        try:
+            sample = self.ax.read(timeout=1.5)
+            if sample is not None:
+                self._last_insert_pid = sample.pid
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _resolve_category(self, app_descriptor_text: str) -> str:
+        """Категория приложения: пользовательские маски дополняют дефолтные."""
+        user = self.settings.get().app_categories or {}
+        if user:
+            merged: dict[str, list[str]] = {
+                k: list(v) for k, v in DEFAULT_APP_CATEGORIES.items()}
+            for category, masks in user.items():
+                merged.setdefault(str(category), [])
+                merged[str(category)] = list(merged[str(category)]) + [str(m) for m in masks]
+            return detect_category(app_descriptor_text, merged)
+        return detect_category(app_descriptor_text)
+
+    def _save_audio(self, recording: Recording):
+        """Сохранить аудио фразы (своя метка времени вместо id: id ещё нет)."""
+        try:
+            return self.audio.save(int(time.time() * 1000), recording.pcm_int16)
+        except Exception as exc:  # noqa: BLE001 — хранение не критично
+            print(f"[myflow]   аудио не сохранено: {exc!r}")
+            return None
+
+    def _record_failure(self, status: str, app: str, category: str,
+                        recording: Recording, audio_path, asr_latency_ms: int = 0) -> None:
+        """Зафиксировать неуспех в истории (для статистики и retry)."""
+        try:
+            self.db.insert_history(DictationRecord(
+                asr_text="", polished_text="", app_window=app,
+                duration_ms=recording.duration_ms,
+                e2e_latency_ms=asr_latency_ms or None,
+                style=self._resolve_style(app), status=status,
+                app_category=category,
+                audio_path=str(audio_path) if audio_path else None,
+            ))
+        except Exception as exc:  # noqa: BLE001
+            print(f"[myflow]   не удалось записать неуспех: {exc!r}")
+
+    def _try_snippet(self, asr_text: str, app: str, category: str, recording: Recording,
+                     audio_path, asr: AsrResult, gen: int) -> bool:
+        """Подставить сниппет, если распознанное совпало с его фразой."""
+        try:
+            snippet = self.db.find_snippet(asr_text)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[myflow]   сниппеты недоступны: {exc!r}")
+            return False
+        if not snippet:
+            return False
+        replacement = snippet["replacement"]
+        self.db.bump_snippet(snippet["phrase"])
+        e2e_ms = 0
+        history_id = self.db.insert_history(DictationRecord(
+            asr_text=asr_text, polished_text=replacement, app_window=app,
+            duration_ms=recording.duration_ms, e2e_latency_ms=e2e_ms,
+            detected_language=asr.language, style="snippet", status="snippet",
+            app_category=category, divergence=0.0,
+            audio_path=str(audio_path) if audio_path else None,
+        ))
+        self._last_history_id = history_id
+        print(f"[myflow] ✓ сниппет «{snippet['phrase']}» -> {replacement[:60]}")
+        if self.settings.get().flags["auto_insert"] and gen == self._gen:
+            try:
+                self.paster.paste(replacement)
+                self._last_insert_ts = time.monotonic()
+                self.overlay.show("✓ сниппет", "#46a758")
+            except Exception as exc:  # noqa: BLE001
+                _tb_to_file("ОШИБКА ВСТАВКИ (сниппет)")
+                print(f"[myflow] ✗ сниппет не вставился: {exc!r}")
+        return True
+
+    def retry_pending(self, limit: int = 5) -> int:
+        """Перераспознать сохранённые неуспешные фразы (аудио -> ASR -> LLM -> вставка).
+
+        Возвращает число повторно обработанных фраз. Каждая попытка — новая
+        строка истории, старая помечается status='retried'.
+        """
+        done = 0
+        for _ in range(max(1, limit)):
+            row = self.db.last_retryable()
+            if not row:
+                break
+            pcm = self.audio.load(row["audio_path"]) if row.get("audio_path") else None
+            if pcm is None:
+                self.db.mark_status(int(row["id"]), "audio_missing")
+                print(f"[myflow] retry #{row['id']}: аудио не найдено")
+                continue
+            peak = float(abs(pcm).max()) / 32768.0 if len(pcm) else 0.0
+            rec = Recording(pcm_int16=pcm,
+                            duration_ms=int(len(pcm) * 1000 / 16000),
+                            max_amplitude=peak)
+            print(f"[myflow] retry #{row['id']} ({rec.duration_ms} мс, {row['status']})")
+            self.db.mark_status(int(row["id"]), "retried")
+            before = self._last_history_id
+            self._process_recording(self._gen, rec)
+            if self._last_history_id != before:
+                done += 1
+        return done
+
     @staticmethod
-    def _guard_polish(raw: str, polished_text: str, style: str) -> str:
-        """Страховка от LLM-саботажа: обрезка ИЛИ раздувание -> сырой ASR.
+    def _guard_polish(raw: str, polished_text: str, style: str,
+                      divergence: float | None = None) -> str:
+        """Страховка от LLM-саботажа: обрезка ИЛИ переписывание -> сырой ASR.
 
         Урок из лога: «Проверка связи.» -> «Провер». Старая версия требовала
         n_raw >= 3, поэтому КОРОТКИЕ фразы (а их большинство) не защищались.
-        Теперь проверяем и по символам (ловит усечение любой длины).
+
+        Теперь решение принимается ещё и по числовой метрике расхождения
+        (аналог formattingDivergenceScore у Wispr): если модель переписала
+        больше половины слов — это не полировка, а генерация.
         """
         if not polished_text.strip():
             return raw                      # пустой ответ ≠ пустая вставка
@@ -766,12 +967,14 @@ class MyFlowApp:
         n_raw = len(raw.split())
         n_pol = len(polished_text.split())
         c_raw, c_pol = len(raw), len(polished_text)
+        div = divergence if divergence is not None else divergence_score(raw, polished_text)
+        tag = f"divergence={div:.2f}"
 
         if style == "summarize":
             # Пересказ короче исходника — норма. Но не в разы длиннее и не
             # должен терять числа (они важны: «восемь тысяч» -> 8080 и т.п.).
             if n_raw and n_pol > max(n_raw * 2, n_raw + 20):
-                print(f"[myflow]   WARNING: пересказ раздулся ({n_pol}/{n_raw} слов) — сырой ASR")
+                print(f"[myflow]   WARNING: пересказ раздулся ({n_pol}/{n_raw} слов, {tag}) — сырой ASR")
                 return raw
             if _numbers(raw) - _numbers(polished_text):
                 print("[myflow]   WARNING: пересказ потерял числа — сырой ASR")
@@ -779,7 +982,10 @@ class MyFlowApp:
             return polished_text
 
         if c_raw and c_pol < c_raw * 0.6:
-            print(f"[myflow]   WARNING: LLM обрезал фразу ({c_pol}/{c_raw} симв.) — сырой ASR")
+            print(f"[myflow]   WARNING: LLM обрезал фразу ({c_pol}/{c_raw} симв., {tag}) — сырой ASR")
+            return raw
+        if div > MAX_DIVERGENCE:
+            print(f"[myflow]   WARNING: LLM переписала фразу ({tag}, {n_pol}/{n_raw} слов) — сырой ASR")
             return raw
         if n_raw and n_pol <= n_raw * 0.5:
             print(f"[myflow]   WARNING: LLM выбросил половину слов ({n_pol}/{n_raw}) — сырой ASR")
@@ -810,16 +1016,27 @@ class MyFlowApp:
                 print(f"[myflow] стиль: {self._style_override} (ручной)")
 
     def _resolve_style(self, app_title: str) -> str:
-        """Стиль для текущей диктовки: ручной override > маска окна > дефолт."""
+        """Стиль для текущей диктовки.
+
+        Приоритет (как у Wispr): ручной override (F7) > КАТЕГОРИЯ приложения >
+        legacy-маска заголовка > стиль по умолчанию. Категория стабильнее
+        заголовка (заголовок меняется при смене файла/вкладки).
+        """
         if self._style_override is not None:
             if self._style_override not in STYLE_PROMPTS:
                 raise KeyError(f"неизвестный стиль: {self._style_override}")
             return self._style_override
+        s = self.settings.get()
+        category = self._resolve_category(app_title)
+        by_category = s.style_by_category or {}
+        style = by_category.get(category)
+        if style in STYLE_PROMPTS:
+            return style
         title = app_title.lower()
-        for mask, style in self.settings.get().style_by_app.items():
-            if mask.lower() in title:
+        for mask, style in s.style_by_app.items():
+            if mask.lower() in title and style in STYLE_PROMPTS:
                 return style
-        return self.settings.get().default_style
+        return s.default_style
 
     def learn_from_edit(self, edited_text: str) -> None:
         """Вызов после ручной правки текста (например, отдельной командой)."""
@@ -834,25 +1051,31 @@ class MyFlowApp:
         print(f"[myflow] обучение: distance={result['edit_distance']}, новые слова={result['new_words']}")
 
     def _spawn_edit_watcher(self, history_id: int, polished_text: str) -> None:
-        """Ф9: фоном пастим правки вставленного текста и учим словарь.
+        """Ф9: фоном ловим правку вставленного текста и учим словарь.
 
-        Окно 6с после вставки; watch_pasted_edit сам закрывается (None)
-        или по первой осмысленной правке. Ошибки не роняют main.
-        Клипборд читаем через paster.read() — раньше здесь вызывался
-        paste() без аргумента (метод ВСТАВКИ), авто-обучение не работало.
+        Два пути (как у Wispr, который наблюдает поле ввода через AX):
+          1. UI Automation — читаем текст поля в фокусе сами, Ctrl+C не нужен;
+          2. буфер обмена — старый путь, если AX недоступен (нет PowerShell/UIA).
+        Причина окончания наблюдения пишется в историю
+        (observation_end_reason), как contentObservationEndReason у Wispr.
         """
-        if not getattr(self.paster, "can_read", False):
-            return  # opencode-инжект буфер обмена не использует
-        reader = self.paster.read
+        flags = self.settings.get().flags
+        use_ax = flags.get("ax_observation", True) and self.settings.get().use_ax_observation
+        reader = getattr(self.paster, "can_read", False)
+        if not use_ax and not reader:
+            return  # ни AX, ни клипборда: наблюдать нечем
 
         def _run() -> None:
             # sqlite3 check_same_thread=True: отдельное соединение в этом потоке.
             db = Database()
             try:
-                result = watch_pasted_edit(db, history_id, polished_text, reader)
-                if result:
-                    print(f"[myflow] авто-обучение: distance={result['edit_distance']}, "
-                          f"новые слова={result['new_words']}")
+                if use_ax and self._ax_ready and self.ax.available:
+                    reason = self._watch_with_ax(db, history_id, polished_text)
+                else:
+                    reason = self._watch_with_clipboard(db, history_id, polished_text)
+                if reason:
+                    db.set_observation_reason(history_id, reason)
+                    print(f"[myflow] наблюдение: {reason}")
             except Exception as exc:  # watcher не должен убивать основной поток
                 print(f"[myflow] watcher: {exc}")
             finally:
@@ -862,6 +1085,29 @@ class MyFlowApp:
                     pass
 
         threading.Thread(target=_run, daemon=True, name="edit-watcher").start()
+
+    def _watch_with_ax(self, db: Database, history_id: int, polished_text: str) -> str:
+        """Наблюдение через UI Automation. Возвращает причину окончания."""
+        watcher = AxWatcher(self.ax,
+                            window_seconds=self.settings.get().observation_seconds)
+        edited, reason = watcher.watch(polished_text, expected_pid=self._last_insert_pid)
+        if edited and reason == AxWatcher.EDITED:
+            result = record_edit_and_learn(db, history_id, polished_text, edited,
+                                           observation_end_reason=reason)
+            print(f"[myflow] авто-обучение (AX): distance={result['edit_distance']}, "
+                  f"новые слова={result['new_words']}")
+        return reason
+
+    def _watch_with_clipboard(self, db: Database, history_id: int, polished_text: str) -> str:
+        """Старый путь: пользователь должен скопировать правку в буфер."""
+        if not getattr(self.paster, "can_read", False):
+            return "ax_unavailable"
+        result = watch_pasted_edit(db, history_id, polished_text, self.paster.read)
+        if result:
+            print(f"[myflow] авто-обучение (буфер): distance={result['edit_distance']}, "
+                  f"новые слова={result['new_words']}")
+            return "edited"
+        return "observation_window_elapsed"
 
 
 _KEY_NAMES = {

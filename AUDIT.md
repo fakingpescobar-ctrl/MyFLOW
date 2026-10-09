@@ -54,6 +54,27 @@
 `logging`-модуль с уровнями, трей и CLI `myflow-doctor`/`myflow-selftest`, шифрование истории,
 цензор-лист приложений).
 
+### Интел Wispr Flow (10.10.2026) → внедрено в MyFLOW
+
+Разобрана их установка (`%LOCALAPPDATA%\WisprFlow`, 1.5 ГБ) и рабочие данные
+(`%APPDATA%\Wispr Flow\flow.sqlite`, 263 МБ + бэкапы): 169 миграций, 28 таблиц,
+History из 60 колонок с аудио внутри БД, реальные метрики 2619 диктовок
+(p50 537 мс, 0.23 % ошибок). Что перенесено:
+
+| Их механизм | Реализация в MyFLOW |
+|---|---|
+| `Dictionary.isSnippet` (голос → готовый текст) | таблица `snippets` + проверка ДО команд; CLI `snippets add/list/rm` |
+| Нативный AX-helper + `contentObservationEndReason` | `myflow/axtext.py` + `ax_read.ps1` (PowerShell + .NET UIAutomationClient): чтение поля в фокусе, причины `edited`/`observation_window_elapsed`/`textbox_emptied`/`dictated_text_not_found`/`anchor_mismatch`, откат на буфер обмена |
+| `formattingDivergenceScore` | `myflow/textdiff.py` (Левенштейн по словам) → `history.divergence` + порог в `_guard_polish` |
+| `audio` / `opusChunks` в БД | `myflow/audio_store.py` (zlib/OGG, keep=50) + `myflow.cli retry` |
+| `personalizationAppType` + 4 стиля | `config.detect_category` (7 категорий по процессу) + `style_by_category` |
+| `status` + перцентили задержки | `history.status`, `db.stats()` (p50/p90/p99, error_rate, avg divergence), `myflow.cli stats` |
+
+Проверено вживую: сниппет подставился на реальном распознавании; правка поля
+(«проверка связи один два три» → «проверка связи 1 2 3») поймана через AX без Ctrl+C
+и записана в историю с reason `edited`; упавшая фраза восстановлена из сохранённого
+аудио (`retry`, статусы `snippet`/`retried`/`ok`). Тестов: 229.
+
 ### Оверлей v2 (09.10.2026)
 
 Старый `overlay.py` удалён, написан новый (тот же интерфейс `start/show/hide/stop`, поэтому

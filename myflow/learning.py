@@ -48,12 +48,15 @@ def extract_corrections(asr_text: str, edited_text: str) -> list[tuple[str, str]
     return pairs
 
 
-def record_edit_and_learn(db: Database, history_id: int, polished_text: str, edited_text: str) -> dict:
+def record_edit_and_learn(db: Database, history_id: int, polished_text: str,
+                          edited_text: str, observation_end_reason: str | None = None) -> dict:
     """Зафиксировать ручную правку, посчитать edit_distance, обучить словарь.
 
     Обучение per-app: пара promo'тится в словарь с app-маской окна диктовки
     (history.app_window), глобально попадают только замены без привязки к окну
     (app не распознан/unknown). Повторяющиеся пары копятся в kv с контекстом.
+    observation_end_reason — как мы узнали о правке (AX/буфер), аналог
+    contentObservationEndReason у Wispr.
     """
     if not edited_text or edited_text == polished_text:
         return {"edit_distance": 0, "new_words": 0}
@@ -75,6 +78,7 @@ def record_edit_and_learn(db: Database, history_id: int, polished_text: str, edi
         edited_text=edited_text,
         edit_distance=edit_distance,
         corrections_json=json.dumps(pairs, ensure_ascii=False),
+        observation_end_reason=observation_end_reason,
     )
 
     new_words = 0

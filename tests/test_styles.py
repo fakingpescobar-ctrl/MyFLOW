@@ -23,12 +23,14 @@ def make_style_app():
     app = types.SimpleNamespace()
     settings = Settings()
     settings.style_by_app = {"terminal": "terminal", "powershell": "terminal"}
+    settings.style_by_category = {"terminal": "terminal", "chat": "casual", "email": "formal"}
     settings.default_style = "plain"
     app.settings = _SettingsStore(settings)
     app._style_override = None
     app._last_style_switch_t = 0.0
     app._style_cycle = [s for s in ("plain", "casual", "formal", "terminal", "summarize")
                         if s in STYLE_PROMPTS]
+    app._resolve_category = types.MethodType(MyFlowApp._resolve_category, app)
     app._resolve_style = types.MethodType(MyFlowApp._resolve_style, app)
     app._cycle_style = types.MethodType(MyFlowApp._cycle_style, app)
     return app

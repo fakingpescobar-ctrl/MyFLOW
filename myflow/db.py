@@ -7,6 +7,8 @@
 """
 from __future__ import annotations
 
+import math
+import re
 import sqlite3
 import threading
 from dataclasses import dataclass, asdict, field
@@ -33,6 +35,12 @@ class DictationRecord:
     edited_text: str | None = None
     edit_distance: int | None = None
     corrections_json: str | None = None
+    # Новое (аудит 10.10.2026): метрики надёжности и качества, как у Wispr.
+    status: str = "ok"                  # ok | snippet | empty_asr | asr_error | polish_error | skipped
+    app_category: str | None = None     # terminal | chat | email | code | notes | docs | browser
+    divergence: float | None = None     # formattingDivergenceScore
+    observation_end_reason: str | None = None   # edited | observation_window_elapsed | ...
+    audio_path: str | None = None       # файл с аудио фразы (для retry)
 
 
 class Database:
@@ -66,6 +74,30 @@ class Database:
         );
     """
 
+    # Сниппеты (как Dictionary.isSnippet у Wispr): голосовая фраза -> готовый текст.
+    # «мой email» -> адрес, «организуй мысли» -> длинный промпт и т.п.
+    _SNIPPET_DDL = """
+        CREATE TABLE IF NOT EXISTS snippets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            phrase TEXT NOT NULL COLLATE NOCASE,      -- что произносим (нормализовано)
+            replacement TEXT NOT NULL,                -- что вставляем
+            source TEXT NOT NULL DEFAULT 'manual',    -- manual | default
+            hit_count INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            last_used TEXT,
+            UNIQUE(phrase)
+        );
+    """
+
+    # Колонки истории, добавленные после первой версии (миграция ALTER-ом).
+    _HISTORY_MIGRATIONS: tuple[tuple[str, str], ...] = (
+        ("status", "TEXT NOT NULL DEFAULT 'ok'"),
+        ("app_category", "TEXT"),
+        ("divergence", "REAL"),
+        ("observation_end_reason", "TEXT"),
+        ("audio_path", "TEXT"),
+    )
+
     def _init_schema(self) -> None:
         with self._lock, self._conn:
             self._conn.executescript(
@@ -93,7 +125,14 @@ class Database:
                 CREATE INDEX IF NOT EXISTS ix_history_app ON history(app_window);
                 """
                 + self._DICT_DDL
+                + self._SNIPPET_DDL
             )
+            # Миграции history: ALTER-ом добавляем колонки метрик (старые базы
+            # обновляются на месте, данные не трогаем).
+            have = {r[1] for r in self._conn.execute("PRAGMA table_info(history)")}
+            for name, ddl in self._HISTORY_MIGRATIONS:
+                if name not in have:
+                    self._conn.execute(f"ALTER TABLE history ADD COLUMN {name} {ddl}")
             # Миграция словаря к канонической схеме:
             #  - старая таблица без app_mask;
             #  - app_mask nullable (NULL-дубли и неработающий ON CONFLICT);
@@ -151,16 +190,107 @@ class Database:
             return int(cur.lastrowid)
 
     def attach_edit(
-        self, history_id: int, edited_text: str, edit_distance: int, corrections_json: str
+        self, history_id: int, edited_text: str, edit_distance: int, corrections_json: str,
+        observation_end_reason: str | None = None,
     ) -> None:
         """Юзер вручную правил текст — фиксируем правку (сырьё для обучения)."""
         with self._lock, self._conn:
+            if observation_end_reason:
+                self._conn.execute(
+                    """UPDATE history
+                       SET edited_text=?, edit_distance=?, corrections_json=?,
+                           observation_end_reason=?
+                       WHERE id=?""",
+                    (edited_text, edit_distance, corrections_json,
+                     observation_end_reason, history_id),
+                )
+            else:
+                self._conn.execute(
+                    """UPDATE history
+                       SET edited_text=?, edit_distance=?, corrections_json=?
+                       WHERE id=?""",
+                    (edited_text, edit_distance, corrections_json, history_id),
+                )
+
+    def set_observation_reason(self, history_id: int, reason: str) -> None:
+        """Причина окончания наблюдения за полем (аналог contentObservationEndReason)."""
+        with self._lock, self._conn:
             self._conn.execute(
-                """UPDATE history
-                   SET edited_text=?, edit_distance=?, corrections_json=?
-                   WHERE id=?""",
-                (edited_text, edit_distance, corrections_json, history_id),
+                "UPDATE history SET observation_end_reason=? WHERE id=?",
+                (reason, history_id),
             )
+
+    def mark_status(self, history_id: int, status: str) -> None:
+        """Сменить статус записи (например, retried / audio_missing)."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE history SET status=? WHERE id=?", (status, history_id))
+
+    def last_retryable(self) -> dict | None:
+        """Последняя неуспешная фраза, для которой сохранено аудио."""
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                """SELECT * FROM history
+                   WHERE status IN ('asr_error', 'polish_error', 'empty_asr')
+                     AND audio_path IS NOT NULL
+                   ORDER BY id DESC LIMIT 1"""
+            ).fetchone()
+            return dict(row) if row else None
+
+    # ---- Snippets (голос -> готовый текст, как isSnippet у Wispr) ----
+
+    def add_snippet(self, phrase: str, replacement: str, source: str = "manual") -> None:
+        """Добавить/обновить сниппет. phrase нормализуется (lower, один пробел)."""
+        key = " ".join((phrase or "").strip().lower().split())
+        if not key or not (replacement or "").strip():
+            raise ValueError("сниппет: нужны непустые phrase и replacement")
+        with self._lock, self._conn:
+            self._conn.execute(
+                """INSERT INTO snippets (phrase, replacement, source)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(phrase) DO UPDATE SET
+                     replacement=excluded.replacement,
+                     source=excluded.source""",
+                (key, replacement, source),
+            )
+
+    def list_snippets(self) -> list[dict[str, Any]]:
+        with self._lock, self._conn:
+            rows = self._conn.execute(
+                """SELECT id, phrase, replacement, source, hit_count, created_at, last_used
+                   FROM snippets ORDER BY hit_count DESC, phrase"""
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def find_snippet(self, phrase: str) -> dict[str, Any] | None:
+        """Точное совпадение по нормализованной фразе."""
+        key = " ".join((phrase or "").strip().lower().split())
+        if not key:
+            return None
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT * FROM snippets WHERE phrase=?", (key,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def bump_snippet(self, phrase: str) -> None:
+        key = " ".join((phrase or "").strip().lower().split())
+        with self._lock, self._conn:
+            self._conn.execute(
+                """UPDATE snippets SET hit_count=hit_count+1, last_used=datetime('now')
+                   WHERE phrase=?""",
+                (key,),
+            )
+
+    def delete_snippet(self, ident: str) -> int:
+        """Удалить по id (число) или по фразе. Возвращает число удалённых строк."""
+        with self._lock, self._conn:
+            if str(ident).strip().isdigit():
+                cur = self._conn.execute("DELETE FROM snippets WHERE id=?", (int(ident),))
+            else:
+                key = " ".join(str(ident).strip().lower().split())
+                cur = self._conn.execute("DELETE FROM snippets WHERE phrase=?", (key,))
+            return int(cur.rowcount or 0)
 
     # ---- Dictionary ----
 
@@ -273,13 +403,46 @@ class Database:
             return row["app_window"] if row else None
 
     def stats(self) -> dict[str, Any]:
+        """Сводка: объёмы + метрики надёжности/качества (аналог их телеметрии)."""
         with self._lock, self._conn:
             d = self._conn.execute(
                 """SELECT COUNT(*) n, ROUND(AVG(e2e_latency_ms),0) avg_lat,
-                          ROUND(AVG(duration_ms),0) avg_dur
+                          ROUND(AVG(duration_ms),0) avg_dur,
+                          ROUND(AVG(divergence),3) avg_div
                    FROM history"""
             ).fetchone()
-            words = self._conn.execute(
-                "SELECT COUNT(*) FROM dictionary"
-            ).fetchone()[0]
-            return {"dictations": d["n"], "avg_latency_ms": d["avg_lat"], "avg_duration_ms": d["avg_dur"], "dictionary_words": words}
+            words = self._conn.execute("SELECT COUNT(*) FROM dictionary").fetchone()[0]
+            snippets = self._conn.execute("SELECT COUNT(*) FROM snippets").fetchone()[0]
+            by_status = {
+                r["status"] or "ok": r["n"]
+                for r in self._conn.execute(
+                    "SELECT status, COUNT(*) n FROM history GROUP BY status ORDER BY n DESC")
+            }
+            total = d["n"] or 0
+            errors = sum(v for k, v in by_status.items()
+                         if k in ("asr_error", "polish_error", "empty_asr"))
+            latencies = [r[0] for r in self._conn.execute(
+                "SELECT e2e_latency_ms FROM history WHERE e2e_latency_ms IS NOT NULL "
+                "ORDER BY e2e_latency_ms")]
+
+        def pct(q: float) -> int | None:
+            """Перцентиль методом nearest-rank (p50 из 4 значений = 2-е, не 3-е)."""
+            if not latencies:
+                return None
+            rank = max(1, math.ceil(q * len(latencies)))
+            return int(latencies[min(rank, len(latencies)) - 1])
+
+        return {
+            "dictations": total,
+            "avg_latency_ms": d["avg_lat"],
+            "avg_duration_ms": d["avg_dur"],
+            "avg_divergence": d["avg_div"],
+            "p50_latency_ms": pct(0.5),
+            "p90_latency_ms": pct(0.9),
+            "p99_latency_ms": pct(0.99),
+            "errors": errors,
+            "error_rate": round(errors / total, 4) if total else 0.0,
+            "by_status": by_status,
+            "dictionary_words": words,
+            "snippets": snippets,
+        }

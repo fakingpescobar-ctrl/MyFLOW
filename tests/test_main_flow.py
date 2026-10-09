@@ -11,7 +11,6 @@ from unittest import mock
 
 import numpy as np
 from pynput import keyboard
-
 from myflow.asr import AsrResult
 from myflow.audio import Recording
 from myflow.commands import VoiceCommand
@@ -38,12 +37,18 @@ class _Flags(dict):
 
 class _Settings:
     hotkey = _HK()
+    use_ax_observation = False          # в тестах AX не поднимаем
+    observation_seconds = 0.2
+    app_categories = None                # -> DEFAULT_APP_CATEGORIES
+    style_by_category = {"terminal": "terminal", "chat": "casual", "email": "formal"}
+    audio_keep = 10
 
     def __init__(self):
         self.style_by_app = {}
         self.default_style = "plain"
         self.flags = _Flags(auto_insert=True, learning=False, overlay=False,
-                            live_preview=False, beep_on_start=False)
+                            live_preview=False, beep_on_start=False,
+                            snippets=True, keep_audio=False, ax_observation=False)
 
     def get(self):
         return self
@@ -113,9 +118,19 @@ class _DB:
         self.records = []
         self._bump = gen_bump_on_insert
         self.app = None
+        self.snippets: dict = {}
 
     def get_dictionary(self, app):
         return []
+
+    def find_snippet(self, phrase):
+        key = " ".join((phrase or "").strip().lower().split())
+        return self.snippets.get(key)
+
+    def bump_snippet(self, phrase):
+        key = " ".join((phrase or "").strip().lower().split())
+        if key in self.snippets:
+            self.snippets[key]["hit_count"] += 1
 
     def insert_history(self, rec):
         self.records.append(rec)
@@ -125,6 +140,9 @@ class _DB:
 
     def get_polished_text(self, hid):
         return "привет мир"
+
+    def mark_status(self, hid, status):
+        pass
 
 
 def make_app(auto=False, busy=False, gen=0, polish_enabled=False, paster=None):
@@ -150,6 +168,12 @@ def make_app(auto=False, busy=False, gen=0, polish_enabled=False, paster=None):
     app.overlay = _Overlay()
     app.paster = paster or _Paster()
     app.whisper = _Whisper()
+    app.audio = mock.Mock()
+    app.audio.save.return_value = None
+    app.ax = mock.Mock()
+    app.ax.available = False
+    app._ax_ready = False
+    app._last_insert_pid = 0
     app.polish = types.SimpleNamespace(
         cfg=types.SimpleNamespace(enabled=polish_enabled, url="http://127.0.0.1:8082/v1"),
         polish=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("LLM лежит")),
@@ -163,7 +187,10 @@ def make_app(auto=False, busy=False, gen=0, polish_enabled=False, paster=None):
                  "_dispatch_voice_command", "_run_command", "_resolve_style",
                  "_spawn_edit_watcher", "_process_preview", "_cycle_style",
                  "_require_last_insert", "_press_key", "_listener_watchdog_loop",
-                 "_take_preview", "_on_live_preview"):
+                 "_take_preview", "_on_live_preview", "_resolve_category",
+                 "_save_audio", "_record_failure", "_try_snippet",
+                 "_remember_insert_target", "_watch_with_ax", "_watch_with_clipboard",
+                 "retry_pending", "_log_stats"):
         setattr(app, name, types.MethodType(getattr(MyFlowApp, name), app))
     app._guard_polish = MyFlowApp._guard_polish
     return app
@@ -454,6 +481,138 @@ class PreviewPriorityTest(unittest.TestCase):
 
 
 # ---------- P0-3 (интеграция): watcher не запускается для opencode ----------
+
+class SnippetFlowTest(unittest.TestCase):
+    """Сниппеты: голосовая фраза -> готовый текст, ДО команд и полировки."""
+
+    def setUp(self):
+        self.p1 = mock.patch("myflow.main._tb_to_file")
+        self.p1.start()
+        self.addCleanup(self.p1.stop)
+
+    @staticmethod
+    def _rec():
+        return Recording(pcm_int16=np.zeros(16000, dtype=np.int16),
+                         duration_ms=1000, max_amplitude=0.5)
+
+    def test_snippet_inserts_replacement(self):
+        app = make_app()
+        app.whisper = _Whisper("мой email")
+        app.db.snippets["мой email"] = {"phrase": "мой email",
+                                        "replacement": "user@example.com",
+                                        "hit_count": 0}
+        app._process_recording(0, self._rec())
+        self.assertEqual(app.paster.calls, ["user@example.com"])
+        self.assertEqual(len(app.db.records), 1)
+        self.assertEqual(app.db.records[0].status, "snippet")
+        self.assertEqual(app.db.snippets["мой email"]["hit_count"], 1,
+                         "использование сниппета должно учитываться")
+
+    def test_snippet_wins_over_polish(self):
+        app = make_app(polish_enabled=True)
+        app.polish.polish = lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("полировка не должна вызываться для сниппета"))
+        app.whisper = _Whisper("организуй мысли")
+        app.db.snippets["организуй мысли"] = {"phrase": "организуй мысли",
+                                              "replacement": "Organize these...",
+                                              "hit_count": 0}
+        app._process_recording(0, self._rec())
+        self.assertEqual(app.paster.calls, ["Organize these..."])
+
+    def test_no_snippet_goes_normal_path(self):
+        app = make_app()
+        app.whisper = _Whisper("обычная фраза")
+        app._process_recording(0, self._rec())
+        self.assertEqual(app.paster.calls, ["обычная фраза"])
+        self.assertEqual(app.db.records[0].status, "ok")
+
+
+class FailureRecordingTest(unittest.TestCase):
+    """Неуспехи должны попадать в историю (для статистики и retry)."""
+
+    def setUp(self):
+        self.p1 = mock.patch("myflow.main._tb_to_file")
+        self.p1.start()
+        self.addCleanup(self.p1.stop)
+
+    @staticmethod
+    def _rec():
+        return Recording(pcm_int16=np.zeros(16000, dtype=np.int16),
+                         duration_ms=1000, max_amplitude=0.5)
+
+    def test_asr_error_is_recorded(self):
+        app = make_app()
+        app.whisper = _Whisper()
+        app.whisper.transcribe = lambda pcm: (_ for _ in ()).throw(RuntimeError("сервер упал"))
+        app._process_recording(0, self._rec())
+        self.assertEqual(len(app.db.records), 1)
+        self.assertEqual(app.db.records[0].status, "asr_error")
+        self.assertEqual(app.paster.calls, [])
+
+    def test_empty_asr_is_recorded(self):
+        app = make_app()
+        app.whisper = _Whisper("")
+        app._process_recording(0, self._rec())
+        self.assertEqual(app.db.records[0].status, "empty_asr")
+
+    def test_divergence_and_category_in_record(self):
+        app = make_app()
+        app.whisper = _Whisper("проверка связи")
+        app._process_recording(0, self._rec())
+        rec = app.db.records[0]
+        self.assertIsNotNone(rec.divergence)
+        self.assertEqual(rec.status, "ok")
+        self.assertTrue(rec.app_category)
+
+
+class RetryFlowTest(unittest.TestCase):
+    """retry_pending: сохранённое аудио -> повторное распознавание."""
+
+    def test_retry_processes_stored_audio(self):
+        import tempfile
+        from pathlib import Path
+        from myflow.audio_store import AudioStore
+        from myflow.db import Database, DictationRecord
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = AudioStore(Path(tmp) / "audio", keep=5)
+            pcm = (np.sin(np.arange(16000) / 50) * 6000).astype(np.int16)
+            path = store.save(1, pcm)
+            db = Database(Path(tmp) / "h.sqlite")
+            db.insert_history(DictationRecord(
+                asr_text="", polished_text="", app_window="code.exe | x",
+                duration_ms=1000, status="asr_error", audio_path=str(path)))
+
+            app = make_app()
+            app.db = db
+            app.audio = store
+            app.whisper = _Whisper("восстановленная фраза")
+            done = app.retry_pending(limit=3)
+            self.assertEqual(done, 1, "фраза должна быть перераспознана")
+            self.assertEqual(app.paster.calls, ["восстановленная фраза"])
+            statuses = [r[0] for r in db._conn.execute("SELECT status FROM history ORDER BY id")]
+            self.assertIn("retried", statuses)
+            db.close()
+
+    def test_retry_marks_missing_audio(self):
+        import tempfile
+        from pathlib import Path
+        from myflow.db import Database, DictationRecord
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Database(Path(tmp) / "h.sqlite")
+            db.insert_history(DictationRecord(
+                asr_text="", polished_text="", app_window="x",
+                duration_ms=100, status="asr_error", audio_path="нет-такого-файла"))
+            app = make_app()
+            app.db = db
+            app.audio = mock.Mock()
+            app.audio.load.return_value = None
+            self.assertEqual(app.retry_pending(limit=3), 0)
+            status = db._conn.execute("SELECT status FROM history").fetchone()[0]
+            self.assertEqual(status, "audio_missing")
+            db.close()
+
 
 class WatcherTest(unittest.TestCase):
     def test_watcher_skipped_without_read_api(self):
