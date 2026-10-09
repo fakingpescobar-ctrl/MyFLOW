@@ -8,6 +8,13 @@ requests==2.34.2
 onnxruntime==1.20.1
 pynput==1.8.2
 
+# Опционально (рекомендуется): второй ASR-бэкенд GigaAM v3 — ru-only модель,
+# точнее whisper на русском и работает на CPU (GPU свободен под LLM).
+# Ставится отдельно, потому что тянет huggingface-hub (~215 МБ модель):
+#     pip install "onnx-asr[hub]"
+# Без него MyFLOW автоматически работает на whisper (asr.backend=auto).
+# onnx-asr[hub]
+
 # Опционально (только для tools/: валидация VAD и запись wav-датасета):
 # soundfile==0.14.0
 # Только для сравнения VAD-моделей в tools/bench_vad.py:

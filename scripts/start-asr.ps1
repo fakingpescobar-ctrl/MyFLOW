@@ -15,7 +15,11 @@ $ErrorActionPreference = "Stop"
 $root    = Split-Path -Parent $PSScriptRoot
 $whisper = Join-Path $root "bin\whisper\Release\whisper-server.exe"
 $models  = if ($env:MYFLOW_MODELS_DIR) { $env:MYFLOW_MODELS_DIR } else { "X:\llm\models" }
-$model   = Join-Path $models "ggml-large-v3-turbo-q5_0.bin"
+# Модель можно подменить: "режим качества" — ggml-large-v3-q5_0.bin.
+# Замеры на своих записях (tools/eval_asr.py): large-v3 в ~4 раза медленнее
+# turbo (p50 516 против 130 мс) и по WER выигрыша не дал, на шуме так же
+# галлюцинирует. Если нужен именно он: $env:MYFLOW_WHISPER_MODEL = "...large-v3-q5_0.bin"
+$model = if ($env:MYFLOW_WHISPER_MODEL) { $env:MYFLOW_WHISPER_MODEL } else { Join-Path $models "ggml-large-v3-turbo-q5_0.bin" }
 
 if (-not (Test-Path $whisper)) { throw "нет whisper-server.exe: $whisper" }
 if (-not (Test-Path $model))   { throw "нет модели: $model (задай MYFLOW_MODELS_DIR)" }

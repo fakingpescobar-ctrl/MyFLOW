@@ -27,7 +27,7 @@ import numpy as np
 from pynput import keyboard
 
 from myflow.audio import DictationRecorder, Recording
-from myflow.asr import WhisperClient, AsrResult
+from myflow.asr import WhisperClient, AsrResult, make_asr_client
 from myflow.audio_store import AudioStore
 from myflow.axtext import AxReader, AxWatcher
 from myflow.db import Database, DictationRecord
@@ -155,8 +155,17 @@ def app_descriptor() -> str:
     return f"{proc} | {title}" if proc else title
 
 
-def _health_check(whisper: WhisperClient) -> bool:
-    """Fail fast на старте: если сервер лежит, сказать громко и упасть."""
+def _health_check(whisper) -> bool:
+    """Fail fast на старте: если ASR не готов, сказать громко и упасть.
+
+    Работает и для whisper-server (HTTP /health), и для локального GigaAM
+    (у него свой health(): доступен ли пакет/модель).
+    """
+    if hasattr(whisper, "health"):
+        try:
+            return bool(whisper.health())
+        except Exception:  # noqa: BLE001
+            return False
     import requests
     try:
         r = requests.get(f"{whisper.cfg.url}/health", timeout=3)
@@ -190,7 +199,7 @@ class MyFlowApp:
             on_utterance=self._on_utterance if self._pref_auto else None,
             on_interval=self._on_live_preview if cfg.flags.get("live_preview", True) else None,
         )
-        self.whisper = WhisperClient(cfg.asr)
+        self.whisper = make_asr_client(cfg.asr)
         # Фразы-подсказки для ASR: дефолт, если не заданы в settings.json.
         if not cfg.asr.initial_prompt:
             cfg.asr.initial_prompt = ASR_INITIAL_PROMPT
@@ -258,6 +267,7 @@ class MyFlowApp:
         if self.settings.get().flags["overlay"]:
             self.overlay.start()
         self._start_ax()
+        self._warm_asr()
         # Приватность/размер: чистим историю старше retention (по умолчанию 90 дней).
         try:
             removed = self.db.prune_history(self.settings.get().history_retention_days)
@@ -300,6 +310,26 @@ class MyFlowApp:
         if st["by_status"]:
             print("[myflow]   статусы: " + ", ".join(
                 f"{k}={v}" for k, v in st["by_status"].items()))
+
+    def _warm_asr(self) -> None:
+        """Прогреть локальную ASR-модель в фоне (GigaAM грузится ~20-30 с).
+
+        Whisper-серверу прогрев не нужен (он отдельный процесс), поэтому
+        работаем только с клиентами, у которых есть warmup().
+        """
+        warmup = getattr(self.whisper, "warmup", None)
+        if warmup is None:
+            return
+
+        def _run() -> None:
+            try:
+                if not warmup():
+                    print("[myflow] локальная ASR-модель не загрузилась — "
+                          "первая диктовка может не распознаться")
+            except Exception as exc:  # noqa: BLE001
+                print(f"[myflow] прогрев ASR: {exc!r}")
+
+        threading.Thread(target=_run, daemon=True, name="asr-warmup").start()
 
     def _start_ax(self) -> None:
         """Поднять AX-хелпер (UI Automation) для наблюдения за полем ввода."""

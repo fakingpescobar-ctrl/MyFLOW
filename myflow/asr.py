@@ -42,8 +42,7 @@ def pcm_int16_to_wav(pcm: np.ndarray, sample_rate: int = SAMPLE_RATE) -> bytes:
 
 class WhisperClient:
     def __init__(self, cfg: AsrConfig) -> None:
-        self.cfg = cfg
-        # Keep-alive + ретраи: единичный сетевой сбой не должен терять фразу.
+        self.cfg = cfg        # Keep-alive + ретраи: единичный сетевой сбой не должен терять фразу.
         # Ретраим только connect/502-504 (read-timeout не ретраим: повторный
         # инференс на GPU — дорого, лучше честно вернуть ошибку и взять сырой ASR).
         self._session = requests.Session()
@@ -54,6 +53,13 @@ class WhisperClient:
         adapter = HTTPAdapter(max_retries=retry, pool_connections=4, pool_maxsize=4)
         self._session.mount("http://", adapter)
         self._session.mount("https://", adapter)
+
+    def health(self) -> bool:
+        """Жив ли whisper-server (используется fail-fast на старте)."""
+        try:
+            return bool(self._session.get(f"{self.cfg.url}/health", timeout=3).ok)
+        except requests.RequestException:
+            return False
 
     def transcribe(self, pcm_int16: np.ndarray) -> AsrResult:
         if pcm_int16.dtype != np.int16:
@@ -90,3 +96,26 @@ class WhisperClient:
         language = payload.get("language")
         latency_ms = int((time.perf_counter() - started) * 1000)
         return AsrResult(text=text, language=language, latency_ms=latency_ms)
+
+
+def make_asr_client(cfg: AsrConfig):
+    """Выбрать ASR-бэкенд: whisper (сервер) или gigaam (ru-only, ONNX на CPU).
+
+    `asr.backend`:
+      "whisper" — whisper-server по HTTP (по умолчанию исторически);
+      "gigaam"  — GigaAM v3 через onnx-asr (нужен пакет onnx-asr[hub]);
+      "auto"    — gigaam, если пакет установлен, иначе whisper.
+    Если backend="gigaam", а пакета нет — не падаем: пишем предупреждение и
+    возвращаем whisper (диктовка важнее принципиальности).
+    """
+    backend = (getattr(cfg, "backend", "whisper") or "whisper").strip().lower()
+    if backend in ("gigaam", "auto"):
+        from myflow.asr_gigaam import GigaAmClient
+        if GigaAmClient.package_available():
+            client = GigaAmClient(cfg)
+            print(f"[asr] бэкенд: GigaAM ({client.model_name}, {client.quantization}) — CPU")
+            return client
+        if backend == "gigaam":
+            print("[asr] backend=gigaam, но пакет onnx-asr не установлен "
+                  "(pip install onnx-asr[hub]) — работаю на whisper")
+    return WhisperClient(cfg)

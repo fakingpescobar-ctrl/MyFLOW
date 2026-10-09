@@ -29,6 +29,11 @@ from dataclasses import dataclass, field
 EXACT_COMMANDS: dict[str, str] = {
     "стоп": "stop",
     "скип": "skip",
+    # Латинские варианты: GigaAM v3 (ru-only, но обучен на смешанном корпусе)
+    # может записать русское «стоп» как английское «Stop.» — без этих
+    # вариантов команда не сработала бы и слово ушло бы в текст.
+    "stop": "stop",
+    "skip": "skip",
     "удали последнее": "delete_last",
     "удалить последнее": "delete_last",
     "новый абзац": "new_paragraph",

@@ -370,11 +370,16 @@ def default_specs(root: Path = ROOT) -> list[ServerSpec]:
     """
     models = models_dir()
     whisper = root / "bin" / "whisper" / "Release" / "whisper-server.exe"
+    # Модель ASR можно подменить через MYFLOW_WHISPER_MODEL (например, на
+    # ggml-large-v3-q5_0.bin для «режима качества»: медленнее в ~4 раза, по
+    # замерам на своих записях выигрыша по WER не даёт — см. README).
+    whisper_model = Path(os.environ.get("MYFLOW_WHISPER_MODEL")
+                         or (models / "ggml-large-v3-turbo-q5_0.bin"))
     return [
         ServerSpec(
             key="asr", title="ASR whisper.cpp", port=8081,
             url="http://127.0.0.1:8081", health_path="/health",
-            exe=whisper, model=models / "ggml-large-v3-turbo-q5_0.bin",
+            exe=whisper, model=whisper_model,
             args=["--host", "127.0.0.1", "--port", "8081", "-l", "ru",
                   "-bs", "5", "-sns", "-t", "4"],
             log=root / "data" / "asr.log", required=True,

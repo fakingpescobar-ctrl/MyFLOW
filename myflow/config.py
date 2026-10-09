@@ -91,6 +91,13 @@ class AsrConfig:
     input_device: int | None = None    # индекс sounddevice для записи; None = системный
     initial_prompt: str = ""           # подсказка для whisper (типичные фразы диктовки)
     prompt_from_dictionary: bool = True  # добавлять слова из словаря в подсказку
+    # Какой ASR использовать: "whisper" (сервер по HTTP) | "gigaam" (ru-only,
+    # ONNX на CPU через onnx-asr) | "auto" (gigaam, если пакет установлен).
+    # GigaAM точнее на русском и сразу расставляет пунктуацию, whisper —
+    # fallback и единственный вариант, если onnx-asr не установлен.
+    backend: str = "auto"
+    gigaam_model: str = "gigaam-v3-e2e-ctc"
+    gigaam_quantization: str = "int8"
 
 
 @dataclass
