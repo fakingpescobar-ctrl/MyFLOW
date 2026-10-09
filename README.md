@@ -93,7 +93,7 @@ myflow/           # ядро (пакет)
   db.py           # SQLite: history / dictionary / settings_kv (WAL)
   insertion.py    # вставка через буфер + SendInput Ctrl+V
   opencode_inject.py  # инжект в консоль OpenCode (WriteConsoleInputW)
-  overlay.py      # статус-оверлей (Tk, topmost, click-through)
+  overlay.py      # статус-плашка v2 (тёмный бейдж, рабочая область, click-through)
   pick_mic.py     # TUI выбора микрофона/режима/цели
   config.py       # настройки (data/settings.json) и фиче-флаги
 scripts/          # start-asr / start-llm / start-all (пути от расположения скрипта)
