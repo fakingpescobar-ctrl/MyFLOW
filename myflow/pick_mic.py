@@ -24,6 +24,7 @@ from __future__ import annotations
 import msvcrt
 import re
 import sys
+import threading
 
 import numpy as np
 import sounddevice as sd
@@ -51,27 +52,38 @@ def _is_mic(name: str) -> bool:
     return not any(b in low for b in _BLACKLIST)
 
 
-def _probe(device: int | None) -> bool:
+def _probe(device: int | None, timeout: float = 1.5) -> bool:
     """Действительно ли устройство даёт сигнал (живой микрофон).
 
     Открытие потока НЕ достаточно: MME/DirectSound «открываются» даже
     на выключенном блютуз-устройстве и молча отдают нули. Поэтому
     записываем ~0.25 c и смотрим RMS: мёртвое даёт ~0.000015, живой
     микрофон — шум комнаты ~0.0005+.
+
+    Зависший BT-драйвер раньше вешал весь запуск (sd.wait без границы) —
+    поэтому проба идёт в отдельном потоке с таймаутом.
     """
-    try:
-        rec = sd.rec(
-            int(SAMPLE_RATE * 0.25), samplerate=SAMPLE_RATE,
-            channels=1, dtype="float32", device=device,
-        )
-        sd.wait()
-        x = np.nan_to_num(rec[:, 0]) if len(rec) else np.zeros(0)
-        if not len(x):
-            return False
-        rms = float(np.sqrt(np.mean(x ** 2)))
-        return rms > _DEAD_RMS
-    except Exception:  # noqa: BLE001 — мёртвое так и помечаем
-        return False
+    result = {"ok": False}
+
+    def _run() -> None:
+        try:
+            rec = sd.rec(
+                int(SAMPLE_RATE * 0.25), samplerate=SAMPLE_RATE,
+                channels=1, dtype="float32", device=device,
+            )
+            sd.wait()
+            x = np.nan_to_num(rec[:, 0]) if len(rec) else np.zeros(0)
+            if not len(x):
+                return
+            rms = float(np.sqrt(np.mean(x ** 2)))
+            result["ok"] = rms > _DEAD_RMS
+        except Exception:  # noqa: BLE001 — мёртвое так и помечаем
+            pass
+
+    t = threading.Thread(target=_run, daemon=True, name="mic-probe")
+    t.start()
+    t.join(timeout)
+    return result["ok"]
 
 
 def _cluster_key(name: str) -> str:
@@ -278,6 +290,12 @@ def _pick_insert_menu(store: SettingsStore) -> str | None:
 
 def pick_mic() -> int:
     store = SettingsStore()
+    # Без интерактивной консоли msvcrt.getch() бросает исключение (например,
+    # запуск из планировщика/пайпа) — тогда просто оставляем текущие настройки.
+    if sys.stdin is None or not sys.stdin.isatty():
+        print("[MyFLOW] нет интерактивной консоли — оставляю текущие настройки "
+              "(микрофон/режим/вставку можно поменять в data/settings.json).")
+        return 0
     print()
     device = _pick_mic_menu(store)
     if device is _CANCEL:
