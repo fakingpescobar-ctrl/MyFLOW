@@ -1048,8 +1048,19 @@ class TuiApp:
         s = self.store.get()
         mic = s.asr.input_device
         mode = "авто (слушает постоянно)" if s.mode == "auto" else "PTT (держишь F8)"
+        # Куда уйдёт текст: цель закреплена (F6) / берётся из старта диктовки.
+        target = "активное окно"
+        app = getattr(self, "app", None)
+        if app is not None:
+            locked = getattr(app, "_target_locked", None)
+            cur = getattr(app, "_target", None)
+            if locked is not None:
+                target = f"⚲ {locked.label[:26]}"
+            elif cur is not None:
+                target = cur.label[:26]
         return (f"{C_TEXT}{BOLD}режим:{RESET} {C_ACCENT}{mode}{RESET}"
                 f"   {C_TEXT}{BOLD}стиль:{RESET} {C_ACCENT}{s.default_style}{RESET}"
+                f"   {C_TEXT}{BOLD}вставляю в:{RESET} {C_ACCENT}{target}{RESET}"
                 f"   {C_TEXT}{BOLD}микрофон:{RESET} {C_ACCENT}"
                 f"{'#' + str(mic) if mic is not None else 'системный'}{RESET}"
                 f"   {C_TEXT}{BOLD}вставка:{RESET} {C_ACCENT}{s.insert_method}{RESET}")

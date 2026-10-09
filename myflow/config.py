@@ -152,6 +152,8 @@ class HotkeyConfig:
     # https://pynput.readthedocs.io/en/latest/keyboard.html#pynput.keyboard.Key
     cancel_key: str = "f9"          # отмена текущей диктовки
     style_cycle_key: str = "f7"     # переключение стиля (цикл plain→casual→formal→terminal→summarize)
+    # Закрепить/снять закрепление окна-цели вставки: «вставляй всегда сюда».
+    lock_target_key: str = "f6"
     suppress: bool = False          # True: не отдавать эти клавиши активному окну
 
 
@@ -170,6 +172,15 @@ class Settings:
     insert_method: str = "clipboard"
     # После вставки в чат OpenCode — нажать Enter (отправить сообщение).
     opencode_auto_enter: bool = True
+    # Куда вставлять текст:
+    #   "start" — в окно, которое было активным в МОМЕНТ СТАРТА диктовки
+    #             (защита от случайного клика мышью во время фразы: текст всё
+    #             равно уйдёт в тот чат, где ты начал говорить);
+    #   "focus" — в окно, активное в момент вставки (прежнее поведение).
+    insert_target: str = "start"
+    # Возвращать фокус в целевое окно перед вставкой (иначе Ctrl+V уйдёт
+    # в то окно, которое сейчас активно).
+    refocus_on_insert: bool = True
     # VAD-автостоп: пауза между словами длиннее silence_pause_seconds
     # завершает запись. Работает и в ptt (при удержании F8 тоже режет),
     # и в auto (это и есть конец фразы).

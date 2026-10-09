@@ -34,6 +34,7 @@ from myflow.db import Database, DictationRecord
 from myflow.config import SettingsStore, DATA_DIR, DEFAULT_APP_CATEGORIES, detect_category
 from myflow.fastpath import fast_path_allowed
 from myflow.voiceprint import VoiceGate
+from myflow.winfocus import FocusHistory, WindowRef, current_window, focus_window
 from myflow.insertion import ClipboardPaste
 from myflow.opencode_inject import OpenCodeInjector
 from myflow.learning import record_edit_and_learn, watch_pasted_edit
@@ -243,6 +244,13 @@ class MyFlowApp:
         self._ax_ready = False
         self._last_insert_pid = 0
         self._last_insert_ts: float = 0.0    # момент последней вставки (delete_last: защита <60с)
+        # Цель вставки: окно, активное в момент старта диктовки. Нужна, чтобы
+        # случайный клик мышью во время фразы не увёл текст в другое окно.
+        self._focus_history = FocusHistory()
+        self._target: WindowRef | None = None
+        self._target_locked: WindowRef | None = None   # явно закреплённая цель (F6)
+        self._focus_thread: threading.Thread | None = None
+        self._stopping = threading.Event()             # сигнал остановки фоновых петель
         # Очередь фраз: worker обрабатывает последовательно, а recorder в
         # AUTO-режиме тем временем продолжает слушать (не теряем фразы).
         self._queue: queue.Queue[_Job] = queue.Queue()
@@ -300,6 +308,11 @@ class MyFlowApp:
         self._listener_watchdog = threading.Thread(
             target=self._listener_watchdog_loop, daemon=True, name="listener-watchdog")
         self._listener_watchdog.start()
+        self._start_focus_tracker()
+        if (self.settings.get().insert_target or "start") == "start":
+            print("[myflow] цель вставки: окно, из которого начата диктовка "
+                  "(клик мышью в сторону текст не уведёт; "
+                  f"{self.settings.get().hotkey.lock_target_key}=закрепить окно)")
         if self._pref_auto:
             self.recorder.start_continuous()
             print("[myflow] готов (AUTO: слушаю постоянно, фраза по паузе). "
@@ -376,6 +389,7 @@ class MyFlowApp:
             print(f"[myflow] AX-хелпер не поднялся: {exc!r}")
 
     def stop(self) -> None:
+        self._stopping.set()      # гасим фоновые петли (в т.ч. сэмплер фокуса)
         if self._listener:
             self._listener.stop()
         if self._pref_auto:
@@ -416,6 +430,9 @@ class MyFlowApp:
         hk = self.settings.get().hotkey
         if _matches(key, hk.style_cycle_key):
             self._cycle_style()
+            return
+        if _matches(key, getattr(hk, "lock_target_key", "f6")):
+            self._toggle_target_lock()
             return
         if _matches(key, hk.cancel_key):
             self._cancel_all()
@@ -549,9 +566,14 @@ class MyFlowApp:
     # ---- жизненный цикл записи (PTT) ----
 
     def _begin_recording(self) -> None:
+        # Цель вставки — окно, из которого пользователь начал диктовать.
+        # Если он потом случайно кликнет в сторону, текст всё равно уйдёт сюда.
+        self._target = self._target_locked or current_window()
         self.recorder.start()
         self._auto_stopped = False
         print(f"[myflow] ● запись начата (окно: {app_descriptor()})")
+        if self._target is not None:
+            print(f"[myflow]   цель вставки: {self._target.label}")
         self.overlay.show("● запись…", "#f5c542")
 
     def _cancel_recording(self) -> None:
@@ -598,7 +620,35 @@ class MyFlowApp:
 
     def _on_utterance(self, rec: Recording) -> None:
         """Вызывается из отдельного потока (recorder). Очередь не блокирует."""
+        # В AUTO фраза начинается сама (VAD), поэтому окно-цель ищем в истории
+        # фокуса: оно было активным в момент старта этой фразы.
+        if self._target_locked is not None:
+            self._target = self._target_locked
+        elif (self.settings.get().insert_target or "start") == "start":
+            started_at = time.monotonic() - max(0.0, rec.duration_ms / 1000.0)
+            self._target = self._focus_history.at(started_at) or current_window()
+        else:
+            self._target = None       # insert_target="focus": решаем в момент вставки
         self._enqueue(rec)
+
+    def _start_focus_tracker(self) -> None:
+        """Сэмплер фокуса для AUTO-режима (нужен только при insert_target='start').
+
+        Замеры раз в 0.4 с: по ним находим окно, активное в момент начала фразы.
+        Отдельный поток, ничего не блокирует и почти не стоит по CPU.
+        """
+        if (self.settings.get().insert_target or "start") != "start":
+            return
+
+        def loop() -> None:
+            while not self._stopping.is_set():
+                self._focus_history.record()
+                self._focus_history.prune()
+                time.sleep(0.4)
+
+        self._focus_thread = threading.Thread(target=loop, daemon=True,
+                                              name="focus-tracker")
+        self._focus_thread.start()
 
     def _on_live_preview(self, pcm_int16) -> None:
         """Инкрементальный ASR: кладём драфт в единственный слот.
@@ -698,7 +748,7 @@ class MyFlowApp:
             self.overlay.show("○ пропуск", "#9aa0a6")
             return
         if cmd.kind == "new_paragraph":
-            self.paster.paste("\n")
+            self._paste_to_target("\n")
             self.overlay.show("¶ абзац", "#46a758")
             return
         if cmd.kind == "delete_last":
@@ -726,7 +776,7 @@ class MyFlowApp:
                 return
             polished = self._polish_safe(text, cmd.kind, [])
             final = polished.text if not polished.skipped else text
-            self.paster.paste(final)
+            self._paste_to_target(final)
             self.overlay.show(f"✓ {cmd.kind}", "#46a758")
             return
 
@@ -929,7 +979,7 @@ class MyFlowApp:
             return
         if flags["auto_insert"]:
             try:
-                ok = self.paster.paste(final_text)
+                ok = self._paste_to_target(final_text)
                 self._last_insert_ts = time.monotonic()
                 # Запоминаем процесс/окно, в которое вставили: наблюдатель
                 # правок должен убедиться, что читает то же самое окно.
@@ -991,6 +1041,58 @@ class MyFlowApp:
         cfg.initial_prompt = f"{head}. Термины: {vocab_text}."
 
     # ---- сниппеты / аудио / статистика неудач ----
+
+    def _toggle_target_lock(self) -> None:
+        """F6: закрепить текущее окно как цель вставки (или снять закрепление).
+
+        Нужно, когда диктуешь в один чат, а «кликать в него» перед каждой фразой
+        не хочется: закреплённая цель не пересчитывается по моменту старта.
+        """
+        cur = current_window()
+        if self._target_locked is not None:
+            print(f"[myflow] ○ закрепление снято (было: «{self._target_locked.label}»)")
+            self.overlay.show("○ цель не закреплена", "#9aa0a6")
+            self._target_locked = None
+            return
+        if cur is None:
+            print("[myflow] ! не вижу активного окна — закрепить нечего")
+            return
+        self._target_locked = cur
+        print(f"[myflow] ⚲ цель закреплена: «{cur.label}» (F6 — снять)")
+        self.overlay.show(f"⚲ вставляю в: {cur.label[:28]}", "#46a758")
+
+    def _paste_to_target(self, text: str) -> bool:
+        """Вставить текст в ЦЕЛЕВОЕ окно (где началась диктовка).
+
+        Раньше вставка шла в то окно, которое активно в момент Ctrl+V: случайный
+        клик мышью во время фразы — и текст уходил не туда («не в тот чат»).
+        Теперь цель зафиксирована с начала диктовки, а перед вставкой фокус
+        возвращается в неё (настройка refocus_on_insert).
+        """
+        target = self._target if (self.settings.get().insert_target or "start") == "start" else None
+        restored = False
+        if target is not None:
+            if not current_window() or current_window().hwnd != target.hwnd:
+                if self.settings.get().refocus_on_insert:
+                    restored = focus_window(target.hwnd)
+                    if restored:
+                        time.sleep(0.06)      # окну нужно мгновение стать активным
+                    else:
+                        print(f"[myflow] ! не удалось вернуть фокус в «{target.label}» — "
+                              "вставляю в активное окно")
+                else:
+                    print(f"[myflow]   цель «{target.label}» не в фокусе, "
+                          "вставляю в активное (refocus_on_insert=false)")
+        ok = self.paster.paste(text)
+        self._last_insert_ts = time.monotonic()
+        # Наблюдателю правок важно знать, в какое окно вставили.
+        if target is not None and target.pid:
+            self._last_insert_pid = target.pid
+        else:
+            self._remember_insert_target()
+        if target is not None and restored:
+            print(f"[myflow]   вставлено в «{target.label}» (фокус возвращён)")
+        return ok
 
     def _remember_insert_target(self) -> None:
         """Запомнить pid окна, куда вставили (для AX-наблюдения за правкой)."""
@@ -1063,7 +1165,7 @@ class MyFlowApp:
         print(f"[myflow] ✓ сниппет «{snippet['phrase']}» -> {replacement[:60]}")
         if self.settings.get().flags["auto_insert"] and gen == self._gen:
             try:
-                self.paster.paste(replacement)
+                self._paste_to_target(replacement)
                 self._last_insert_ts = time.monotonic()
                 self.overlay.show("✓ сниппет", "#46a758")
             except Exception as exc:  # noqa: BLE001

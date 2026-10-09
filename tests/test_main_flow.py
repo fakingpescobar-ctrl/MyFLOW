@@ -60,6 +60,8 @@ class _Settings:
     app_categories = None                # -> DEFAULT_APP_CATEGORIES
     style_by_category = {"terminal": "terminal", "chat": "casual", "email": "formal"}
     audio_keep = 10
+    insert_target = "focus"          # в тестах окон нет -> вставляем «в активное»
+    refocus_on_insert = False
 
     def __init__(self):
         self.style_by_app = {}
@@ -205,6 +207,10 @@ def make_app(auto=False, busy=False, gen=0, polish_enabled=False, paster=None):
     app.voice.ready = False
     app._asr_prompt_base = "тестовая подсказка"
     app._asr_prompt_ts = 0.0
+    # Цель вставки: в тестах окна нет -> вставляем «в активное» (как раньше).
+    app._target = None
+    app._target_locked = None
+    app._stopping = threading.Event()
     app.polish = types.SimpleNamespace(
         cfg=types.SimpleNamespace(enabled=polish_enabled, url="http://127.0.0.1:8082/v1"),
         polish=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("LLM лежит")),
@@ -221,7 +227,8 @@ def make_app(auto=False, busy=False, gen=0, polish_enabled=False, paster=None):
                  "_take_preview", "_on_live_preview", "_resolve_category",
                  "_save_audio", "_record_failure", "_try_snippet",
                  "_remember_insert_target", "_watch_with_ax", "_watch_with_clipboard",
-                 "retry_pending", "_log_stats", "_refresh_asr_prompt"):
+                 "retry_pending", "_log_stats", "_refresh_asr_prompt",
+                 "_paste_to_target", "_toggle_target_lock", "_on_utterance"):
         setattr(app, name, types.MethodType(getattr(MyFlowApp, name), app))
     app._guard_polish = MyFlowApp._guard_polish
     return app
