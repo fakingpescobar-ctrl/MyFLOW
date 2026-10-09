@@ -106,6 +106,9 @@ class DictationRecorder:
         self._phrase: list[np.ndarray] = []
         self._phrase_peak = 0.0
         self._phrase_speech_ok_chunks = 0
+        # Счётчик превью внутри фразы: инициализируем здесь, а не только в
+        # start_continuous (иначе атрибут отсутствует до первого запуска AUTO).
+        self._prev_interval_samples_in_phrase = 0
         self._max_samples = MAX_DICTATION_SECONDS * sample_rate
         self._hard_limit_fired = False
         self._status_count = 0

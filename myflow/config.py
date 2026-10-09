@@ -39,7 +39,9 @@ class AsrConfig:
 class PolishConfig:
     """Параметры локальной LLM-полировки (аналог Instruct/Polish у Wispr)."""
     url: str = "http://127.0.0.1:8082/v1"   # qwen3-4b форматтер (быстрый)
-    model: str = "gemma"
+    # Fallback-имя модели, если /v1/models не ответил. Реальное имя клиент
+    # спрашивает у сервера (polish.PolishClient._effective_model).
+    model: str = "qwen3-4b-instruct-2507"
     enabled: bool = True            # фиче-флаг polish-provider
     max_tokens: int = 512           # верхняя граница ответа (реально — по бюджету)
     temperature: float = 0.2

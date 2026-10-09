@@ -1,6 +1,7 @@
 """Смоук Ф6: оверлей стартует в потоке, show/hide, клик-сквозь не падает."""
-import sys, time
-sys.path.insert(0, r"C:\Projects\MyFLOW")
+import sys
+from pathlib import Path, time
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.stdout.reconfigure(encoding="utf-8")
 from myflow.overlay import StatusOverlay
 

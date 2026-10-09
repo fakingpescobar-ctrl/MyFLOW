@@ -11,10 +11,15 @@ import time
 from collections import deque  # noqa: F401  (зарезервировано — не используется)
 from pathlib import Path
 
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import numpy as np
 import onnxruntime as ort
 
-MODELS_DIR = Path(r"data\vad_models")
+MODELS_DIR = Path(__file__).resolve().parent.parent / "data" / "vad_models"
 SR = 16000
 
 

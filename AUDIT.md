@@ -3,7 +3,48 @@
 **Дата:** 09.10.2026
 **Охват:** весь Python-код ядра (`myflow/`, ~2 200 строк), скрипты запуска, конфиги, тестовые скрипты, `requirements.txt`, README, журнал реальной эксплуатации `data/main.log`, база `data/myflow.sqlite`, внутренности установленных `pynput` и `pyperclip`.
 **Метод:** статический разбор + 4 параллельных глубоких аудита по зонам + динамическая проверка гипотез (4 эксперимента) + анализ лога эксплуатации.
-**Файлы проекта не изменялись.** Единственный созданный файл — этот отчёт.
+**Файлы проекта не изменялись на момент аудита.** Единственный созданный файл — этот отчёт.
+
+---
+
+## 0. Статус выполнения (обновлено 09.10.2026, после правок)
+
+Реализовано и покрыто тестами (112 тестов, `python -m unittest discover -s tests -t .` → OK):
+
+| Пункт | Статус | Где |
+|---|---|---|
+| P0-1 LLM-интент больше не съедает диктовку | ✅ сделано | `commands.llm_classify` (whitelist kind, `arg_looks_like_source`), `main._dispatch_voice_command` |
+| P0-2 ошибка полировки → сырой ASR + watchdog | ✅ сделано | `main._polish_safe`, `_polish_watchdog_loop` |
+| P0-3 авто-обучение (read-API + busy-spin) | ✅ сделано | `insertion.read`, `learning.watch_pasted_edit`, `main._spawn_edit_watcher` |
+| P0-4 хоткеи не умирают | ✅ сделано | `main._on_press/_on_release` + `_listener_watchdog_loop` |
+| P0-5 дубли словаря (NULL в UNIQUE) | ✅ сделано + миграция живой БД | `db._init_schema`, `add_word`, `get_dictionary` |
+| P0-6 «системный микрофон» ≠ «отмена» | ✅ сделано | `pick_mic._CANCEL` |
+| P0-7 PTT: F8 при занятом воркере, автоповтор | ✅ сделано | `main._handle_press/_handle_release`, `_key_down` |
+| P0-8 `_guard_polish` (короткие фразы/усечение/пустой ответ) | ✅ сделано | `main._guard_polish` |
+| P1-1 live-превью после первой фразы | ✅ сделано | сброс `_prev_interval_samples_in_phrase` |
+| P1-2 отмена (F9/«стоп») действует на очередь и обработку | ✅ сделано | поколения `_Job.gen`, `_cancel_all` |
+| P1-4 `finish_reason` + бюджет `max_tokens` + `top_p`/`repeat_penalty` | ✅ сделано | `polish.polish`, `PolishResult.truncated` |
+| P1-5 «отправь» без дубля | ✅ сделано | `commands.classify`, `main._run_command` |
+| P1-6 регистр аргумента + safelist «списком» | ✅ сделано | `commands.classify` |
+| P1-8 `autojunk=False`, убран двойной `hit_count`, per-app ключ кандидата | ✅ сделано | `learning` |
+| P1-9 инъекция: `<dictation>`, санитизация словаря | ✅ сделано | `polish.DATA_GUARD` |
+| P1-10 лимит диктовки в PTT | ✅ сделано | `audio._on_audio_ptt` (жёсткий лимит) |
+| P2-3 блоки со `status` не теряются | ✅ сделано | `audio._on_audio` |
+| P2-4 ASR: Session + Retry + JSON/UTF-8 | ✅ сделано | `asr.WhisperClient` |
+| P2-5 буфер обмена не убивает картинки/файлы, Ctrl+Z по VK | ✅ сделано | `insertion.ClipboardPaste`, `main._press_key` |
+| P2-6 `suppress` (опционально) | ✅ сделано (флаг `hotkey.suppress`) | `main._start_listener` |
+| P2-7 флаги merge + неизвестные ключи | ✅ сделано | `config.SettingsStore._load` |
+| P3-1 `requirements.txt` (onnxruntime) + `pyproject.toml` | ✅ сделано | корень репозитория |
+| P3-2 git + `.gitignore` | ✅ сделано | коммиты `901b634`, `3c86efb` |
+| P3-3 дубль `bin/whisper.zip` (640 МБ) | ✅ удалён (проверено: 45/45 файлов совпадают) | `bin/` |
+| P3-4 абсолютные пути | ✅ сделано (env-переменные + пути от скрипта) | `vad.py`, `scripts/`, `tools/`, `start-myflow.bat` |
+| P3-5 тесты: `tests/` + регрессы, прод-БД не трогается | ✅ сделано (112 тестов) | `tests/` |
+| P3-7 README (установка, Qwen, тесты) | ✅ сделано | `README.md` |
+
+Осталось на следующие спринты: P1-7 (маска per-app = имя приложения, а не заголовок окна),
+P2-1/P2-2 (приоритетная очередь превью + вынос VAD-инференса из аудио-колбэка),
+P2-8…P2-12 (logging с ротацией, сигналы/жизненный цикл, таймауты `pick_mic`, ретеншен БД,
+контраст/позиция оверлея), P3-6 (чистка `data/`), P3-8 (лицензии third-party).
 
 ---
 

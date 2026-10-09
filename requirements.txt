@@ -1,5 +1,15 @@
-pynput==1.8.1
-sounddevice==0.5.1
-numpy==2.3.2
-pyperclip==1.9.0
-requests==2.32.5
+# MyFLOW — runtime-зависимости (Python 3.13, Windows).
+# Пины синхронизированы с рабочим .venv (были устаревшие и неполные:
+# onnxruntime отсутствовал -> `python -m myflow.main` падал с ImportError).
+numpy==2.5.2
+sounddevice==0.5.6
+pyperclip==1.11.0
+requests==2.34.2
+onnxruntime==1.20.1
+pynput==1.8.2
+
+# Опционально (только для tools/: валидация VAD и запись wav-датасета):
+# soundfile==0.14.0
+# Только для сравнения VAD-моделей в tools/bench_vad.py:
+# webrtcvad-wheels==2.0.14, ten-vad==1.0.6.8, fireredvad==0.0.2,
+# kaldi-native-fbank==1.22.3, kaldiio==2.18.1

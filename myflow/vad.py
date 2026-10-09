@@ -13,10 +13,19 @@
 """
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import numpy as np
 import onnxruntime as ort
 
-SILERO_PATH = r"data\vad_models\silero_v6.onnx"
+# Путь к модели VAD: переменная окружения MYFLOW_SILERO_PATH или
+# data/vad_models/silero_v6.onnx рядом с репозиторием (раньше был жёстко
+# прописан C:\Projects\MyFLOW — проект не переносился на другую машину).
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+SILERO_PATH = os.environ.get(
+    "MYFLOW_SILERO_PATH", str(_REPO_ROOT / "data" / "vad_models" / "silero_v6.onnx")
+)
 SR = 16000
 
 

@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "myflow"
+version = "0.2.0"
+description = "Локальный голосовой диктант (Whisper + LLM) для Windows"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.0",
+    "sounddevice>=0.5",
+    "pyperclip>=1.9",
+    "requests>=2.32",
+    "onnxruntime>=1.20",
+    "pynput>=1.8",
+]
+
+[project.scripts]
+myflow = "myflow.main:main"
+
+[tool.setuptools]
+packages = ["myflow"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

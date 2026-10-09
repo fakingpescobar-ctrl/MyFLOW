@@ -13,10 +13,10 @@ from pathlib import Path
 import numpy as np
 import soundfile as sf
 
-sys.path.insert(0, r"C:\Projects\MyFLOW")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import bench_vad as b
 
-VAL = Path(r"data\validation")
+VAL = Path(__file__).resolve().parent.parent / "data" / "validation"
 sil = b.SileroVad(b.MODELS_DIR / "silero_v6.onnx")
 
 GROUPS = [
