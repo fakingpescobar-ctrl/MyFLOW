@@ -182,6 +182,9 @@ def make_app(auto=False, busy=False, gen=0, polish_enabled=False, paster=None):
     app._polish_watchdog = None
     app._style_override = None
     app._style_cycle = ["plain"]
+    # Пайплайн спрашивает _resolve_style (смотрит на активное окно) —
+    # в тестах фиксируем plain, иначе результат зависит от фокуса.
+    app._resolve_style = lambda app: "plain"
     app._last_style_switch_t = 0.0
     app._last_history_id = None
     app._last_insert_ts = 0.0

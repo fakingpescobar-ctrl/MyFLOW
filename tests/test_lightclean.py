@@ -102,15 +102,31 @@ class LightCleanInPipelineTest(unittest.TestCase):
         from test_main_flow import make_app
         self.mock = mock
         self.app = make_app(polish_enabled=True)
-        self.app.polish.polish = mock.Mock(
-            side_effect=AssertionError("LLM не должна вызываться при лёгкой чистке"))
+        calls: list[str] = []
+
+        def _no_llm(*a, **k):
+            import traceback
+            calls.append("".join(traceback.format_stack(limit=8)))
+            raise AssertionError("LLM не должна вызываться при лёгкой чистке")
+
+        self._llm_calls = calls
+        self.app.polish.polish = mock.Mock(side_effect=_no_llm)
         r = mock.Mock()
         r.text = "Ну что там, брат? Как дела?"
         r.language = "ru"
         r.latency_ms = 120
         self.app.whisper = mock.Mock(backend_name="gigaam", health=lambda: True,
                                      transcribe=lambda *a, **k: r)
+        # Стиль берём фиксированный: пайплайн спрашивает _resolve_style, а тот
+        # смотрит на РЕАЛЬНОЕ активное окно (в терминале стиль terminal, там
+        # полировка переформатирует текст и локальная чистка не применяется) —
+        # из-за этого тест вёл себя по-разному в зависимости от фокуса.
         self.app._pick_style = lambda: "plain"
+        self.app._resolve_style = lambda app: "plain"
+        self.window_patch = self.mock.patch("myflow.main.app_descriptor",
+                                            return_value="тест")
+        self.window_patch.start()
+        self.addCleanup(self.window_patch.stop)
         self.app.voice.check = lambda pcm: (True, None, "ок")
 
     def _run(self, text):
@@ -127,7 +143,9 @@ class LightCleanInPipelineTest(unittest.TestCase):
 
     def test_filler_phrase_bypasses_llm(self):
         self._run("Ну что там, брат? Как дела?")
-        self.app.polish.polish.assert_not_called()
+        self.assertFalse(self.app.polish.polish.called,
+                         "LLM вызвана при лёгкой чистке, стек:\n"
+                         + "\n".join(self._llm_calls))
         inserted = " ".join(self.app.paster.calls)
         self.assertIn("Что там", inserted, f"вставлено: {inserted!r}")
         statuses = [r.status for r in self.app.db.records]
@@ -160,7 +178,9 @@ class LightCleanInPipelineTest(unittest.TestCase):
     def test_filler_phrase_with_terminal_skips_llm(self):
         """А вот «Ну да, тогда делай всё по очереди.» — чисто механическая."""
         self._run("Ну да, тогда делай всё по очереди.")
-        self.app.polish.polish.assert_not_called()
+        self.assertFalse(self.app.polish.polish.called,
+                         "LLM вызвана при лёгкой чистке, стек:\n"
+                         + "\n".join(self._llm_calls))
 
 if __name__ == "__main__":
     unittest.main()
