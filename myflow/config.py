@@ -254,11 +254,26 @@ class HotkeyConfig:
 
 
 @dataclass
+class TuiConfig:
+    """Оформление пульта: размер окна и поведение мыши."""
+
+    # Размер окна. 0 = зафиксировать тот, что есть при первом запуске
+    # (значения сохраняются в settings.json), дальше окно всегда этого размера.
+    cols: int = 0
+    rows: int = 0
+    fixed_size: bool = True
+    # Колесо мыши листает ТОЛЬКО журнал; окно при этом не прокручивается
+    # (мышиный режим VT перехватывает колесо у терминала).
+    mouse_wheel: bool = True
+
+
+@dataclass
 class Settings:
     asr: AsrConfig = field(default_factory=AsrConfig)
     polish: PolishConfig = field(default_factory=PolishConfig)
     hotkey: HotkeyConfig = field(default_factory=HotkeyConfig)
     voiceprint: VoicePrintConfig = field(default_factory=VoicePrintConfig)
+    tui: TuiConfig = field(default_factory=TuiConfig)
     # Режим активации записи: "ptt" — по нажатию кнопки (F8),
     # "auto" — постоянно слушает микрофон, фраза режется по паузе.
     mode: str = "ptt"

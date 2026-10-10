@@ -691,3 +691,85 @@ class PhaseTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MouseWheelTest(unittest.TestCase):
+    """Колесо мыши: листает только журнал, окно не прокручивается."""
+
+    class _Out:
+        def __init__(self):
+            self.data = ""
+
+        def write(self, s):
+            self.data += s
+
+        def flush(self):
+            pass
+
+    @staticmethod
+    def _snap():
+        return {"modules": [
+            {"key": "asr", "label": "ASR", "value": "GigaAM", "on": True,
+             "ok": True, "note": "", "hint": "h"},
+        ], "values": [], "counters": {"phrases": 1, "pending": 0, "queue": 0}}
+
+    def test_parses_sgr_wheel_events(self):
+        self.assertEqual(T.map_mouse_sequence("[<64;120;34M"), "wheelup:120,34")
+        self.assertEqual(T.map_mouse_sequence("[<65;10;5M"), "wheeldown:10,5")
+
+    def test_parses_clicks_and_ignores_other_sequences(self):
+        self.assertEqual(T.map_mouse_sequence("[<0;15;20M"), "click:15,20")
+        self.assertIsNone(T.map_mouse_sequence("[15~"))
+        self.assertIsNone(T.map_mouse_sequence(""))
+
+    def test_layout_records_journal_rows(self):
+        frame = T.render_panel(self._snap(), 100, 30, "cfg", ["строка 1", "строка 2"],
+                               0, 0, level=(0.1, ""))
+        top, bottom = T.LAST_LAYOUT["journal"]
+        self.assertGreaterEqual(top, 1)
+        self.assertGreater(bottom, top, "журнал должен занимать несколько строк")
+        self.assertLessEqual(bottom, len(frame), "границы внутри кадра")
+
+    def test_wheel_inside_journal_scrolls(self):
+        from unittest import mock
+        tui = T.TuiApp(no_servers=True)
+        frame = T.render_panel(self._snap(), 100, 30, "cfg", ["a", "b", "c"], 0, 0)
+        top, _bottom = T.LAST_LAYOUT["journal"]
+        tui.state.log = [f"строка {i}" for i in range(50)]
+        with mock.patch.object(tui, "_scroll_journal") as scroll:
+            handled = tui._on_wheel(f"wheelup:10,{top + 1}", 30)
+        self.assertTrue(handled)
+        scroll.assert_called_once()
+
+    def test_wheel_outside_journal_is_ignored(self):
+        """Вне журнала колесо не должно ничего прокручивать."""
+        from unittest import mock
+        tui = T.TuiApp(no_servers=True)
+        T.render_panel(self._snap(), 100, 30, "cfg", ["a"], 0, 0)
+        with mock.patch.object(tui, "_scroll_journal") as scroll:
+            handled = tui._on_wheel("wheelup:10,1", 30)
+        self.assertFalse(handled)
+        scroll.assert_not_called()
+
+    def test_mouse_mode_toggles_escape_sequences(self):
+        console = T.Console.__new__(T.Console)
+        console.out = self._Out()
+        console.vt = True
+        console.mouse = False
+        console.enable_mouse()
+        self.assertIn(T.CSI + "?1000h", console.out.data)
+        self.assertIn(T.CSI + "?1006h", console.out.data)
+        self.assertTrue(console.mouse)
+        console.out.data = ""
+        console.disable_mouse()
+        self.assertIn(T.CSI + "?1006l", console.out.data)
+        self.assertIn(T.CSI + "?1000l", console.out.data)
+        self.assertFalse(console.mouse)
+
+    def test_lock_size_keeps_size_when_disabled(self):
+        """lock_size(0,0) ничего не ломает и возвращает актуальный размер."""
+        console = T.Console.__new__(T.Console)
+        console.vt = False
+        console.raw_size = lambda: (120, 35)
+        w, h = console.lock_size(0, 0)
+        self.assertEqual((w, h), (120, 35))

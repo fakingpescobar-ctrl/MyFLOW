@@ -197,6 +197,28 @@ def map_extended_key(prefix: int, code: bytes) -> str | None:
     return _EXT_KEYS.get(prefix, {}).get(code)
 
 
+_MOUSE_SGR = re.compile(r"\[?<(\d+);(\d+);(\d+)([Mm])")
+
+
+def map_mouse_sequence(seq: str) -> str | None:
+    """Разобрать SGR-событие мыши: `[<64;120;34M`.
+
+    Код 64/65 — колесо вверх/вниз, остальные события (клики, движение) сейчас
+    не используются, но распознаются, чтобы не ломать разбор ESC-последовательности.
+    Возвращает `wheelup:X,Y` / `wheeldown:X,Y` / `click:X,Y` / None.
+    """
+    m = _MOUSE_SGR.search(seq or "")
+    if not m:
+        return None
+    code, x, y, kind = int(m.group(1)), int(m.group(2)), int(m.group(3)), m.group(4)
+    if code & 64:                                   # колесо
+        direction = "down" if code & 1 else "up"
+        return f"wheel{direction}:{x},{y}"
+    if code & 32:                                   # движение с кнопкой
+        return f"drag:{x},{y}"
+    return f"click:{x},{y}" if kind == "M" else f"release:{x},{y}"
+
+
 def map_vt_sequence(seq: str) -> str | None:
     """Хвост ESC-последовательности ('15~', '[15~', 'A') -> имя клавиши."""
     text = seq.strip().lstrip("[")
@@ -269,6 +291,8 @@ class Console:
         # Последний нарисованный кадр: пишем в консоль только изменившиеся строки
         # (полный кадр — ~8.5 КБ ANSI; при 20 кадрах/с это 170 КБ/с впустую).
         self._last_frame: list[str] = []
+        self.mouse = False
+        self._locked_raw: tuple[int, int] | None = None
         try:
             self.out.reconfigure(encoding="utf-8", errors="replace")
         except Exception:  # noqa: BLE001
@@ -289,6 +313,115 @@ class Console:
             return True
         except Exception:  # noqa: BLE001
             return False
+
+    def raw_size(self) -> tuple[int, int]:
+        """Истинный размер видимого окна (без вычета строки под легенду)."""
+        try:
+            class _Coord(ctypes.Structure):
+                _fields_ = [("X", ctypes.c_short), ("Y", ctypes.c_short)]
+
+            class _SmallRect(ctypes.Structure):
+                _fields_ = [("Left", ctypes.c_short), ("Top", ctypes.c_short),
+                            ("Right", ctypes.c_short), ("Bottom", ctypes.c_short)]
+
+            class _Csbi(ctypes.Structure):
+                _fields_ = [("dwSize", _Coord), ("dwCursorPosition", _Coord),
+                            ("wAttributes", ctypes.c_ushort), ("srWindow", _SmallRect),
+                            ("dwMaximumWindowSize", _Coord)]
+
+            handle = ctypes.windll.kernel32.GetStdHandle(-11)
+            info = _Csbi()
+            if ctypes.windll.kernel32.GetConsoleScreenBufferInfo(handle, ctypes.byref(info)):
+                width = info.srWindow.Right - info.srWindow.Left + 1
+                height = info.srWindow.Bottom - info.srWindow.Top + 1
+                if width > 0 and height > 0:
+                    return int(width), int(height)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            import shutil as _sh
+            ts = _sh.get_terminal_size()
+            return int(ts.columns), int(ts.lines)
+        except Exception:  # noqa: BLE001
+            return 120, 35
+
+    def lock_size(self, cols: int = 0, rows: int = 0) -> tuple[int, int]:
+        """Зафиксировать размер окна и убрать прокрутку буфера.
+
+        Зачем: колесо мыши прокручивало буфер консоли, и весь пульт «уезжал
+        вверх». Делаем окно ровно нужного размера и буфер — ровно под окно
+        (без истории прокрутки), поэтому прокручивать нечего.
+
+        `cols`/`rows` — желаемый ВИДИМЫЙ размер (0 = оставить как есть).
+        Возвращает фактический размер окна (ширина, высота буфера-окна).
+        """
+        want_w = int(cols or 0)
+        want_h = int(rows or 0)
+        try:
+            k = ctypes.windll.kernel32
+            handle = k.GetStdHandle(-11)
+
+            class _Coord(ctypes.Structure):
+                _fields_ = [("X", ctypes.c_short), ("Y", ctypes.c_short)]
+
+            class _SmallRect(ctypes.Structure):
+                _fields_ = [("Left", ctypes.c_short), ("Top", ctypes.c_short),
+                            ("Right", ctypes.c_short), ("Bottom", ctypes.c_short)]
+
+            cur_w, cur_h = self.raw_size()
+            want_w = max(60, want_w or cur_w)
+            want_h = max(20, want_h or cur_h)
+            if (want_w, want_h) == (cur_w, cur_h):
+                self._locked_raw = (want_w, want_h)
+                return want_w, want_h
+
+            def set_buffer(w: int, h: int) -> bool:
+                return bool(k.SetConsoleScreenBufferSize(handle, _Coord(w, h)))
+
+            def set_window(w: int, h: int) -> bool:
+                rect = _SmallRect(0, 0, w - 1, h - 1)
+                return bool(k.SetConsoleWindowInfo(handle, True, ctypes.byref(rect)))
+
+            if want_w > cur_w or want_h > cur_h:
+                set_buffer(max(want_w, cur_w), max(want_h, cur_h))   # растим буфер
+                set_window(want_w, want_h)
+            else:
+                set_window(want_w, want_h)                           # сперва окно
+            set_buffer(want_w, want_h)         # буфер ровно под окно: прокрутки нет
+        except Exception:  # noqa: BLE001 — не Windows/нет консоли
+            pass
+        raw = self.raw_size()
+        self._locked_raw = raw
+        return raw
+
+    def enable_mouse(self) -> None:
+        """Перехватить колесо мыши: события приходят нам, окно не прокручивается."""
+        if not self.vt:
+            return
+        try:
+            k = ctypes.windll.kernel32
+            handle = k.GetStdHandle(-10)                      # STD_INPUT_HANDLE
+            mode = ctypes.c_ulong()
+            if k.GetConsoleMode(handle, ctypes.byref(mode)):
+                # ENABLE_VIRTUAL_TERMINAL_INPUT = 0x0200
+                k.SetConsoleMode(handle, mode.value | 0x0200)
+        except Exception:  # noqa: BLE001
+            pass
+        # 1000 — обычные события мыши, 1006 — расширенный (SGR) формат координат
+        self.out.write(CSI + "?1000h" + CSI + "?1006h")
+        self.out.flush()
+        self.mouse = True
+
+    def disable_mouse(self) -> None:
+        """Вернуть мышь терминалу (иначе после выхода колесо «залипает»)."""
+        if not getattr(self, "mouse", False):
+            return
+        try:
+            self.out.write(CSI + "?1006l" + CSI + "?1000l")
+            self.out.flush()
+        except Exception:  # noqa: BLE001
+            pass
+        self.mouse = False
 
     def size(self) -> tuple[int, int]:
         """Размер ВИДИМОГО окна консоли (не буфера!).
@@ -1091,6 +1224,11 @@ def stamp_confirm(lines: Sequence[str], question: str, hint: str,
     return out
 
 
+# Разметка последнего кадра: нужна, чтобы понимать, куда попала мышь.
+# {"journal": (первая_строка, последняя_строка)} — нумерация экранных строк с 1.
+LAST_LAYOUT: dict = {}
+
+
 def render_panel(snap: dict, w: int, h: int, cfg_line: str,
                  journal: Sequence[str], scroll: int, sel: int,
                  level: tuple[float, str] | None = None,
@@ -1161,8 +1299,12 @@ def render_panel(snap: dict, w: int, h: int, cfg_line: str,
             shown = [f"{C_WARN}↑ прокрутка: {scroll} строк назад "
                      f"(End — в конец){RESET}"] + shown[1:]
         body.append("")
-        body += ["  " + x for x in block(
+        # Запоминаем, где на экране оказался журнал: колесо мыши должно листать
+        # ТОЛЬКО его (см. TuiApp._on_wheel). Строки нумеруем с 1: строка 0 — рамка.
+        _journal_rows = ["  " + x for x in block(
             "Журнал (PgUp/PgDn — листать)", [journal_style(r) for r in shown], w - 6)]
+        LAST_LAYOUT["journal"] = (len(body) + 1, len(body) + len(_journal_rows))
+        body += _journal_rows
     body.append("")
     body += ["  " + line for line in legend]
     frame = outer_frame("MyFLOW · пульт-центр", body, w, h)
@@ -1272,6 +1414,8 @@ class TuiApp:
         self.no_servers = no_servers
         self.app = None
         self._stop = threading.Event()
+        # Зафиксированный размер окна (ширина, высота кадра) — см. run().
+        self._locked_size: tuple[int, int] | None = None
         self._sink: PaneSink | None = None
         self._prev_stdout = None
         self._health_thread: threading.Thread | None = None
@@ -1317,14 +1461,19 @@ class TuiApp:
                     nxt = msvcrt.getch()
                     return map_extended_key(ch[0], nxt)
                 if ch == b"\x1b":
-                    # Может быть ESC-последовательность (F5 = \x1b[15~ в VT-режиме).
+                    # Может быть ESC-последовательность: F5 (\x1b[15~) или событие
+                    # мыши в SGR-формате (\x1b[<64;120;34M) — она длиннее, поэтому
+                    # собираем до 24 символов.
                     seq = ""
                     deadline = time.monotonic() + 0.05
-                    while time.monotonic() < deadline and len(seq) < 6:
+                    while time.monotonic() < deadline and len(seq) < 24:
                         if not msvcrt.kbhit():
                             break
                         nxt = msvcrt.getch()
                         seq += nxt.decode("latin-1", "ignore")
+                        mouse = map_mouse_sequence(seq)
+                        if mouse:
+                            return mouse
                         name = map_vt_sequence(seq[1:] if seq.startswith("[") else seq)
                         if name:
                             return name
@@ -1600,6 +1749,11 @@ class TuiApp:
                 idle_frames = 0 if (painted or busy or animate) else idle_frames + 1
                 timeout = 0.03 if (busy or animate or idle_frames < 20) else 0.15
                 last_key = self._read_key(timeout)
+                # Колесо мыши: листает журнал (вне журнала — молча игнорируем,
+                # окно при этом не прокручивается: мышь перехвачена в enable_mouse).
+                if last_key and last_key.startswith(("wheelup", "wheeldown")):
+                    self._on_wheel(last_key, h)
+                    last_key = None
                 if last_key in ("q", "ctrl-c") and self._confirm is None:
                     return "quit"
                 if last_key == "ctrl-c":
@@ -1803,6 +1957,23 @@ class TuiApp:
         ok, msg = self.app.control_apply("style", new)
         self.state.add_log(f"{'✓' if ok else '✗'} {msg}")
 
+    def _on_wheel(self, key: str, height: int) -> bool:
+        """Колесо мыши: листаем журнал, и только если курсор над журналом.
+
+        Мышиный режим (enable_mouse) перехватывает колесо у терминала, поэтому
+        сам пульт больше не «уезжает вверх»; вне журнала событие игнорируется.
+        """
+        try:
+            _, coords = key.split(":", 1)
+            _x, y = (int(v) for v in coords.split(","))
+        except Exception:  # noqa: BLE001
+            return False
+        top, bottom = LAST_LAYOUT.get("journal", (0, 0))
+        if not (top and top <= y <= bottom):
+            return False
+        self._scroll_journal("up" if key.startswith("wheelup") else "down", height)
+        return True
+
     def _scroll_journal(self, key: str, height: int) -> None:
         """Листание журнала в пульте (PgUp/PgDn/Home/End/↑/↓).
 
@@ -1900,6 +2071,20 @@ class TuiApp:
 
     # ---- жизненный цикл ----
     def run(self) -> int:
+        # Размер окна фиксируем ДО первого кадра: 0 в настройках = взять текущий
+        # и запомнить его, дальше окно всегда этого размера (см. lock_size).
+        try:
+            tui_cfg = self.store.get().tui
+            if getattr(tui_cfg, "fixed_size", True):
+                w0, h0 = self.console.lock_size(tui_cfg.cols, tui_cfg.rows)
+                if not tui_cfg.cols or not tui_cfg.rows:
+                    tui_cfg.cols, tui_cfg.rows = w0, max(20, h0)
+                    self.store.save()
+                self._locked_size = (tui_cfg.cols, tui_cfg.rows)
+            if getattr(tui_cfg, "mouse_wheel", True):
+                self.console.enable_mouse()
+        except Exception:  # noqa: BLE001 — оформление не должно мешать запуску
+            pass
         self.console.clear()
         self.console.cursor(False)
         self._install_sink()
@@ -1916,6 +2101,22 @@ class TuiApp:
             if (first_run or self._force_settings) and not self._settings_phase():
                 return 0
             while True:
+                # Окно должно ВСЕГДА оставаться зафиксированного размера: если
+                # пользователь (или терминал) его изменил — возвращаем как было.
+                if getattr(self, "_locked_size", None):
+                    try:
+                        # Размер сравниваем «сырой» (как его вернул lock_size).
+                        # Пере-фиксируем не чаще раза в 2 с и не больше 5 попыток:
+                        # если терминал не даёт менять размер, не бьёмся в цикле.
+                        if (self.console.raw_size() != self._locked_size
+                                and time.monotonic() >= getattr(self, "_relock_at", 0.0)
+                                and getattr(self, "_relock_tries", 0) < 5):
+                            self._relock_at = time.monotonic() + 2.0
+                            self._relock_tries = getattr(self, "_relock_tries", 0) + 1
+                            self.console.lock_size(*self._locked_size)
+                            self.console.clear()
+                    except Exception:  # noqa: BLE001
+                        pass
                 self.console.clear()
                 self.state.add_log(
                     f"конфигурация: режим={self.store.get().mode}, "
@@ -1929,6 +2130,12 @@ class TuiApp:
             code = 0
         finally:
             self._stop.set()
+            # Мышь возвращаем терминалу: иначе после выхода колесо «залипает» в
+            # режиме приложения и обычная прокрутка окна не работает.
+            try:
+                self.console.disable_mouse()
+            except Exception:  # noqa: BLE001
+                pass
             self._shutdown()
         return code
 
