@@ -28,15 +28,17 @@ if not exist "%~dp0.venv\Scripts\python.exe" (
 rem --- 2. ubiraem hvosty ot proshlogo zapuska (posle krasha/ubijstva processa) ---
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\stop-servers.ps1" -Quiet >nul 2>&1
 
-rem --- 3. TUI (servery podnimaet sam, otdel'nyh okon bolshe net) ---
-rem Razmer okna: v klassicheskoy konsoli (v Windows Terminal 
-rem eto nedostupno - tam razmer zadayotsya profilem, a pult potom 
-rem prosto zapominaet tot, chto ty rastyanul).
-mode con: cols=120 lines=36 >nul 2>&1
+rem --- 3. razmer okna iz nastroek: klassicheskaya konsol (ConsoleHost) ne
+rem  pomnit razmer mezhdu zapuskami i otkryvaetsya 120x30 - stavim svoi.
+rem  Menyat razmer mozhno rastyanuv okno myshyu (zapomnitsya) ili strokoy
+rem  "Razmer okna" v panele.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\apply-window-size.ps1" >nul 2>&1
+
+rem --- 4. TUI (servery podnimaet sam, otdel'nyh okon bolshe net) ---
 "%~dp0.venv\Scripts\python.exe" -X utf8 -m myflow.tui
 set "RC=%ERRORLEVEL%"
 
-rem --- 4. GASIM SERVERY POSLE VYHODA: osvobozhdaem pamyat i VRAM ---
+rem --- 5. GASIM SERVERY POSLE VYHODA: osvobozhdaem pamyat i VRAM ---
 rem  TUI gasit ih sam pri normal'nom vyhode, a etot shag dobitvaet ostavshiesya
 rem  (zakrytie okna krestikom, krash, Stop-Process). Trogayutsya TOLKO
 rem  processy iz papki proekta - chuzhie sborki llama.cpp ne zadety.
@@ -47,3 +49,4 @@ if not "%RC%"=="0" (
   pause
 )
 exit /b %RC%
+

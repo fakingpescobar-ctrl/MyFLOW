@@ -108,3 +108,30 @@ class SelfContainedProjectTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WindowSizeLaunchTest(unittest.TestCase):
+    """Размер окна применяется ДО старта TUI (консоль не помнит размер сама)."""
+
+    ROOT = Path(__file__).resolve().parent.parent
+
+    def test_bat_applies_saved_window_size(self):
+        bat = (self.ROOT / "start-myflow.bat").read_text(encoding="utf-8")
+        self.assertIn("apply-window-size.ps1", bat,
+                      "start-myflow.bat должен применять размер из настроек")
+        # вызов обязан идти ДО запуска TUI
+        self.assertLess(bat.index("apply-window-size.ps1"), bat.index("myflow.tui"),
+                        "размер ставим до старта TUI")
+
+    def test_size_script_exists_and_reads_settings(self):
+        script = self.ROOT / "scripts" / "apply-window-size.ps1"
+        self.assertTrue(script.exists())
+        text = script.read_text(encoding="utf-8")
+        self.assertIn("settings.json", text)
+        self.assertIn("tui", text)
+        self.assertIn("SetWindowSize", text)
+
+    def test_size_script_has_bom(self):
+        """Windows PowerShell 5.1 читает UTF-8 только с BOM (иначе кириллица ломается)."""
+        raw = (self.ROOT / "scripts" / "apply-window-size.ps1").read_bytes()
+        self.assertEqual(raw[:3], b"\xef\xbb\xbf", "нужен UTF-8 BOM")

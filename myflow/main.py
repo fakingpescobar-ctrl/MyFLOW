@@ -686,11 +686,11 @@ class MyFlowApp:
              "hint": "Enter — вкл/выкл: оба движка, LLM склеивает (~0.4 с; "
                      "несовместим с «Авто-выбор»)"},
             {"key": "size", "label": "Размер окна",
-             "value": f"{int(getattr(s.tui, 'cols', 120))}x{int(getattr(s.tui, 'rows', 30))}"
+             "value": f"{int(getattr(s.tui, 'cols', 140))}x{int(getattr(s.tui, 'rows', 44))}"
                       + ("" if getattr(s.tui, "fixed_size", True) else " (свободный)"),
              "on": bool(getattr(s.tui, "fixed_size", True)), "ok": True,
              "note": "оформление",
-             "hint": "Enter — сменить размер окна (100x28 → 120x34 → 132x40 → 150x44); "
+             "hint": "Enter — сменить размер окна (100x28 → 120x34 → 140x44 → 160x50); "
                      "можно просто растянуть окно мышью — размер запомнится"},
             {"key": "vad", "label": "VAD", "value": f"Silero v6 · {vad_threshold:.2f}",
              "on": bool(s.auto_stop_by_silence), "ok": True, "note": "детектор речи",
@@ -1016,7 +1016,7 @@ class MyFlowApp:
         if key == "size":
             # Размер окна: перебираем пресеты. Можно и просто растянуть окно
             # мышью — TUI это заметит и запомнит (см. TuiApp._adopt_size).
-            presets = [(100, 28), (120, 34), (132, 40), (150, 44)]
+            presets = [(100, 28), (120, 34), (140, 44), (160, 50)]
             cur = (int(getattr(s.tui, "cols", 0)), int(getattr(s.tui, "rows", 0)))
             nxt = next((p for p in presets if p[0] > cur[0]), presets[0])
             s.tui.cols, s.tui.rows = nxt
