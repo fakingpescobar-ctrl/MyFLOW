@@ -318,6 +318,9 @@ class MyFlowApp:
         self._deferred_polish_count = 0
         self._polish_user_off = False   # полировку выключил сам пользователь
         self._mic_watchdog: threading.Thread | None = None
+        # Живость движков для панели: считается в фоне, панель читает кэш.
+        self._health: dict = {}
+        self._health_thread: threading.Thread | None = None
         # Выгрузка LLM под игры: стоп сервера + сторож полного экрана.
         self._server_stopper = None
         self._game_watch: threading.Thread | None = None
@@ -390,6 +393,8 @@ class MyFlowApp:
         self._ensure_mic_watchdog()
         # Сторож игр: полный экран -> выгружаем LLM, VRAM уходит игре.
         self._ensure_game_watch()
+        # Живость движков считаем в фоне: панель не должна ждать сеть.
+        self._ensure_health_worker()
         # Гигиена: не даём логам расти без предела.
         rotated = rotate_all_logs()
         if rotated:
@@ -423,6 +428,42 @@ class MyFlowApp:
         self._mic_watchdog = threading.Thread(target=self._mic_watchdog_loop,
                                               daemon=True, name="mic-watchdog")
         self._mic_watchdog.start()
+
+    def _health_loop(self, interval: float = 2.0) -> None:
+        """Фон: обновлять живость движков, чтобы панель не ждала сеть.
+
+        Замер: `control_snapshot` сам опрашивал LLM/ASR и панель замирала на
+        0.36 с каждые 3 секунды (клавиши в это время не читались). Теперь все
+        проверки — здесь, а снимок панели читает готовый результат (0.1 мс).
+        """
+        while not self._stopping.is_set():
+            try:
+                try:
+                    asr_ok = bool(self.whisper.health())
+                except Exception:  # noqa: BLE001
+                    asr_ok = False
+                llm_ok = (bool(self.polish.cfg.enabled)
+                          and _health_check_llm(self.polish))
+                try:
+                    # Список микрофонов тоже обновляем в фоне (sd.query_devices
+                    # ~10-20 мс — в цикле отрисовки это лишняя задержка).
+                    from myflow.pick_mic import fast_mic_list
+                    self._mic_cache = (fast_mic_list(), time.monotonic())
+                except Exception:  # noqa: BLE001
+                    pass
+                self._health = {"asr": asr_ok, "llm": llm_ok,
+                                "ts": time.monotonic()}
+            except Exception:  # noqa: BLE001 — сторож не должен падать
+                pass
+            if self._stopping.wait(interval):
+                break
+
+    def _ensure_health_worker(self) -> None:
+        if self._health_thread is not None and self._health_thread.is_alive():
+            return
+        self._health_thread = threading.Thread(target=self._health_loop,
+                                              daemon=True, name="health")
+        self._health_thread.start()
 
     def _prewarm_llm(self) -> None:
         """Поднять LLM сразу при запуске (фоном), не дожидаясь первой фразы."""
@@ -536,19 +577,13 @@ class MyFlowApp:
         s = self.settings.get()
         flags = s.flags
 
-        # Проверки живости кэшируем на 2 с: панель опрашивает состояние каждые
-        # ~0.5 с, и без кэша мы бы дёргали серверы по 8 раз в секунду.
-        now = time.monotonic()
-        cache = getattr(self, "_health_cache", None)
-        if cache and now - cache[0] < 2.0:
-            asr_ok, llm_ok = cache[1], cache[2]
-        else:
-            try:
-                asr_ok = bool(self.whisper.health())
-            except Exception:  # noqa: BLE001
-                asr_ok = False
-            llm_ok = bool(s.polish.enabled) and _health_check_llm(self.polish)
-            self._health_cache = (now, asr_ok, llm_ok)
+        # Живость берём из фонового кэша (_health_loop) — НИКАКИХ сетевых
+        # вызовов в цикле отрисовки: иначе панель замирала на ~0.36 с.
+        health = getattr(self, "_health", None) or {}
+        asr_ok = bool(health.get("asr", True))
+        llm_ok = bool(health.get("llm", False))
+        health_age = time.monotonic() - float(health.get("ts", 0.0))
+        health_stale = health_age > 6.0
 
         voice = getattr(self, "voice", None)
         voice_on = bool(voice and voice.enabled)
@@ -557,7 +592,7 @@ class MyFlowApp:
 
         modules = [
             {"key": "asr", "label": "ASR", "value": self._asr_label(), "on": True,
-             "ok": asr_ok, "note": "распознавание речи",
+             "ok": asr_ok, "note": "проверка…" if health_stale else "распознавание речи",
              "hint": "Enter — сменить движок (спросит подтверждение): whisper "
                      "поднимает сервер :8081, GigaAM работает всегда"},
             {"key": "vad", "label": "VAD", "value": f"Silero v6 · {vad_threshold:.2f}",
@@ -565,7 +600,8 @@ class MyFlowApp:
              "hint": "←→ порог, Enter — автостоп по паузе"},
             {"key": "llm", "label": "LLM",
              "value": f"{s.polish.model.split('-instruct')[0]} · :8082",
-             "on": bool(s.polish.enabled), "ok": llm_ok, "note": "полировка текста",
+             "on": bool(s.polish.enabled), "ok": llm_ok,
+             "note": "проверка…" if health_stale else "полировка текста",
              "hint": "Enter — включить/выключить полировку"},
             {"key": "voice", "label": "Голос",
              "value": f"{voice_profile} фраз · {s.voiceprint.mode} · {s.voiceprint.threshold:.2f}",

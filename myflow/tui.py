@@ -55,6 +55,7 @@ C_TEXT = fg(252)
 C_DIM = fg(244)
 C_ACCENT = fg(45)
 C_INV = CSI + "7m"       # инверсия — для главной «кнопки» и выделения
+C_BORDER_DIM = fg(238)   # рамка кадра: тише, чем содержимое
 C_KEY = fg(250)          # цвет скобок вокруг клавиш
 C_OK = fg(114)
 C_WARN = fg(214)
@@ -101,15 +102,17 @@ def outer_frame(title: str, body: Sequence[str], w: int, h: int) -> list[str]:
     h = max(8, h)
     label = f" {title} " if title else ""
     inner = w - 2
-    top = (f"{C_BORDER}╔═{RESET}{BOLD}{C_TITLE}{label}{RESET}"
-           f"{C_BORDER}" + "═" * max(0, inner - 1 - len(label)) + f"╗{RESET}")
-    bottom = f"{C_BORDER}╚" + "═" * inner + f"╝{RESET}"
+    # Рамка приглушённая, заголовок — акцентный: контент читается легче.
+    frame_c = C_BORDER_DIM
+    top = (f"{frame_c}╔═{RESET}{BOLD}{C_TITLE}{label}{RESET}"
+           f"{frame_c}" + "═" * max(0, inner - 1 - len(label)) + f"╗{RESET}")
+    bottom = f"{frame_c}╚" + "═" * inner + f"╝{RESET}"
     lines = [top]
     room = h - 2
     body = list(body)[:room]
     body += [""] * (room - len(body))
     for ln in body:
-        lines.append(f"{C_BORDER}║{RESET}" + pad_to(ln, inner) + f"{C_BORDER}║{RESET}")
+        lines.append(f"{frame_c}║{RESET}" + pad_to(ln, inner) + f"{frame_c}║{RESET}")
     lines.append(bottom)
     return lines
 
@@ -264,6 +267,9 @@ class Console:
     def __init__(self) -> None:
         self.out = sys.__stdout__ or sys.stdout
         self.vt = self._enable_vt()
+        # Последний нарисованный кадр: пишем в консоль только изменившиеся строки
+        # (полный кадр — ~8.5 КБ ANSI; при 20 кадрах/с это 170 КБ/с впустую).
+        self._last_frame: list[str] = []
         try:
             self.out.reconfigure(encoding="utf-8", errors="replace")
         except Exception:  # noqa: BLE001
@@ -329,27 +335,43 @@ class Console:
         self.out.write(CSI + ("?25h" if visible else "?25l"))
         self.out.flush()
 
-    def draw(self, lines: Sequence[str]) -> None:
+    def draw(self, lines: Sequence[str]) -> bool:
+        """Нарисовать кадр. True — в консоль что-то записали.
+
+        Пишем ТОЛЬКО изменившиеся строки: журнал добавляет по строке раз в
+        несколько секунд, а панель перерисовывалась целиком 20 раз в секунду.
+        Если кадр идентичен предыдущему — не пишем вообще (0 байт).
+        """
         if not self.vt:
             self.out.write("\n".join(strip_ansi(x) for x in lines) + "\n")
             self.out.flush()
-            return
+            return True
         # Защита от «поехавшего» кадра: строка шире окна заставляет терминал
         # переносить её (и затирать следующие), а лишние строки прокручивают
         # экран. Поэтому жёстко обрезаем по видимому размеру окна.
         w, h = self.size()
-        visible = list(lines)[:h]
-        buf = [CSI + "H"]
+        visible = [fit_width(ln, w) for ln in list(lines)[:h]]
+        prev = getattr(self, "_last_frame", [])
+        if visible == prev:
+            return False
+        buf: list[str] = []
         for i, ln in enumerate(visible):
-            buf.append(f"{CSI}{i + 1};1H{fit_width(ln, w)}{CSI}K")
-        buf.append(f"{CSI}{len(visible) + 1};1H{CSI}0J")   # чистим хвост экрана
-        self.out.write("".join(buf))
-        self.out.flush()
+            if i < len(prev) and prev[i] == ln:
+                continue
+            buf.append(f"{CSI}{i + 1};1H{ln}{CSI}K")
+        for i in range(len(visible), len(prev)):       # кадр стал короче
+            buf.append(f"{CSI}{i + 1};1H{CSI}K")
+        if buf:
+            self.out.write("".join(buf))
+            self.out.flush()
+        self._last_frame = visible
+        return True
 
     def clear(self) -> None:
         if self.vt:
             self.out.write(CSI + "2J" + CSI + "H")
         self.out.flush()
+        self._last_frame = []          # после очистки кадр рисуем целиком
 
     def reset(self) -> None:
         self.out.write(RESET + CSI + "?25h")
@@ -937,6 +959,34 @@ def render_boot(rows: Sequence[str], w: int, h: int, spin: str, note: str = "") 
     return outer_frame("MyFLOW · запуск", body, w, h)
 
 
+def pill(text: str, color: str) -> str:
+    """Компактная «пилюля» для статусов: ▐ авто ▌ с подсветкой."""
+    return f"{color}{C_INV}▐ {text} ▌{RESET}"
+
+
+def journal_style(line: str) -> str:
+    """Раскрасить строку журнала по смыслу — так глаз цепляется за главное.
+
+    Раньше весь журнал был серым: успех, предупреждение и ошибка выглядели
+    одинаково. Теперь цвет несёт смысл: ✓/вставлено — зелёный, ⚠/WARNING —
+    жёлтый, ✗/ошибка — красный, замеры (e2e) — приглушённые.
+    """
+    low = line.lower()
+    if "✗" in line or "ошибка" in low or "error" in low or "traceback" in low:
+        return f"{C_ERR}{line}{RESET}"
+    if "⚠" in line or "warning" in low or "отложен" in low or "проверь" in low:
+        return f"{C_WARN}{line}{RESET}"
+    if "✓" in line or "+ " in line[:4] or "вставлено" in low:
+        return f"{C_OK}{line}{RESET}"
+    if "☺" in line or "голос" in low:
+        return f"{C_ACCENT}{line}{RESET}"
+    if "e2e=" in low or "asr=" in low or low.strip().startswith("..."):
+        return f"{C_DIM}{line}{RESET}"
+    if "⏏" in line or "▲" in line or "⟳" in line:
+        return f"{C_WARN}{line}{RESET}"
+    return f"{C_TEXT}{line}{RESET}"
+
+
 def _module_row(item: dict, selected: bool, width: int, name_w: int = 13) -> str:
     """Строка модуля: значок состояния, имя, значение, [вкл/выкл].
 
@@ -949,7 +999,8 @@ def _module_row(item: dict, selected: bool, width: int, name_w: int = 13) -> str
         mark, mcolor = "◐", C_WARN
     else:
         mark, mcolor = "○", C_DIM
-    toggle_plain = "[вкл]" if item.get("on") else "[выкл]"
+    # Одинаковая ширина у обоих состояний: иначе колонка «ёлочек» прыгает.
+    toggle_plain = "[вкл] " if item.get("on") else "[выкл]"
     toggle = (f"{C_OK}{toggle_plain}{RESET}" if item.get("on")
               else f"{C_DIM}{toggle_plain}{RESET}")
     prefix = "▸ " if selected else "  "
@@ -1066,7 +1117,7 @@ def render_panel(snap: dict, w: int, h: int, cfg_line: str,
     else:
         meter = ""
     body.append(f"  {cfg_line}")
-    body.append(f"  {meter}   {C_DIM}{status_line}{RESET}")
+    body.append(f"  {meter}   {status_line}")
     body.append("")
 
     sel_key = rows[sel].get("key") if 0 <= sel < len(rows) else None
@@ -1112,7 +1163,7 @@ def render_panel(snap: dict, w: int, h: int, cfg_line: str,
                      f"(End — в конец){RESET}"] + shown[1:]
         body.append("")
         body += ["  " + x for x in block(
-            "Журнал (PgUp/PgDn — листать)", [C_DIM + r + RESET for r in shown], w - 6)]
+            "Журнал (PgUp/PgDn — листать)", [journal_style(r) for r in shown], w - 6)]
     body.append("")
     body += ["  " + line for line in legend]
     frame = outer_frame("MyFLOW · пульт-центр", body, w, h)
@@ -1419,9 +1470,9 @@ class TuiApp:
                 target = f"⚲ {locked.label[:24]}"
             elif cur is not None:
                 target = cur.label[:24]
-        return (f"{C_TEXT}режим:{RESET} {C_ACCENT}{mode}{RESET}"
-                f"   {C_TEXT}стиль:{RESET} {C_ACCENT}{s.default_style}{RESET}"
-                f"   {C_TEXT}цель:{RESET} {C_ACCENT}{target}{RESET}")
+        return (f"{pill(mode, C_OK)}"
+                f"  {C_DIM}стиль{RESET} {C_TEXT}{s.default_style}{RESET}"
+                f"  {C_DIM}цель{RESET} {C_ACCENT}⚲ {target}{RESET}")
 
     def _config_line(self) -> str:
         s = self.store.get()
@@ -1490,6 +1541,7 @@ class TuiApp:
         self._start_health_poller()
         # Панель-центр: выделенная строка + живой индикатор уровня текущего микрофона.
         sel = 0
+        idle_frames = 0
         meter = LevelMeter()
         last_key = None
         snap: dict = {"modules": [], "values": [], "counters": {}}
@@ -1513,6 +1565,10 @@ class TuiApp:
                 if not journal:
                     journal = [f"{C_DIM}пока пусто — нажми F8 и говори{RESET}"]
                 status_line, status_ansi, _, _ = self.state.snapshot()
+                if "запись" in status_line:
+                    # Живая анимация: видно, что микрофон пишет прямо сейчас.
+                    spinner = "·", "··", "···", "··"
+                    status_line = f"{status_line} {spinner[int(time.monotonic() * 3) % 4]}"
                 counters = snap.get("counters", {})
                 notes = []
                 if counters.get("mic_scanning"):
@@ -1520,7 +1576,7 @@ class TuiApp:
                 if counters.get("deferred_polish"):
                     notes.append(f"{counters['deferred_polish']} фраз ждут дополировки")
                 scan_note = ("  ·  " + "  ·  ".join(notes)) if notes else ""
-                self.console.draw(render_panel(
+                painted = self.console.draw(render_panel(
                     snap, w, h, self._panel_header(), journal, offset, sel,
                     level=(meter.peak(), meter.error),
                     confirm=((self._confirm["question"], self._confirm["hint"])
@@ -1531,7 +1587,13 @@ class TuiApp:
                                  f" · в очереди: {counters.get('queue', 0)}"
                                  f"{scan_note}"),
                     counters=counters))
-                last_key = self._read_key(0.05)
+                # Частота опроса клавиш адаптивная: при записи/анимации часто,
+                # в покое редко — так TUI почти не занимает CPU, когда не нужен.
+                busy = bool(counters.get("pending")) or bool(counters.get("queue"))
+                animate = ("запись" in status_line) or bool(self._confirm)
+                idle_frames = 0 if (painted or busy or animate) else idle_frames + 1
+                timeout = 0.03 if (busy or animate or idle_frames < 20) else 0.15
+                last_key = self._read_key(timeout)
                 if last_key in ("q", "ctrl-c") and self._confirm is None:
                     return "quit"
                 if last_key == "ctrl-c":

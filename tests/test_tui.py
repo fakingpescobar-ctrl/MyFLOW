@@ -581,16 +581,46 @@ class ConsoleDrawTest(unittest.TestCase):
         def flush(self):
             pass
 
-    def test_draw_clips_width_and_height(self):
+    def _console(self, size=(20, 3)):
         console = T.Console.__new__(T.Console)      # без реальной консоли
         console.out = self._Out()
         console.vt = True
-        console.size = lambda: (20, 3)              # окно 20x3
+        console._last_frame = []
+        console.size = lambda: size
+        return console
+
+    def test_draw_clips_width_and_height(self):
+        console = self._console(size=(20, 3))
         console.draw(["x" * 50, "y" * 50, "z" * 50, "лишняя", "ещё"])
         data = console.out.data
         self.assertNotIn("x" * 50, data, "длинная строка обрезана")
-        self.assertIn(f"{T.CSI}4;1H", data, "строки сверх высоты не рисуем")
-        self.assertIn(f"{T.CSI}0J", data, "хвост экрана очищается")
+        self.assertNotIn(f"{T.CSI}4;1H", data, "строки сверх высоты не рисуем")
+
+    def test_draw_writes_nothing_when_frame_unchanged(self):
+        """Панель перерисовывалась 20 раз в секунду целиком — это лишние 170 КБ/с."""
+        console = self._console(size=(40, 4))
+        frame = ["строка один", "строка два", "строка три"]
+        self.assertTrue(console.draw(frame), "первый кадр рисуем")
+        first = len(console.out.data)
+        self.assertFalse(console.draw(list(frame)), "идентичный кадр — не пишем")
+        self.assertEqual(len(console.out.data), first, "в консоль не ушло ни байта")
+
+    def test_draw_repaints_only_changed_lines(self):
+        console = self._console(size=(40, 4))
+        console.draw(["aaa", "bbb", "ccc"])
+        console.out.data = ""
+        console.draw(["aaa", "ZZZ", "ccc"])
+        data = console.out.data
+        self.assertIn("ZZZ", data)
+        self.assertNotIn("aaa", data, "неизменившуюся строку не перерисовываем")
+        self.assertNotIn("ccc", data)
+
+    def test_draw_clears_tail_when_frame_shrinks(self):
+        console = self._console(size=(40, 6))
+        console.draw(["a", "b", "c", "d"])
+        console.out.data = ""
+        console.draw(["a", "b"])
+        self.assertIn(f"{T.CSI}3;1H", console.out.data, "остаток старого кадра стираем")
 
     def test_draw_plain_when_no_vt(self):
         console = T.Console.__new__(T.Console)
