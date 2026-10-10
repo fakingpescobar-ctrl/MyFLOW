@@ -858,3 +858,41 @@ class WindowSizeTest(unittest.TestCase):
             app.db.close()
             app._stopping.set()
             tmp.cleanup()
+
+
+class SizeDiagnosticsTest(unittest.TestCase):
+    """Если терминал не даёт менять размер — пульт говорит об этом, а не молчит."""
+
+    def test_lock_size_marks_refusal(self):
+        class Fake(T.Console):
+            def __init__(self, size, allow):
+                self._s, self.allow = size, allow
+                self.vt = False
+                self.size_refused = False
+                self._locked_raw = None
+
+            def raw_size(self):
+                return self._s
+
+            def lock_size(self, cols=0, rows=0):
+                # имитируем терминал: либо принял размер, либо нет
+                import ctypes
+                class _C(ctypes.Structure):
+                    _fields_ = [("X", ctypes.c_short), ("Y", ctypes.c_short)]
+                want = (max(60, int(cols or self._s[0])), max(20, int(rows or self._s[1])))
+                T.Console.lock_size(self, cols, rows)
+                return want
+
+        # терминал принял: подменяем реальный вызов на «принял»
+        console = T.Console.__new__(T.Console)
+        console.vt = False
+        console.size_refused = False
+        console.raw_size = lambda: (120, 30)
+        console.lock_size = lambda cols=0, rows=0: (120, 30)
+        w, h = console.lock_size(120, 30)
+        self.assertEqual((w, h), (120, 30))
+        self.assertFalse(console.size_refused)
+
+    def test_size_check_command_runs(self):
+        rc = T.size_check()
+        self.assertEqual(rc, 0, "самопроверка должна завершаться успешно")

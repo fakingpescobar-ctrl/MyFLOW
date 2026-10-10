@@ -293,6 +293,8 @@ class Console:
         self._last_frame: list[str] = []
         self.mouse = False
         self._locked_raw: tuple[int, int] | None = None
+        # True, если терминал не дал поставить нужный размер окна.
+        self.size_refused = False
         try:
             self.out.reconfigure(encoding="utf-8", errors="replace")
         except Exception:  # noqa: BLE001
@@ -392,6 +394,10 @@ class Console:
             pass
         raw = self.raw_size()
         self._locked_raw = raw
+        # Диагностика: если размер не совпал с желаемым, значит терминал его не
+        # принял (бывает в Windows Terminal: окно принадлежит ему, а не нам).
+        # Запоминаем это, чтобы честно сказать пользователю, а не молчать.
+        self.size_refused = (raw != (want_w, want_h))
         return raw
 
     def enable_mouse(self) -> None:
@@ -1418,6 +1424,8 @@ class TuiApp:
         self._locked_size: tuple[int, int] | None = None
         # Размер, который пользователь растянул (принимаем, если продержался кадр).
         self._pending_size: tuple[int, int] | None = None
+        self._size_retry_left = 0
+        self._size_retry_at = 0.0
         self._sink: PaneSink | None = None
         self._prev_stdout = None
         self._health_thread: threading.Thread | None = None
@@ -2112,6 +2120,16 @@ class TuiApp:
                     tui_cfg.cols, tui_cfg.rows = w0, max(20, h0)
                     self.store.save()
                 self._locked_size = (tui_cfg.cols, tui_cfg.rows)
+                if self.console.size_refused:
+                    # Терминал не принял размер сразу: попробуем ещё раз после
+                    # первых кадров (некоторые терминалы применяют его с задержкой).
+                    self._size_retry_left = 3
+                    self._size_retry_at = time.monotonic() + 0.4
+                    self.state.add_log(
+                        f"окно: просил {tui_cfg.cols}x{tui_cfg.rows}, терминал даёт "
+                        f"{self.console.raw_size()[0]}x{self.console.raw_size()[1]} — пробую ещё")
+                else:
+                    self.state.add_log(f"окно: {tui_cfg.cols}x{tui_cfg.rows}")
                 if self.app is not None:
                     # Панель может менять размер (строка «Размер окна»).
                     self.app.set_console_resize(self.apply_window_size)
@@ -2141,6 +2159,22 @@ class TuiApp:
                 # его выбор, и мы его ЗАПОМИНАЕМ, а не откатываем назад. Раньше
                 # пульт «защищал» размер и сжимал окно обратно — выглядело как
                 # «окно сбивается на стандартные настройки».
+                # Повторные попытки поставить размер, если терминал не принял сразу.
+                if getattr(self, "_size_retry_left", 0) and time.monotonic() >= getattr(self, "_size_retry_at", 0.0):
+                    self._size_retry_left -= 1
+                    self._size_retry_at = time.monotonic() + 1.0
+                    try:
+                        self.console.lock_size(*self._locked_size)
+                        if not self.console.size_refused:
+                            self._size_retry_left = 0
+                            self.state.add_log("окно: размер применён")
+                            self.console.clear()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    if self._size_retry_left == 0 and self.console.size_refused:
+                        self.state.add_log(
+                            "окно: терминал не даёт менять размер — растяни мышью "
+                            "или выбери «Размер окна» в панели")
                 if getattr(self, "_locked_size", None):
                     try:
                         raw = self.console.raw_size()
@@ -2236,6 +2270,31 @@ def _demo_snapshot() -> dict:
     ], "counters": {"phrases": 12, "pending": 0, "queue": 0}}
 
 
+def size_check() -> int:
+    """Показать, что терминал думает о своём размере и можно ли его менять.
+
+    Запуск: `python -m myflow.tui --size-check` в ТОМ ЖЕ окне, где обычно
+    работает MyFLOW. Помогает понять, почему окно открывается не того размера.
+    """
+    console = Console()
+    w0, h0 = console.raw_size()
+    print(f"терминал сейчас: {w0}x{h0}")
+    want = (120, 36)
+    console.lock_size(*want)
+    w1, h1 = console.raw_size()
+    if (w1, h1) == want:
+        print(f"попытка поставить {want[0]}x{want[1]}: получилось -> размер менять МОЖНО")
+    else:
+        print(f"попытка поставить {want[0]}x{want[1]}: терминал даёт {w1}x{h1} "
+              f"-> размер менять НЕ ДАЁТ (окно принадлежит терминалу)")
+    console.lock_size(w0, h0)
+    print(f"вернул исходный размер: {console.raw_size()[0]}x{console.raw_size()[1]}")
+    print("Если меняется — пульт сам поставит нужный размер; если нет — "
+          "растяни окно мышью (размер запомнится) или задай размер в настройках "
+          "профиля терминала.")
+    return 0
+
+
 def demo_app(hold: float, screen: str = "panel") -> int:
     """Витрина: рисует пульт или экран настроек с примерными данными."""
     tui = TuiApp(no_servers=True)
@@ -2301,7 +2360,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     default="panel",
                     help="какой экран показывать в демо")
     ap.add_argument("--hold", type=float, default=8.0, help="сколько секунд держать демо-кадр")
+    ap.add_argument("--size-check", action="store_true",
+                    help="проверить, даёт ли этот терминал менять размер окна")
     args = ap.parse_args(argv)
+
+    if args.size_check:
+        return size_check()
 
     if args.demo:
         return demo_app(args.hold, args.screen)
