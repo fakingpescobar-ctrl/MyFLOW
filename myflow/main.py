@@ -317,6 +317,7 @@ class MyFlowApp:
         self._repolish_thread: threading.Thread | None = None
         self._deferred_polish_count = 0
         self._polish_user_off = False   # полировку выключил сам пользователь
+        self._mic_watchdog: threading.Thread | None = None
         # Ф8: ручной стиль (F7) перекрывает per-app; None = авто по окну.
         self._style_override: str | None = None
         self._last_style_switch_t = 0.0
@@ -381,9 +382,37 @@ class MyFlowApp:
 
         # Автолечение LLM: следим за очередью недополированных фраз.
         self._ensure_repolish_worker()
+        # Сторож микрофона: Bluetooth/USB отвалился -> переоткрываем поток.
+        self._ensure_mic_watchdog()
         # И прогреваем LLM заранее: холодный старт llama-server — это ~8 секунд, и
         # если пользователь начнёт диктовать раньше, фраза уйдёт сырым ASR.
         self._prewarm_llm()
+
+    def _mic_watchdog_loop(self, interval: float = 2.0) -> None:
+        """Переоткрывать поток, если микрофон отвалился (Bluetooth/USB/дрова).
+
+        Без этого приложение «слушало» тишину: PortAudio закрывал поток, а в
+        журнале не было ни слова — фразы просто переставали появляться.
+        """
+        while not self._stopping.wait(interval):
+            try:
+                if not self._pref_auto:
+                    continue          # в PTT поток открывается по нажатию
+                reason = self.recorder.reopen()
+                if reason:
+                    status = getattr(self.recorder, "_last_status_text", "")
+                    note = f" ({status})" if status else ""
+                    print(f"[myflow] ⟳ микрофон переподключён: {reason}{note}")
+                    self.overlay.show("⟳ микрофон переподключён", "#f5c542")
+            except Exception as exc:  # noqa: BLE001 — сторож не должен падать
+                print(f"[myflow] сторож микрофона: {exc!r}")
+
+    def _ensure_mic_watchdog(self) -> None:
+        if self._mic_watchdog is not None and self._mic_watchdog.is_alive():
+            return
+        self._mic_watchdog = threading.Thread(target=self._mic_watchdog_loop,
+                                              daemon=True, name="mic-watchdog")
+        self._mic_watchdog.start()
 
     def _prewarm_llm(self) -> None:
         """Поднять LLM сразу при запуске (фоном), не дожидаясь первой фразы."""
@@ -2021,6 +2050,13 @@ class MyFlowApp:
                 if reason:
                     db.set_observation_reason(history_id, reason)
                     print(f"[myflow] наблюдение: {reason}")
+                    # Честный статус: если нашего текста в поле не нашли, «вставлено»
+                    # могло быть ложным (поле без UI Automation, другое окно,
+                    # вставка не прошла) — говорим об этом, а не молчим.
+                    if reason == AxWatcher.NOT_FOUND:
+                        print("[myflow] ⚠ текста в поле не видно — проверь, что вставка "
+                              "прошла (поле может не поддерживать UI Automation)")
+                        self.overlay.show("⚠ проверь вставку", "#f5c542")
             except Exception as exc:  # watcher не должен убивать основной поток
                 print(f"[myflow] watcher: {exc}")
             finally:

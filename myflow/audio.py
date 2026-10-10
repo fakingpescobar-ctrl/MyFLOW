@@ -129,6 +129,7 @@ class DictationRecorder:
         self._max_samples = MAX_DICTATION_SECONDS * sample_rate
         self._hard_limit_fired = False
         self._status_count = 0
+        self._last_status_text = ""
         self._dropped_chunks = 0
         self._utter_ready = False
         # Тяжёлая работа (ONNX-инференс VAD + конверсия в Int16) вынесена из
@@ -160,6 +161,56 @@ class DictationRecorder:
             self._stream.start()
         except Exception as exc:
             raise RuntimeError(f"не удалось открыть микрофон: {exc}") from exc
+
+    # ---------- сторож потока (Bluetooth/USB отвалился) ----------
+
+    def stream_active(self) -> bool:
+        """Жив ли поток записи (не бросает, даже если PortAudio уже при смерти)."""
+        stream = self._stream
+        try:
+            return bool(stream is not None and stream.active)
+        except Exception:  # noqa: BLE001
+            return False
+
+    def device_available(self) -> bool:
+        """Открывается ли текущее устройство (дёшево, без записи)."""
+        if self._device is None:
+            return True
+        return self._device_ok(self._device)
+
+    def reopen(self) -> str | None:
+        """Переоткрыть отвалившийся поток. Возвращает причину или None.
+
+        Сценарий: Bluetooth-наушники разрядились, USB-микрофон выдернули —
+        PortAudio закрывает поток, а приложение продолжает «слушать» тишину.
+        Возвращаем текст причины, чтобы приложение сказало об этом в журнале.
+        """
+        if not self._continuous or self.stream_active():
+            return None
+        reason = "поток микрофона отвалился"
+        try:
+            self.stop_continuous()
+        except Exception:  # noqa: BLE001 — поток мог уже умереть
+            self._stream = None
+        try:
+            self.start_continuous()
+            return reason
+        except Exception as exc:  # noqa: BLE001
+            if self._device is not None:
+                # Устройство из настроек пропало: пробуем системный дефолт,
+                # но выбор пользователя НЕ теряем (вернём при следующем сбое).
+                saved, self._device = self._device, None
+                try:
+                    self.start_continuous()
+                    self._device = saved
+                    return (f"микрофон #{saved} пропал ({exc}) — "
+                            f"временно слушаю системный")
+                except Exception as exc2:  # noqa: BLE001
+                    self._device = saved
+                    print(f"[audio] и системный микрофон не открылся: {exc2}")
+                    return None
+            print(f"[audio] не удалось переоткрыть микрофон: {exc}")
+            return None
 
     @staticmethod
     def _device_ok(device: int | None) -> bool:
@@ -515,6 +566,8 @@ class DictationRecorder:
     def _on_audio(self, indata: np.ndarray, frames: int, time_info, status) -> None:
         """PortAudio-callback: только копия буфера, никакой тяжёлой работы."""
         if status:
+            # Запоминаем последний статус: сторож потока показывает его в журнале.
+            self._last_status_text = str(status)
             # НЕ выбрасываем блок: overflow/underflow = дыра в речи, раньше
             # она исчезала бесследно. Считаем и изредка сообщаем.
             self._status_count += 1

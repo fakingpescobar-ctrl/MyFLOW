@@ -58,6 +58,65 @@ class _INPUT(ctypes.Structure):
     _fields_ = [("type", wintypes.DWORD), ("u", _INPUT_UNION)]
 
 
+# Форматы буфера обмена, которые НЕЛЬЗЯ убивать копированием текста:
+# CF_BITMAP, CF_METAFILEPICT, CF_DIB, CF_ENHMETAFILE, CF_HDROP (файлы), CF_DIBV5.
+_RICH_CLIPBOARD_FORMATS = (2, 3, 5, 14, 15, 17)
+_KEYEVENTF_UNICODE = 0x0004
+_INPUT_KEYBOARD = 1
+
+
+def clipboard_has_rich() -> bool:
+    """Есть ли в буфере картинка/файлы (не только текст).
+
+    Проверка дешёвая и НЕ читает данные: IsClipboardFormatAvailable только
+    спрашивает, есть ли формат. Нужна, чтобы не уничтожить картинку/скопированные
+    файлы: `pyperclip.copy()` делает EmptyClipboard и они исчезают навсегда.
+    """
+    try:
+        k = ctypes.windll.user32
+        return any(bool(k.IsClipboardFormatAvailable(fmt))
+                   for fmt in _RICH_CLIPBOARD_FORMATS)
+    except Exception:  # noqa: BLE001 — не Windows/нет доступа: считаем, что нет
+        return False
+
+
+def _utf16_units(ch: str) -> tuple[int, ...]:
+    """Кодовые единицы UTF-16 для символа (2 для эмодзи и редких знаков)."""
+    raw = ch.encode("utf-16-le")
+    return tuple(int.from_bytes(raw[i:i + 2], "little")
+                 for i in range(0, len(raw), 2))
+
+
+def send_unicode_text(text: str, pause: float = 0.0) -> int:
+    """Напечатать текст через SendInput(KEYEVENTF_UNICODE). Возвращает число знаков.
+
+    Буфер обмена НЕ трогается — поэтому картинки и файлы в нём остаются целы.
+    Так вставляем, когда в буфере что-то ценное (Ctrl+V его бы уничтожил).
+    """
+    if not text:
+        return 0
+    user32 = ctypes.windll.user32
+    sent = 0
+    for ch in text:
+        for unit in _utf16_units(ch):
+            down = _INPUT()
+            down.type = _INPUT_KEYBOARD
+            down.ki.wVk = 0
+            down.ki.wScan = unit
+            down.ki.dwFlags = _KEYEVENTF_UNICODE
+            up = _INPUT()
+            up.type = _INPUT_KEYBOARD
+            up.ki.wVk = 0
+            up.ki.wScan = unit
+            up.ki.dwFlags = _KEYEVENTF_UNICODE | _KEYEVENTF_KEYUP
+            arr = (_INPUT * 2)(down, up)
+            if user32.SendInput(2, ctypes.byref(arr), ctypes.sizeof(_INPUT)) == 2:
+                sent += 1
+        if pause:
+            time.sleep(pause)
+    return sent
+
+
 def _input_struct(vk: int, keyup: bool) -> _INPUT:
     inp = _INPUT()
     inp.type = 1  # INPUT_KEYBOARD
@@ -70,8 +129,20 @@ def _input_struct(vk: int, keyup: bool) -> _INPUT:
 class ClipboardPaste:
     """Вставить текст через буфер обмена. int16-безопасно: unicode — ок."""
 
+    def __init__(self) -> None:
+        self.last_method = ""      # как вставили: clipboard-unicode (для журнала)
+
     def paste(self, text: str) -> None:
         if not text:
+            return
+        # В буфере картинка или скопированные файлы? Ctrl+V их уничтожит
+        # (pyperclip.copy делает EmptyClipboard, вернуть уже нечего) — поэтому
+        # печатаем текст через SendInput(UNICODE) и буфер не трогаем вообще.
+        if clipboard_has_rich():
+            sent = send_unicode_text(text)
+            self.last_method = "unicode без буфера" if sent else "unicode (не отправлено)"
+            print(f"[myflow]   вставка: печатаю текст ({sent} знаков) — "
+                  f"в буфере картинка/файлы, не трогаю")
             return
         # Сохранить текущий буфер, чтобы не убить чужой контент пользователя.
         saved = self._read_text()
@@ -79,6 +150,7 @@ class ClipboardPaste:
             self._copy(text)
             time.sleep(0.05)  # дать буферу обмена устаканиться (clipboard race)
             self._send_ctrl_v()
+            self.last_method = "clipboard"
         finally:
             # ВАЖНО: '' значит «в буфере НЕ текст» (картинка/файлы). Копирование
             # '' вызывает EmptyClipboard и БЕЗВОЗВРАТНО уничтожает CF_HDROP/
