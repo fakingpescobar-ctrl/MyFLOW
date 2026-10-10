@@ -133,3 +133,51 @@ def light_clean(text: str) -> tuple[str, list[str]]:
     # Повторная уборка пробелов, если что-то появилось после правок.
     out = re.sub(r"\s{2,}", " ", out).strip()
     return out, rules
+
+
+# Филлеры ВНУТРИ фразы. Стенд на реальных диктовках Wispr показал: локальная
+# модель (Qwen3-4B) их часто оставляет («Второе, значит, э-э, насчёт»), хотя
+# облако убирает. Снимаем детерминированно — но ТОЛЬКО когда филлер выделен
+# запятыми: «это значит» (глагол) трогать нельзя.
+_INNER_FILLERS: tuple[str, ...] = (
+    "значит", "э-э", "ээ", "эээ", "эм", "эмм", "мм", "как бы", "типа",
+    "короче", "в общем", "собственно", "так сказать", "понимаешь", "это самое",
+    "блин", "ну", "вот",
+)
+# Неоднозначные слова: убираем только если после них НЕ идёт «что/чтобы/и»
+# («это значит, что…» — тут «значит» несёт смысл, его трогать нельзя).
+_AMBIGUOUS_FILLERS: frozenset[str] = frozenset({"значит", "в общем", "собственно", "ну"})
+_INNER_FILLER_RE = re.compile(
+    r"(?:^|(?<=[,\s]))(" + "|".join(re.escape(f) for f in _INNER_FILLERS)
+    + r")\s*,\s*(?!\s*(?:что|чтобы|и|но|а)\b)", re.IGNORECASE)
+
+
+def strip_inner_fillers(text: str) -> tuple[str, list[str]]:
+    """Убрать филлеры, выделенные запятыми внутри фразы.
+
+    «Второе, значит, э-э, насчёт» -> «Второе, насчёт». Возвращает (текст, правила).
+    Осторожно: снимаем только вместе с запятой, чтобы не ломать смысл
+    («это значит, что ...» — тут «значит» несёт смысл, но идёт без своей запятой).
+    """
+    rules: list[str] = []
+    out = text or ""
+    removed: list[str] = []
+    for _ in range(4):
+        m = _INNER_FILLER_RE.search(out)
+        if not m:
+            break
+        removed.append(m.group(1))
+        out = out[:m.start()] + " " + out[m.end():]
+    if removed:
+        rules.append("убраны филлеры: " + ", ".join(f"«{r}»" for r in dict.fromkeys(removed)))
+    # Прибираем последствия: двойные запятые, пробелы перед знаком, «, ,»
+    fixed = re.sub(r",\s*,+", ",", out)
+    fixed = re.sub(r"\s+([,.;:!?])", r"\1", fixed)
+    fixed = re.sub(r"\s{2,}", " ", fixed).strip()
+    fixed = re.sub(r"^,\s*", "", fixed)
+    fixed = re.sub(r"([.!?…])\s*([.!?…])", r"\1", fixed)
+    if fixed != out:
+        rules.append("поправлена пунктуация после чистки")
+    if fixed and fixed[0].islower():
+        fixed = fixed[0].upper() + fixed[1:]
+    return fixed, rules

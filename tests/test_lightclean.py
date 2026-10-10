@@ -206,3 +206,42 @@ def tearDownModule() -> None:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StripInnerFillersTest(unittest.TestCase):
+    """Зачистка филлеров внутри фразы (найдено стендом на диктовках Wispr)."""
+
+    def test_removes_comma_set_fillers(self):
+        from myflow.lightclean import strip_inner_fillers
+        out, rules = strip_inner_fillers("Второе, значит, э-э, насчёт")
+        self.assertEqual(out, "Второе, насчёт")
+        self.assertTrue(rules)
+
+    def test_keeps_meaningful_znachit_before_chto(self):
+        """«это значит, что…» — не филлер: смысл ломать нельзя."""
+        from myflow.lightclean import strip_inner_fillers
+        src = "Так, это значит, что нужно проверить."
+        out, rules = strip_inner_fillers(src)
+        self.assertEqual(out, src)
+        self.assertEqual(rules, [])
+
+    def test_cleans_leading_pile(self):
+        from myflow.lightclean import strip_inner_fillers
+        out, _ = strip_inner_fillers("Ну, вот, короче, всё работает.")
+        self.assertEqual(out, "Всё работает.")
+
+    def test_idempotent(self):
+        from myflow.lightclean import strip_inner_fillers
+        once, _ = strip_inner_fillers("Второе, значит, э-э, насчёт")
+        twice, _ = strip_inner_fillers(once)
+        self.assertEqual(once, twice)
+
+    def test_leaves_clean_text_alone(self):
+        from myflow.lightclean import strip_inner_fillers
+        src = "Проверка связи, один, два, три."
+        self.assertEqual(strip_inner_fillers(src), (src, []))
+
+    def test_does_not_break_numbers_or_names(self):
+        from myflow.lightclean import strip_inner_fillers
+        src = "Скиллы, MCP, GigaAM — всё на месте."
+        self.assertEqual(strip_inner_fillers(src)[0], src)

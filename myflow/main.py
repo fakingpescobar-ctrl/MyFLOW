@@ -34,7 +34,7 @@ from myflow.axtext import AxReader, AxWatcher
 from myflow.db import Database, DictationRecord
 from myflow.config import SettingsStore, DATA_DIR, DEFAULT_APP_CATEGORIES, detect_category
 from myflow.fastpath import fast_path_allowed, looks_wellformed
-from myflow.lightclean import light_clean
+from myflow.lightclean import light_clean, strip_inner_fillers
 from myflow.pick_mic import fast_mic_list
 from myflow.voiceprint import VoiceGate
 from myflow.winfocus import (FocusHistory, WindowRef, current_window,
@@ -1762,6 +1762,15 @@ class MyFlowApp:
                     print("[myflow]   WARNING: ответ LLM обрезан (max_tokens) — вставлен сырой ASR")
             else:
                 final_text = self._guard_polish(asr.text, polished.text, style)
+
+            # Детерминированная зачистка филлеров ВНУТРИ фразы: локальная 4B-модель
+            # их часто оставляет («Второе, значит, э-э, насчёт»), хотя облако
+            # убирает — проверено стендом на реальных диктовках Wispr.
+            if style in ("plain", "casual", "formal") and final_text:
+                cleaned_final, inner_rules = strip_inner_fillers(final_text)
+                if inner_rules and cleaned_final:
+                    print(f"[myflow]   чистка: {', '.join(inner_rules)}")
+                    final_text = cleaned_final
 
             # Метрика расхождения ASR <-> LLM (аналог formattingDivergenceScore).
             divergence = divergence_score(asr.text, final_text)
