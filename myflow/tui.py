@@ -2442,7 +2442,7 @@ def _demo_snapshot() -> dict:
          "value": "GigaAM → whisper при сомнении", "on": True, "ok": True,
          "note": "второе мнение",
          "hint": "Enter — включить/выключить: подозрительные фразы уходят в whisper"},
-        {"key": "judge", "label": "Судья LLM",
+        {"key": "judge", "label": "Oracle LLM",
          "value": "выключен", "on": False, "ok": True, "note": "точность",
          "hint": "Enter — оба движка, LLM склеивает лучший текст"},
         {"key": "vad", "label": "VAD", "value": "Silero v6 · 0.30", "on": True, "ok": True,

@@ -435,7 +435,7 @@ class RouterToggleTest(unittest.TestCase):
 
 
 class JudgeToggleTest(unittest.TestCase):
-    """LLM-судья включается из панели (строка «Судья LLM»)."""
+    """Oracle LLM включается из панели (строка «Oracle LLM»)."""
 
     def setUp(self):
         from unittest import mock
@@ -464,7 +464,7 @@ class JudgeToggleTest(unittest.TestCase):
 
     def test_row_present_and_off_by_default(self):
         row = self._row()
-        self.assertFalse(row["on"], "судья по умолчанию выключен (дорого по времени)")
+        self.assertFalse(row["on"], "Oracle по умолчанию выключен (дорого по времени)")
         self.assertEqual(row["value"], "выключен")
         self.assertIn("Enter", row["hint"])
 
@@ -533,7 +533,7 @@ class RouterJudgeCombinationTest(unittest.TestCase):
         self.assertFalse(ok, "должен быть отказ, а не автопереключение")
         self.assertFalse(cfg.router, "состояние не меняется")
         self.assertTrue(cfg.judge, "активный режим остаётся")
-        self.assertIn("Судья LLM", message)
+        self.assertIn("Oracle LLM", message)
 
     def test_judge_cannot_be_enabled_while_router_on(self):
         cfg = self._cfg()

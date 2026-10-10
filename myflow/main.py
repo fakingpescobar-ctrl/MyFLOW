@@ -681,8 +681,8 @@ class MyFlowApp:
              "on": bool(getattr(s.asr, "router", False)), "ok": True,
              "note": "второе мнение",
              "hint": "Enter — вкл/выкл: подозрительные фразы уходят в whisper "
-                     "(несовместим с «Судья LLM»)"},
-            {"key": "judge", "label": "Судья LLM",
+                     "(несовместим с «Oracle LLM»)"},
+            {"key": "judge", "label": "Oracle LLM",
              "value": ("оба движка → LLM склеивает" if getattr(s.asr, "judge", False)
                        else "выключен"),
              "on": bool(getattr(s.asr, "judge", False)), "ok": True,
@@ -936,9 +936,9 @@ class MyFlowApp:
                     if not self._ensure_server("asr"):
                         return False, ("whisper-сервер не поднялся — авто-выбор НЕ "
                                        "включён (проверь bin\\whisper и модель)")
-                # Защита: пока включён судья, авто-выбор включить нельзя.
+                # Защита: пока включён Oracle LLM, авто-выбор включить нельзя.
                 if bool(getattr(s.asr, "judge", False)):
-                    return False, ("сначала выключи «Судья LLM» — режимы несовместимы "
+                    return False, ("сначала выключи «Oracle LLM» — режимы несовместимы "
                                    "(оба гоняют whisper и LLM)")
                 s.asr.router = True
                 self.settings.save()
@@ -948,10 +948,10 @@ class MyFlowApp:
             s.asr.router = False
             self.settings.save()
             # Второе мнение нужно ещё и судье: если он включён — сервер и клиент
-            # НЕ трогаем, иначе судья останется без whisper.
+            # НЕ трогаем, иначе Oracle LLM останется без whisper.
             if bool(getattr(s.asr, "judge", False)):
-                print("[myflow] авто-выбор ASR выключен (судья продолжает работать)")
-                return True, "авто-выбор выключен (судья LLM остаётся включённым)"
+                print("[myflow] авто-выбор ASR выключен (Oracle LLM продолжает работать)")
+                return True, "авто-выбор выключен (Oracle LLM остаётся включённым)"
             self._second = None
             # Если основной движок не whisper, сервер больше не нужен — гасим
             # и освобождаем ~1 ГБ VRAM.
@@ -961,31 +961,31 @@ class MyFlowApp:
             return True, "авто-выбор выключен (только GigaAM)"
 
         if key == "judge":
-            # LLM-судья: оба движка + склейка. Требует живой whisper-сервер.
+            # Oracle LLM: оба движка + склейка. Требует живой whisper-сервер.
             if not bool(getattr(s.asr, "judge", False)):
                 if getattr(self.whisper, "backend_name", "") != "whisper":
                     if not self._ensure_server("asr"):
-                        return False, ("whisper-сервер не поднялся — судья НЕ включён "
+                        return False, ("whisper-сервер не поднялся — Oracle LLM НЕ включён "
                                        "(проверь bin\\whisper и модель)")
                 if not getattr(self.polish, "alive", lambda: False)():
                     return False, "LLM недоступна — судье нечем склеивать (проверь :8082)"
-                # Защита: пока включён авто-выбор, судью включить нельзя.
+                # Защита: пока включён авто-выбор, Oracle LLM включить нельзя.
                 if bool(getattr(s.asr, "router", False)):
                     return False, ("сначала выключи «Авто-выбор» — режимы несовместимы "
                                    "(оба гоняют whisper и LLM)")
                 s.asr.judge = True
                 self.settings.save()
                 self._ensure_second_opinion()
-                print("[myflow] судья LLM включён: оба движка, LLM склеивает текст")
-                return True, "судья включён (оба движка + склейка LLM)"
+                print("[myflow] Oracle LLM включён: оба движка, LLM склеивает текст")
+                return True, "Oracle LLM включён (оба движка + склейка)"
             s.asr.judge = False
             self.settings.save()
-            print("[myflow] судья LLM выключен")
+            print("[myflow] Oracle LLM выключен")
             if not getattr(s.asr, "router", False) and \
                     getattr(self.whisper, "backend_name", "") != "whisper":
                 self._second = None
                 self._stop_server("asr")
-            return True, "судья выключен"
+            return True, "Oracle LLM выключен"
 
         if key == "asr":
             # Меняем движок распознавания: gigaam <-> whisper.
@@ -1815,31 +1815,31 @@ class MyFlowApp:
                 return res, origin
         except Exception:  # noqa: BLE001
             return res, origin
-        # Режим «судья»: гоняем оба движка и просим LLM склеить лучший текст.
+        # Режим «Oracle LLM»: гоняем оба движка и просим LLM склеить лучший текст.
         polish_probe = (getattr(self.polish, "alive", None)
                         or getattr(self.polish, "health", None) or (lambda: False))
         if getattr(cfg, "judge", False) and polish_probe():
             try:
                 alt_all = second.transcribe(pcm)
             except Exception as exc:  # noqa: BLE001
-                print(f"[myflow] судья: whisper не ответил ({exc!r})")
+                print(f"[myflow] Oracle LLM: whisper не ответил ({exc!r})")
                 alt_all = None
             if alt_all is not None and (alt_all.text or "").strip():
                 verdict = judge_merge(self.polish, res.text, alt_all.text)
                 if verdict.text:
-                    print(f"[myflow] ⚖ судья ({verdict.reason}, {verdict.latency_ms} мс): "
+                    print(f"[myflow] ⚖ Oracle LLM ({verdict.reason}, {verdict.latency_ms} мс): "
                           f"склеил два текста")
-                    self.overlay.show("⚖ судья: склеил два текста", "#f5c542")
+                    self.overlay.show("⚖ Oracle: склеил два текста", "#f5c542")
                     res = AsrResult(text=verdict.text, language=res.language,
                                     latency_ms=res.latency_ms + alt_all.latency_ms + verdict.latency_ms)
                     return res, f"judge:{verdict.reason}"
-                # Судья не помог — применяем правило авто-выбора к уже готовым
+                # Oracle LLM не помог — применяем правило авто-выбора к уже готовым
                 # текстам (whisper повторно НЕ гоняем).
-                print(f"[myflow] ⚖ судья не помог ({verdict.reason}) — выбираю правило")
+                print(f"[myflow] ⚖ Oracle LLM не помог ({verdict.reason}) — выбираю правило")
                 fallback = review_asr_quality(res.text, duration_ms=duration_ms,
                                               cfg=_with_router(cfg))
                 if fallback.use_second:
-                    return alt_all, f"whisper:после судьи ({fallback.reason})"
+                    return alt_all, f"whisper:после Oracle ({fallback.reason})"
                 return res, origin
 
         decision = review_asr_quality(res.text, duration_ms=duration_ms, cfg=cfg)
