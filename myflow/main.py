@@ -35,6 +35,7 @@ from myflow.db import Database, DictationRecord
 from myflow.config import SettingsStore, DATA_DIR, DEFAULT_APP_CATEGORIES, detect_category
 from myflow.fastpath import fast_path_allowed, looks_wellformed
 from myflow.asr_router import review as review_asr_quality
+from myflow.asr_judge import merge as judge_merge
 from myflow.lightclean import light_clean, strip_inner_fillers
 from myflow.pick_mic import fast_mic_list
 from myflow.voiceprint import VoiceGate
@@ -662,6 +663,13 @@ class MyFlowApp:
              "note": "второе мнение",
              "hint": "Enter — включить/выключить: подозрительные фразы уходят в "
                      "whisper (нужен сервер :8081; ~1 ГБ VRAM)"},
+            {"key": "judge", "label": "Судья LLM",
+             "value": ("оба движка → LLM склеивает" if getattr(s.asr, "judge", False)
+                       else "выключен"),
+             "on": bool(getattr(s.asr, "judge", False)), "ok": True,
+             "note": "точность",
+             "hint": "Enter — включить/выключить: гоняем GigaAM и whisper, LLM "
+                     "склеивает лучший текст (~0.4 с; нужен сервер :8081)"},
             {"key": "vad", "label": "VAD", "value": f"Silero v6 · {vad_threshold:.2f}",
              "on": bool(s.auto_stop_by_silence), "ok": True, "note": "детектор речи",
              "hint": "←→ порог, Enter — автостоп по паузе"},
@@ -907,6 +915,29 @@ class MyFlowApp:
                 self._stop_server("asr")
             print("[myflow] авто-выбор ASR выключен")
             return True, "авто-выбор выключен (только GigaAM)"
+
+        if key == "judge":
+            # LLM-судья: оба движка + склейка. Требует живой whisper-сервер.
+            if not bool(getattr(s.asr, "judge", False)):
+                if getattr(self.whisper, "backend_name", "") != "whisper":
+                    if not self._ensure_server("asr"):
+                        return False, ("whisper-сервер не поднялся — судья НЕ включён "
+                                       "(проверь bin\\whisper и модель)")
+                if not getattr(self.polish, "alive", lambda: False)():
+                    return False, "LLM недоступна — судье нечем склеивать (проверь :8082)"
+                s.asr.judge = True
+                self.settings.save()
+                self._ensure_second_opinion()
+                print("[myflow] судья LLM включён: оба движка, LLM склеивает текст")
+                return True, "судья включён (оба движка + склейка LLM)"
+            s.asr.judge = False
+            self.settings.save()
+            print("[myflow] судья LLM выключен")
+            if not getattr(s.asr, "router", False) and \
+                    getattr(self.whisper, "backend_name", "") != "whisper":
+                self._second = None
+                self._stop_server("asr")
+            return True, "судья выключен"
 
         if key == "asr":
             # Меняем движок распознавания: gigaam <-> whisper.
@@ -1663,7 +1694,7 @@ class MyFlowApp:
     def _ensure_second_opinion(self) -> None:
         """Подготовить whisper как «второе мнение» (если включён авто-выбор)."""
         cfg = self.settings.get().asr
-        if not getattr(cfg, "router", False):
+        if not (getattr(cfg, "router", False) or getattr(cfg, "judge", False)):
             return
         if getattr(self, "_second", None) is not None:
             return
@@ -1686,7 +1717,9 @@ class MyFlowApp:
         res = self.whisper.transcribe(pcm)
         origin = getattr(self.whisper, "backend_name", "asr") or "asr"
         cfg = self.settings.get().asr
-        if not getattr(cfg, "router", False) or origin != "gigaam":
+        if not (getattr(cfg, "router", False) or getattr(cfg, "judge", False)):
+            return res, origin
+        if origin != "gigaam":
             return res, origin
         second = getattr(self, "_second", None)
         if second is None:
@@ -1694,11 +1727,37 @@ class MyFlowApp:
             second = getattr(self, "_second", None)
         if second is None:
             return res, origin
+        # ВАЖНО: у WhisperClient есть health(), а не alive(). Раньше здесь
+        # проверялся alive(), AttributeError глушился широким except — и второе
+        # мнение НИКОГДА не вызывалось (нашли живой сквозной проверкой).
+        probe = getattr(second, "alive", None) or getattr(second, "health", None)
+        if probe is None:
+            return res, origin
         try:
-            if not second.alive():
+            if not probe():
                 return res, origin
         except Exception:  # noqa: BLE001
             return res, origin
+        # Режим «судья»: гоняем оба движка и просим LLM склеить лучший текст.
+        polish_probe = (getattr(self.polish, "alive", None)
+                        or getattr(self.polish, "health", None) or (lambda: False))
+        if getattr(cfg, "judge", False) and polish_probe():
+            try:
+                alt_all = second.transcribe(pcm)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[myflow] судья: whisper не ответил ({exc!r})")
+                alt_all = None
+            if alt_all is not None and (alt_all.text or "").strip():
+                verdict = judge_merge(self.polish, res.text, alt_all.text)
+                if verdict.text:
+                    print(f"[myflow] ⚖ судья ({verdict.reason}, {verdict.latency_ms} мс): "
+                          f"склеил два текста")
+                    self.overlay.show("⚖ судья: склеил два текста", "#f5c542")
+                    res = AsrResult(text=verdict.text, language=res.language,
+                                    latency_ms=res.latency_ms + alt_all.latency_ms + verdict.latency_ms)
+                    return res, f"judge:{verdict.reason}"
+                print(f"[myflow] ⚖ судья не помог ({verdict.reason}) — обычная логика")
+
         decision = review_asr_quality(res.text, duration_ms=duration_ms, cfg=cfg)
         if not decision.use_second:
             return res, origin

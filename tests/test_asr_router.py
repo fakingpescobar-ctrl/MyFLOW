@@ -143,3 +143,125 @@ class TranscribeRoutingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class JudgeInPipelineTest(unittest.TestCase):
+    """`_transcribe` в режиме судьи: склейка, а при отказе — обычный авто-выбор."""
+
+    def _app(self, primary_text: str, second_text: str):
+        from unittest import mock
+        from myflow.main import MyFlowApp
+        from test_main_flow import make_app
+        import types
+
+        app = make_app()
+        app._transcribe = types.MethodType(MyFlowApp._transcribe, app)
+        app._ensure_second_opinion = types.MethodType(
+            MyFlowApp._ensure_second_opinion, app)
+        app.settings.get().asr.judge = True
+        app.settings.get().asr.router = True
+        primary = mock.Mock(backend_name="gigaam")
+        primary.transcribe.return_value = types.SimpleNamespace(
+            text=primary_text, language="ru", latency_ms=50)
+        second = mock.Mock(backend_name="whisper")
+        second.transcribe.return_value = types.SimpleNamespace(
+            text=second_text, language="ru", latency_ms=120)
+        second.alive.return_value = True
+        app.whisper = primary
+        app._second = second
+        app.polish = mock.Mock()
+        app.polish.alive.return_value = True
+        return app, second
+
+    def test_judge_merges_when_possible(self):
+        from unittest import mock
+        from myflow.asr_judge import MergeResult
+        app, second = self._app("Проверка связи один два три", "проверка связи один два три")
+        with mock.patch("myflow.main.judge_merge",
+                        return_value=MergeResult("Проверка связи, один, два, три.", 180, "склейка")):
+            res, origin = app._transcribe(None, duration_ms=2500)
+        self.assertTrue(origin.startswith("judge:"), origin)
+        self.assertEqual(res.text, "Проверка связи, один, два, три.")
+        second.transcribe.assert_called_once()
+
+    def test_judge_rejection_falls_back_to_router(self):
+        from unittest import mock
+        from myflow.asr_judge import MergeResult
+        app, second = self._app("А что быы ты по.", "а что быы ты по")
+        with mock.patch("myflow.main.judge_merge",
+                        return_value=MergeResult("", 180, "отклонено: эхо промпта")):
+            res, origin = app._transcribe(None, duration_ms=1500)
+        # авто-выбор поймал обрывок и взял второе мнение
+        self.assertTrue(origin.startswith("whisper:"), origin)
+
+    def test_judge_off_keeps_router_behaviour(self):
+        from unittest import mock
+        app, second = self._app("Проверка связи, один, два, три.", "проверка связи один два три")
+        app.settings.get().asr.judge = False
+        with mock.patch("myflow.main.judge_merge") as judge:
+            res, origin = app._transcribe(None, duration_ms=2500)
+        judge.assert_not_called()
+        self.assertEqual(origin, "gigaam")
+
+
+class SecondOpinionWiringTest(unittest.TestCase):
+    """Страж: второе мнение ДОЛЖНО вызываться. Здесь был тихий баг.
+
+    У `WhisperClient` есть `health()`, а не `alive()`. Проверка `alive()` падала
+    с AttributeError, широкий `except` её глушил — и авто-выбор в бою был
+    пустышкой (нашли живой сквозной проверкой на реальных фразах).
+    """
+
+    def _app(self, second_spec, polish_spec=None):
+        import types
+        from unittest import mock
+        from myflow.main import MyFlowApp
+        from test_main_flow import make_app
+
+        app = make_app()
+        app._transcribe = types.MethodType(MyFlowApp._transcribe, app)
+        app._ensure_second_opinion = types.MethodType(
+            MyFlowApp._ensure_second_opinion, app)
+        app.settings.get().asr.router = True
+        app.settings.get().asr.judge = False
+        primary = mock.Mock(backend_name="gigaam")
+        primary.transcribe.return_value = types.SimpleNamespace(
+            text="А что быы ты по.", language="ru", latency_ms=50)
+        app.whisper = primary
+        second = mock.Mock(spec=second_spec)
+        second.transcribe.return_value = types.SimpleNamespace(
+            text="А что быы ты по", language="ru", latency_ms=90)
+        app._second = second
+        app.polish = mock.Mock(spec=polish_spec or ["alive"])
+        if hasattr(app.polish, "alive"):
+            app.polish.alive.return_value = True
+        else:
+            app.polish.health.return_value = True
+        return app, second
+
+    def test_whisper_client_without_alive_still_used(self):
+        app, second = self._app(["transcribe", "health"])
+        second.health.return_value = True
+        res, origin = app._transcribe(None, duration_ms=1500)
+        second.transcribe.assert_called_once()
+        self.assertTrue(origin.startswith("whisper:"), origin)
+
+    def test_dead_second_opinion_is_skipped(self):
+        app, second = self._app(["transcribe", "health"])
+        second.health.return_value = False
+        res, origin = app._transcribe(None, duration_ms=1500)
+        second.transcribe.assert_not_called()
+        self.assertEqual(origin, "gigaam")
+
+    def test_judge_runs_with_polish_client_having_only_health(self):
+        from unittest import mock
+        from myflow.asr_judge import MergeResult
+        app, second = self._app(["transcribe", "health"], polish_spec=["health"])
+        second.health.return_value = True
+        app.polish.health.return_value = True
+        app.settings.get().asr.judge = True
+        with mock.patch("myflow.main.judge_merge",
+                        return_value=MergeResult("Склеенный текст.", 200, "склейка")):
+            res, origin = app._transcribe(None, duration_ms=1500)
+        self.assertTrue(origin.startswith("judge:"), origin)
+        self.assertEqual(res.text, "Склеенный текст.")

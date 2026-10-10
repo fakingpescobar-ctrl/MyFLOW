@@ -432,3 +432,67 @@ class RouterToggleTest(unittest.TestCase):
         self.app.control_apply("module", "router")
         after = live.read_text(encoding="utf-8") if live.exists() else ""
         self.assertEqual(before, after, "живые настройки изменены тестом")
+
+
+class JudgeToggleTest(unittest.TestCase):
+    """LLM-судья включается из панели (строка «Судья LLM»)."""
+
+    def setUp(self):
+        from unittest import mock
+        self.app = _app()
+        self.app.overlay = mock.Mock()
+        self.app._ensure_server = lambda key: True
+        self.app._stop_server = mock.Mock()
+        self.app._ensure_second_opinion = mock.Mock()
+        self.app.polish = mock.Mock()
+        self.app.polish.alive.return_value = True
+
+    def tearDown(self):
+        self.app.db.close()
+        try:
+            self.app.ax.stop()
+        except Exception:
+            pass
+        self.app._stopping.set()
+        self.app._tmp.cleanup()
+
+    def _row(self):
+        return next(m for m in self.app.control_snapshot()["modules"]
+                    if m["key"] == "judge")
+
+    def test_row_present_and_off_by_default(self):
+        row = self._row()
+        self.assertFalse(row["on"], "судья по умолчанию выключен (дорого по времени)")
+        self.assertEqual(row["value"], "выключен")
+        self.assertIn("Enter", row["hint"])
+
+    def test_toggle_on_then_off(self):
+        ok, message = self.app.control_apply("module", "judge")
+        self.assertTrue(ok, message)
+        self.assertTrue(self.app.settings.get().asr.judge)
+        self.assertIn("включён", message)
+        self.assertTrue(self._row()["on"])
+        ok, message = self.app.control_apply("module", "judge")
+        self.assertTrue(ok)
+        self.assertFalse(self.app.settings.get().asr.judge)
+        self.assertIn("выключен", message)
+
+    def test_enable_requires_llm(self):
+        self.app.polish.alive.return_value = False
+        ok, message = self.app.control_apply("module", "judge")
+        self.assertFalse(ok)
+        self.assertIn("LLM", message)
+        self.assertFalse(self.app.settings.get().asr.judge)
+
+    def test_enable_requires_whisper_server(self):
+        self.app._ensure_server = lambda key: False
+        ok, message = self.app.control_apply("module", "judge")
+        self.assertFalse(ok)
+        self.assertFalse(self.app.settings.get().asr.judge)
+
+    def test_judge_needs_whisper_server_at_startup(self):
+        from myflow.asr import whisper_needed
+        cfg = self.app.settings.get().asr
+        cfg.judge = True
+        cfg.router = False
+        self.assertTrue(whisper_needed(cfg), "судье нужен whisper-сервер")

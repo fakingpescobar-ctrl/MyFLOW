@@ -119,7 +119,7 @@ def whisper_needed(cfg: AsrConfig | None = None) -> bool:
             cfg = SettingsStore().get().asr
         except Exception:  # noqa: BLE001
             cfg = None
-    if cfg is not None and getattr(cfg, "router", False):
+    if cfg is not None and (getattr(cfg, "router", False) or getattr(cfg, "judge", False)):
         backend = (getattr(cfg, "backend", "") or "").strip().lower()
         if backend in ("auto", "gigaam"):
             return True
