@@ -4,6 +4,11 @@
 накапливаем повторяющиеся пары замен и по достижении порога (2+) фиксируем их
 в dictionary с source='learned'. Словарик затем подставляется в промпт LLM
 и в post-замену результата.
+
+Отдельно есть УВЕРЕННЫЕ правки (см. `is_confident_correction`): их учим сразу,
+без порога. Причина — за 359 диктовок в словаре оказалась 1 запись: одна и та же
+пара почти никогда не повторяется дважды, а «туи -> TUI» или «ообщеение ->
+общение» — очевидные ошибки ASR, которые надо запоминать с первого раза.
 """
 from __future__ import annotations
 
@@ -18,10 +23,47 @@ CANDIDATES_KEY = "learned_candidates"
 LEARN_THRESHOLD = 2
 
 _WORD_RE = re.compile(r"[А-Яа-яЁёA-Za-z0-9]+", re.UNICODE)
+_CYRILLIC_RE = re.compile(r"^[а-яё]+$", re.IGNORECASE)
+_LATIN_RE = re.compile(r"^[a-z]+$", re.IGNORECASE)
+_HAS_LATIN = re.compile(r"[A-Za-z]")
+_HAS_CYRILLIC = re.compile(r"[А-Яа-яЁё]")
 
 
 def _tokens(text: str) -> list[str]:
     return [t.lower() for t in _WORD_RE.findall(text)]
+
+
+def is_confident_correction(src: str, dst: str) -> str | None:
+    """Уверенная правка ASR? Возвращает причину или None.
+
+    Такие пары учим сразу, не дожидаясь второй такой же правки:
+      * латиница вместо кириллицы («туи» -> «tui»/«TUI») — ASR записал
+        латинский термин русскими буквами, пользователь поправил;
+      * в правке есть цифра или заглавная (бренды/термины: «майфлоу» -> «MyFLOW»);
+      * ДЛИННЫЕ похожие слова кириллицей (>= 8 букв, ratio >= 0.7): «ообщеение»
+        -> «общение». Порог по длине принципиален: короткие пары вроде
+        «это -> этот», «делай -> сделай», «сказал -> сказала» — это грамматика,
+        а не ошибка распознавания; выучить их значит ломать будущий текст.
+    """
+    if not src or not dst or src == dst:
+        return None
+    if len(src) < 3 or len(dst) < 3:
+        return None
+    if _CYRILLIC_RE.match(src) and _LATIN_RE.match(dst):
+        return "латинский термин русскими буквами"
+    if _CYRILLIC_RE.match(src) and _HAS_LATIN.search(dst):
+        return "латиница в правке"
+    if any(ch.isdigit() for ch in dst) and not any(ch.isdigit() for ch in src):
+        return "цифры в правке"
+    if dst != dst.lower() and src == src.lower() and _HAS_LATIN.search(dst):
+        return "заглавные в термине"
+    # Кириллица -> кириллица: только длинные слова и только похожие.
+    if (_CYRILLIC_RE.match(src) and _CYRILLIC_RE.match(dst)
+            and len(src) >= 8 and len(dst) >= 4 and abs(len(src) - len(dst)) <= 4):
+        ratio = SequenceMatcher(None, src, dst, autojunk=False).ratio()
+        if ratio >= 0.7:
+            return f"похожее длинное слово (ratio={ratio:.2f})"
+    return None
 
 
 def extract_corrections(asr_text: str, edited_text: str) -> list[tuple[str, str]]:
@@ -49,14 +91,20 @@ def extract_corrections(asr_text: str, edited_text: str) -> list[tuple[str, str]
 
 
 def record_edit_and_learn(db: Database, history_id: int, polished_text: str,
-                          edited_text: str, observation_end_reason: str | None = None) -> dict:
+                          edited_text: str, observation_end_reason: str | None = None,
+                          validator: Callable[[str, str], bool] | None = None) -> dict:
     """Зафиксировать ручную правку, посчитать edit_distance, обучить словарь.
 
-    Обучение per-app: пара promo'тится в словарь с app-маской окна диктовки
+    Обучение per-app: пара промо'тится в словарь с app-маской окна диктовки
     (history.app_window), глобально попадают только замены без привязки к окну
     (app не распознан/unknown). Повторяющиеся пары копятся в kv с контекстом.
     observation_end_reason — как мы узнали о правке (AX/буфер), аналог
     contentObservationEndReason у Wispr.
+
+    validator — необязательная проверка спорной пары («это правка ошибки ASR?»).
+    Если она говорит «да», пару учим сразу, не дожидаясь повтора: так словарь
+    наполняется с первой правки, но грамматические переделки («сказал» ->
+    «сказала») в него не попадают.
     """
     if not edited_text or edited_text == polished_text:
         return {"edit_distance": 0, "new_words": 0}
@@ -82,6 +130,13 @@ def record_edit_and_learn(db: Database, history_id: int, polished_text: str,
     )
 
     new_words = 0
+    # Пары именно ЭТОЙ правки: валидатор (запрос к модели) спрашиваем только про
+    # них, иначе на каждый чих улетало бы по запросу на каждый накопленный
+    # кандидат — и обучение превращалось бы в тормоз.
+    current_keys: set[str] = set()
+    for src, dst in pairs:
+        if src and dst:
+            current_keys.add(f"{src}\u0000{dst}\u0000{app_context or ''}")
     if pairs:
         candidates: dict[str, dict] = {}
         raw = db.kv_get(CANDIDATES_KEY)
@@ -114,13 +169,24 @@ def record_edit_and_learn(db: Database, history_id: int, polished_text: str,
             candidates[key] = entry
         promoted: list[str] = []
         for key, entry in candidates.items():
-            if entry["n"] >= LEARN_THRESHOLD:
-                parts = key.split("\u0000")
-                src, dst = parts[0], parts[1]
+            parts = key.split("\u0000")
+            src, dst = parts[0], parts[1]
+            confident = is_confident_correction(src, dst)
+            approved = False
+            if (not confident and entry["n"] < LEARN_THRESHOLD
+                    and validator is not None and key in current_keys):
+                try:
+                    approved = bool(validator(src, dst))
+                except Exception:  # noqa: BLE001 — проверка не критична
+                    approved = False
+            if entry["n"] >= LEARN_THRESHOLD or confident or approved:
                 # add_word сам инкрементит hit_count через ON CONFLICT —
                 # отдельный bump_word давал двойной счёт.
                 db.add_word(src, dst, source="learned", app_mask=entry.get("app"))
                 promoted.append(key)
+                why = confident or ("подтверждено моделью" if approved else "")
+                print(f"[myflow] выучил «{src}» → «{dst}»"
+                      + (f" ({why})" if why else ""))
         for key in promoted:
             candidates.pop(key, None)
         db.kv_set(CANDIDATES_KEY, json.dumps(candidates, ensure_ascii=False))

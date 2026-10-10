@@ -216,6 +216,32 @@ class PolishClient:
         est = int(len(raw_text) / 2) + 64
         return max(48, min(self.cfg.max_tokens, est))
 
+    def ask(self, question: str, max_tokens: int = 8) -> str:
+        """Короткий вопрос модели (без формат-промптов полировки).
+
+        Нужен для служебных решений вроде «это ошибка распознавания?»: гонять
+        такой вопрос через STYLE_PROMPTS нельзя — они инструктируют
+        ФОРМАТИРОВАТЬ текст, и ответ «да/нет» превращается в пересказ.
+        """
+        resp = self.session.post(
+            f"{self.cfg.url}/chat/completions",
+            json={
+                "model": self._effective_model(),
+                "messages": [
+                    {"role": "system",
+                     "content": "Отвечай предельно кратко, одним словом."},
+                    {"role": "user", "content": question},
+                ],
+                "temperature": 0.0,
+                "max_tokens": max_tokens,
+                "chat_template_kwargs": {"enable_thinking": False},
+            },
+            timeout=self._timeout(),
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"llama-server ответил {resp.status_code}")
+        return (resp.json()["choices"][0]["message"]["content"] or "").strip()
+
     def polish(
         self,
         raw_text: str,

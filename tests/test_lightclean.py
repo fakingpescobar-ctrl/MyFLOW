@@ -144,5 +144,23 @@ class LightCleanInPipelineTest(unittest.TestCase):
             self.fail("фраза с числами словами должна идти в LLM, а не в чистку")
 
 
+    def test_truncated_phrase_without_terminal_goes_to_llm(self):
+        """Обрывок («... тормозит. То») должен дочищаться LLM, а не локально."""
+        called = {"n": 0}
+
+        def fake_polish(*a, **k):
+            called["n"] += 1
+            from myflow.polish import PolishResult
+            return PolishResult(text="Наш TUI тормозит.", latency_ms=90)
+
+        self.app.polish.polish = fake_polish
+        self._run("Наш туи тормозит. То")
+        self.assertEqual(called["n"], 1, "фраза без конечной пунктуации — в LLM")
+
+    def test_filler_phrase_with_terminal_skips_llm(self):
+        """А вот «Ну да, тогда делай всё по очереди.» — чисто механическая."""
+        self._run("Ну да, тогда делай всё по очереди.")
+        self.app.polish.polish.assert_not_called()
+
 if __name__ == "__main__":
     unittest.main()

@@ -199,6 +199,13 @@ def _health_check_llm(polish: PolishClient, *, cached: bool = True) -> bool:
     try:
         if checker is not None:
             alive = bool(checker())
+        else:
+            # Клиент без alive() (тестовые заглушки, старые сборки) — проверяем
+            # обычным запросом, но с коротким connect-таймаутом.
+            import requests
+            url = getattr(getattr(polish, "cfg", None), "url", "")
+            if url:
+                alive = bool(requests.get(f"{url}/models", timeout=(0.35, 2.0)).ok)
     except Exception:  # noqa: BLE001
         alive = False
     if alive:
@@ -1495,7 +1502,12 @@ class MyFlowApp:
                 and "gigaam" in (backend_name or "").lower()
                 and style in ("plain", "casual")):
             cleaned, local_rules = light_clean(asr.text)
-            if local_rules and looks_wellformed(cleaned)[0]:
+            # ВАЖНО: без конечной пунктуации фраза часто ОБОРВАНА («Наш туи
+            # тормозит. То») — там нужен LLM (он выбрасывает хвост), а не
+            # локальная точка. Поэтому локальный путь только для текста, у
+            # которого пунктуация в конце уже была.
+            has_terminal = asr.text.rstrip()[-1:] in ".!?…"
+            if local_rules and has_terminal and looks_wellformed(cleaned)[0]:
                 fast_text = cleaned
                 fast_ok = True
                 fast_reason = "лёгкая чистка: " + ", ".join(local_rules)
@@ -2019,6 +2031,24 @@ class MyFlowApp:
 
         threading.Thread(target=_run, daemon=True, name="edit-watcher").start()
 
+    def _llm_confirms_correction(self, src: str, dst: str) -> bool:
+        """Спросить у LLM: это правка ОШИБКИ распознавания, а не грамматика?
+
+        Нужна для спорных пар вроде «каннект -> кинект»: учить их сразу полезно,
+        но «сказал -> сказала» учить нельзя (сломает будущий текст). Спрашиваем
+        только когда модель доступна; иначе пара ждёт второго повтора.
+        """
+        if not self.polish.cfg.enabled or not _health_check_llm(self.polish):
+            return False
+        try:
+            prompt = (f"Распознавание речи выдало слово «{src}», пользователь "
+                      f"исправил на «{dst}». Это ошибка распознавания (да) или "
+                      f"грамматическая правка/перефраз (нет)? Ответь одним словом: да или нет.")
+            answer = (self.polish.ask(prompt) or "").strip().lower()
+            return answer.startswith("да") or answer.startswith("yes")
+        except Exception:  # noqa: BLE001 — проверка не должна мешать обучению
+            return False
+
     def _watch_with_ax(self, db: Database, history_id: int, polished_text: str) -> str:
         """Наблюдение через UI Automation. Возвращает причину окончания."""
         watcher = AxWatcher(self.ax,
@@ -2026,7 +2056,8 @@ class MyFlowApp:
         edited, reason = watcher.watch(polished_text, expected_pid=self._last_insert_pid)
         if edited and reason == AxWatcher.EDITED:
             result = record_edit_and_learn(db, history_id, polished_text, edited,
-                                           observation_end_reason=reason)
+                                           observation_end_reason=reason,
+                                           validator=self._llm_confirms_correction)
             print(f"[myflow] авто-обучение (AX): distance={result['edit_distance']}, "
                   f"новые слова={result['new_words']}")
         return reason

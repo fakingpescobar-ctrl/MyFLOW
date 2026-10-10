@@ -215,6 +215,9 @@ def make_app(auto=False, busy=False, gen=0, polish_enabled=False, paster=None):
     app._pending = __import__('collections').deque()
     app._last_insert_ts = 0.0
     app.polish = types.SimpleNamespace(
+        # Настоящий PolishClient умеет alive(): панель и автолечение спрашивают
+        # живость ПЕРЕД вызовом, и заглушка обязана вести себя так же.
+        alive=lambda: True,
         cfg=types.SimpleNamespace(enabled=polish_enabled, url="http://127.0.0.1:8082/v1"),
         polish=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("LLM лежит")),
         _effective_model=lambda: "qwen",

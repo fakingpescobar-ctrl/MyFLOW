@@ -98,6 +98,82 @@ class TestWatchContract(unittest.TestCase):
                          "hit_count не должен удваиваться (bump_word убран)")
 
 
+class TestConfidentLearning(unittest.TestCase):
+    """Уверенные правки учим сразу: словарь иначе пуст (1 запись на 359 диктовок)."""
+
+    def test_confident_rules(self):
+        from myflow.learning import is_confident_correction
+        yes = {
+            ("туи", "TUI"): "латиница",
+            ("туи", "tui"): "латиница",
+            ("джигаам", "GigaAM"): "латиница",
+            ("майфлоу", "MyFLOW"): "латиница",
+            ("ообщеение", "общение"): "длинное похожее слово",
+            ("воспризведение", "воспроизведение"): "длинное похожее слово",
+        }
+        for (src, dst), why in yes.items():
+            with self.subTest(pair=(src, dst)):
+                self.assertIsNotNone(is_confident_correction(src, dst), why)
+
+    def test_grammar_is_not_confident(self):
+        """«сказал -> сказала», «это -> этот», «делай -> сделай» — это НЕ ошибка ASR."""
+        from myflow.learning import is_confident_correction
+        for src, dst in (("сказал", "сказала"), ("это", "этот"), ("делай", "сделай"),
+                         ("дом", "стол"), ("ну", "да"), ("идёт", "идут")):
+            with self.subTest(pair=(src, dst)):
+                self.assertIsNone(is_confident_correction(src, dst),
+                                  f"«{src}» -> «{dst}» учить сразу нельзя")
+
+    def _db_with(self, asr, polished, window="Тест — приложение"):
+        import tempfile
+        from myflow.db import Database, DictationRecord
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db = Database(Path(tmp.name) / "learn.sqlite")
+        self.addCleanup(db.close)
+        hid = db.insert_history(DictationRecord(
+            asr_text=asr, polished_text=polished, app_window=window,
+            duration_ms=2000, e2e_latency_ms=400, detected_language="ru",
+            transcript_origin="gigaam", style="plain", status="ok"))
+        return db, hid, window
+
+    def test_term_learned_from_single_edit(self):
+        from myflow.learning import record_edit_and_learn
+        db, hid, window = self._db_with("Наш туи тормозит.", "Наш туи тормозит.")
+        res = record_edit_and_learn(db, hid, "Наш туи тормозит.", "Наш TUI тормозит.")
+        self.assertEqual(res["new_words"], 1, "термин должен выучиться с первой правки")
+        words = db.get_dictionary(window)
+        self.assertTrue(any(w["target_word"].lower() == "tui" for w in words), words)
+
+    def test_grammar_edit_not_learned_immediately(self):
+        from myflow.learning import record_edit_and_learn
+        db, hid, window = self._db_with("Он сказал что придёт.", "Он сказал что придёт.")
+        res = record_edit_and_learn(db, hid, "Он сказал что придёт.",
+                                    "Он сказала что придёт.")
+        self.assertEqual(res["new_words"], 0)
+        self.assertEqual(db.get_dictionary(window), [])
+
+    def test_validator_learns_current_pair_only(self):
+        """Модель подтверждает пару — учим; про старые кандидаты не спрашиваем."""
+        from myflow.learning import record_edit_and_learn
+        db, hid, window = self._db_with("Он сказал что придёт.", "Он сказал что придёт.")
+        record_edit_and_learn(db, hid, "Он сказал что придёт.", "Он сказала что придёт.")
+        asked: list[tuple[str, str]] = []
+
+        def validator(src, dst):
+            asked.append((src, dst))
+            return (src, dst) == ("каннект", "кинект")
+
+        db2, hid2, window2 = self._db_with("Подключи каннект.", "Подключи каннект.",
+                                          window=window)
+        res = record_edit_and_learn(db2, hid2, "Подключи каннект.", "Подключи кинект.",
+                                    validator=validator)
+        self.assertEqual(res["new_words"], 1)
+        self.assertIn(("каннект", "кинект"), asked)
+        self.assertNotIn(("сказал", "сказала"), asked,
+                         "старые кандидаты в этой правке не участвуют")
+
+
 class TestNoiseFilter(unittest.TestCase):
     """Фильтр «слово -> число»: не учим совпадения с чужим скопированным текстом."""
 
