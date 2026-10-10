@@ -567,9 +567,13 @@ class Supervisor:
         self._own: set[str] = set()
         self._errors: dict[str, str] = {}
         self._lock = threading.Lock()
+        # Job Object: серверы умрут вместе с процессом MyFLOW (даже при kill -9).
+        from myflow.jobobj import ProcessJob
+        self.job = ProcessJob()
 
     # ---- проверки ----
     @staticmethod
+
     def port_open(port: int, host: str = "127.0.0.1", timeout: float = 0.3) -> bool:
         try:
             with socket.socket() as s:
@@ -634,6 +638,9 @@ class Supervisor:
                 )
             finally:
                 fh.close()
+            # Привязываем сервер к Job Object: даже если MyFLOW убьют силой,
+            # Windows сама снимет сервер (память и VRAM освободятся).
+            self.job.assign(proc)
             with self._lock:
                 self._procs[spec.key] = proc
                 self._own.add(spec.key)

@@ -1,4 +1,4 @@
-# start-all.ps1 — подъём серверов MyFLOW (пульт, вызывается из start-myflow.bat).
+﻿# start-all.ps1 — подъём серверов MyFLOW (пульт, вызывается из start-myflow.bat).
 #   whisper-server (:8081) — ТОЛЬКО если ASR не на GigaAM (см. ниже);
 #   llama-server   (:8082) — полировка.
 #   Оба ФОНОВЫЕ, логи в data\*.log. Это окно — пульт: показывает статус и живёт,

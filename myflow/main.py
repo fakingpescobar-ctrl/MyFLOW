@@ -308,6 +308,7 @@ class MyFlowApp:
         self._llm_revive: threading.Thread | None = None
         self._repolish_thread: threading.Thread | None = None
         self._deferred_polish_count = 0
+        self._polish_user_off = False   # полировку выключил сам пользователь
         # Ф8: ручной стиль (F7) перекрывает per-app; None = авто по окну.
         self._style_override: str | None = None
         self._last_style_switch_t = 0.0
@@ -760,6 +761,7 @@ class MyFlowApp:
 
         if key == "llm":
             s.polish.enabled = not s.polish.enabled
+            self._polish_user_off = not s.polish.enabled
             self.settings.save()
             print(f"[myflow] полировка: {'вкл' if s.polish.enabled else 'выкл'}")
             return True, f"полировка: {'вкл' if s.polish.enabled else 'выкл'}"
@@ -1089,6 +1091,11 @@ class MyFlowApp:
                 if not pending:
                     continue
                 if not self.polish.cfg.enabled:
+                    # Сами включаем полировку только если её выключил сторож
+                    # (сервер лежал). Если пользователь выключил её руками —
+                    # не поднимаем сервер: он мог освобождать VRAM под игру.
+                    if getattr(self, "_polish_user_off", False):
+                        continue
                     self.polish.cfg.enabled = True     # дадим шанс после автолечения
                 if not _health_check_llm(self.polish):
                     self._ensure_llm_async()

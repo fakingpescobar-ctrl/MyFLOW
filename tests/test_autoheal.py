@@ -187,6 +187,28 @@ class AutoHealTest(unittest.TestCase):
         snap = self.app.control_snapshot()
         self.assertEqual(snap["counters"]["deferred_polish"], 1)
 
+    def test_user_disabled_polish_is_not_re_enabled(self):
+        """Выключил LLM в панели (освобождал VRAM под игру) — не поднимать обратно."""
+        self.app.polish.polish = mock.Mock()
+        ok, _ = self.app.control_apply("module", "llm")
+        self.assertTrue(ok)
+        self.assertFalse(self.app.settings.get().polish.enabled)
+        self.assertTrue(self.app._polish_user_off, "флаг «выключил пользователь»")
+        calls = []
+        self.app.set_server_guard(lambda key: calls.append(key) or False)
+        self.app.settings.get().polish.auto_repolish_interval = 1.0
+        self.app._stopping.set()
+        self.app._repolish_loop()          # один проход
+        self.assertFalse(self.app.settings.get().polish.enabled,
+                         "полировка не должна включаться сама")
+        self.app.polish.polish.assert_not_called()
+
+    def test_user_reenabled_polish_clears_flag(self):
+        self.app.control_apply("module", "llm")      # выключили
+        self.app.control_apply("module", "llm")      # включили
+        self.assertTrue(self.app.settings.get().polish.enabled)
+        self.assertFalse(self.app._polish_user_off)
+
     def test_autoheal_defaults_on(self):
         cfg = self.app.settings.get().polish
         self.assertTrue(cfg.auto_start_server)

@@ -1,8 +1,9 @@
 @echo off
 rem ============================================================
-rem  MyFLOW: ???? ???? ? TUI ??? ????????? ??????? (??????),
-rem  ?????????? ????? ???????? ? ????? ????????.
-rem  ???????: whisper :8081 + llama :8082, ???? ? data\*.log
+rem  MyFLOW: odno okno - TUI (panel, mikrofon, servera).
+rem  Servers (llama/whisper) podnimaet sam i GASIT PRI VYHODE:
+rem  nichego ne ostayotsya v pamyati/VRAM (pri ige eto vazhno).
+rem  Logi: data\*.log
 rem ============================================================
 title MyFLOW
 setlocal EnableDelayedExpansion
@@ -24,12 +25,21 @@ if not exist "%~dp0.venv\Scripts\python.exe" (
   exit /b 1
 )
 
-rem --- 2. TUI (servery podnimaet sam, otdel'nyh okon bolshe net) ---
+rem --- 2. ubiraem hvosty ot proshlogo zapuska (posle krasha/ubijstva processa) ---
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\stop-servers.ps1" -Quiet >nul 2>&1
+
+rem --- 3. TUI (servery podnimaet sam, otdel'nyh okon bolshe net) ---
 "%~dp0.venv\Scripts\python.exe" -X utf8 -m myflow.tui
 set "RC=%ERRORLEVEL%"
+
+rem --- 4. GASIM SERVERY POSLE VYHODA: osvobozhdaem pamyat i VRAM ---
+rem  TUI gasit ih sam pri normal'nom vyhode, a etot shag dobitvaet ostavshiesya
+rem  (zakrytie okna krestikom, krash, Stop-Process). Trogayutsya TOLKO
+rem  processy iz papki proekta - chuzhie sborki llama.cpp ne zadety.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\stop-servers.ps1"
 if not "%RC%"=="0" (
   echo.
-  echo [MyFLOW] TUI zavershilsya s kodom %RC%. Logi: data\main.log, data\asr.log.err, data\llm.log.err
+  echo [MyFLOW] TUI zavershilsya s kodom %RC%. Logi: data\main.log, data\llm.log
   pause
 )
 exit /b %RC%
