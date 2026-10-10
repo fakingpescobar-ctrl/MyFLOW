@@ -27,7 +27,6 @@ import argparse
 import ctypes
 import io
 import msvcrt
-import os
 import re
 import shutil
 import socket
@@ -1576,7 +1575,8 @@ class TuiApp:
                 if counters.get("deferred_polish"):
                     notes.append(f"{counters['deferred_polish']} фраз ждут дополировки")
                 scan_note = ("  ·  " + "  ·  ".join(notes)) if notes else ""
-                painted = self.console.draw(render_panel(
+                try:
+                    frame_lines = render_panel(
                     snap, w, h, self._panel_header(), journal, offset, sel,
                     level=(meter.peak(), meter.error),
                     confirm=((self._confirm["question"], self._confirm["hint"])
@@ -1586,7 +1586,13 @@ class TuiApp:
                                  f" · отложено: {counters.get('pending', 0)}"
                                  f" · в очереди: {counters.get('queue', 0)}"
                                  f"{scan_note}"),
-                    counters=counters))
+                        counters=counters)
+                except Exception as exc:  # noqa: BLE001 — панель важнее бага в рендере
+                    # Ошибка отрисовки НЕ должна ронять TUI: показываем кадр-заглушку
+                    # и пишем в журнал, чтобы баг было видно.
+                    self.state.add_log(f"ошибка отрисовки: {exc!r}")
+                    frame_lines = render_error(f"Ошибка отрисовки панели: {exc}", w, h)
+                painted = self.console.draw(frame_lines)
                 # Частота опроса клавиш адаптивная: при записи/анимации часто,
                 # в покое редко — так TUI почти не занимает CPU, когда не нужен.
                 busy = bool(counters.get("pending")) or bool(counters.get("queue"))

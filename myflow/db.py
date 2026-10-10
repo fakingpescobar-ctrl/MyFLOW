@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import math
-import re
 import sqlite3
 import threading
 from dataclasses import dataclass, asdict, field

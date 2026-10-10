@@ -162,6 +162,18 @@ def app_descriptor() -> str:
     return f"{proc} | {title}" if proc else title
 
 
+def _set_thread_priority_below_normal() -> None:
+    """Понизить приоритет ТЕКУЩЕГО потока (Windows): фоновые загрузки не мешают UI."""
+    if sys.platform != "win32":
+        return
+    try:
+        THREAD_PRIORITY_BELOW_NORMAL = -1
+        ctypes.windll.kernel32.SetThreadPriority(
+            ctypes.windll.kernel32.GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL)
+    except Exception:  # noqa: BLE001 — не критично
+        pass
+
+
 def _health_check(whisper) -> bool:
     """Fail fast на старте: если ASR не готов, сказать громко и упасть.
 
@@ -321,6 +333,8 @@ class MyFlowApp:
         # Живость движков для панели: считается в фоне, панель читает кэш.
         self._health: dict = {}
         self._health_thread: threading.Thread | None = None
+        # Остановка воркера фраз (отдельно от _stopping).
+        self._worker_stop = threading.Event()
         # Выгрузка LLM под игры: стоп сервера + сторож полного экрана.
         self._server_stopper = None
         self._game_watch: threading.Thread | None = None
@@ -335,19 +349,22 @@ class MyFlowApp:
     # ---- запуск / останов ----
 
     def start(self) -> None:
-        if not _health_check(self.whisper):
-            raise RuntimeError(
-                f"whisper-server не отвечает на {self.whisper.cfg.url}/health — "
-                "запусти scripts/start-asr.ps1"
-            )
-        if self.polish.cfg.enabled and not _health_check_llm(self.polish):
-            print(f"[myflow] WARNING: llama-server не отвечает на {self.polish.cfg.url} — "
-                  f"полировка отключена до поднятия сервера (scripts/start-llm.ps1)")
-            self.polish.cfg.enabled = False
-            self._ensure_polish_watchdog()
+        # Проверка ASR — в ФОНЕ: для whisper это HTTP (до ~0.7 с ожидания при
+        # закрытом порте) и запуск приложения ждал её. Если сервер мёртв, мы это
+        # скажем, а фраза не потеряется: отказ ASR пишется в историю с аудио,
+        # плюс работает резерв на GigaAM (_asr_fallback).
+        threading.Thread(target=self._check_asr_background, daemon=True,
+                         name="asr-check").start()
+        # Проверку LLM здесь НЕ делаем: при лежащем сервере она стоит ~0.35 с и
+        # задерживала запуск. Этим занимается фоновый прогрев (_prewarm_llm_work)
+        # и сторож полировки; _polish_safe умеет быстро отказаться без сервера.
+        pass
         if self.settings.get().flags["overlay"]:
             self.overlay.start()
-        self._start_ax()
+        # AX поднимаем в ФОНЕ: его старт ждёт ответа PowerShell-хелпера (~0.19 с)
+        # и держал запуск приложения. Пока не готов — правки ловим через буфер.
+        threading.Thread(target=self._start_ax, daemon=True,
+                         name="ax-start").start()
         self._warm_asr()
         # Приватность/размер: чистим историю старше retention (по умолчанию 90 дней).
         try:
@@ -359,7 +376,10 @@ class MyFlowApp:
         self._worker = threading.Thread(target=self._worker_loop, daemon=True,
                                         name="phrase-worker")
         self._worker.start()
-        self._start_listener()
+        # Слушатель хоткеев — в ФОНЕ: при повторной установке Win32-хука pynput
+        # ждёт ~0.65 с (замер), и старт/перезапуск пульта висел. Сторож
+        # (_listener_watchdog_loop) поднимет его заново, если что-то не так.
+        self._start_listener_async()
         self._listener_watchdog = threading.Thread(
             target=self._listener_watchdog_loop, daemon=True, name="listener-watchdog")
         self._listener_watchdog.start()
@@ -466,17 +486,35 @@ class MyFlowApp:
         self._health_thread.start()
 
     def _prewarm_llm(self) -> None:
-        """Поднять LLM сразу при запуске (фоном), не дожидаясь первой фразы."""
+        """Поднять LLM сразу при запуске — НЕ блокируя старт приложения.
+
+        Проверка живости при лежащем сервере стоит ~0.36 с (порт не отвергает,
+        а «висит» до connect-таймаута), и старт приложения ждал её. Теперь
+        проверка и запуск сервера идут отдельным потоком: пульт появляется
+        мгновенно, а LLM догоняет в фоне.
+        """
         if not self.polish.cfg.enabled:
             return
         if not getattr(self.polish.cfg, "auto_start_server", True):
             return
+        threading.Thread(target=self._prewarm_llm_work, daemon=True,
+                         name="llm-prewarm").start()
+
+    def _prewarm_llm_work(self) -> None:
         try:
             if _health_check_llm(self.polish):
                 print("[myflow] LLM уже отвечает — прогрев не нужен")
                 return
         except Exception:  # noqa: BLE001
             pass
+        # Сервера нет: честно говорим и выключаем полировку до его поднятия —
+        # раньше это делал start(), но проверка блокировала запуск на ~0.35 с.
+        if self.polish.cfg.enabled:
+            print(f"[myflow] WARNING: llama-server не отвечает на "
+                  f"{self.polish.cfg.url} — полировка отключена до поднятия "
+                  f"сервера (scripts/start-llm.ps1)")
+            self.polish.cfg.enabled = False
+            self._ensure_polish_watchdog()
         print("[myflow] LLM не отвечает — поднимаю заранее (в фоне)")
         self._ensure_llm_async()
 
@@ -497,6 +535,16 @@ class MyFlowApp:
             print("[myflow]   статусы: " + ", ".join(
                 f"{k}={v}" for k, v in st["by_status"].items()))
 
+    def _check_asr_background(self) -> None:
+        """Предупредить, если ASR недоступен (не блокируя старт приложения)."""
+        try:
+            if not _health_check(self.whisper):
+                url = getattr(getattr(self.whisper, "cfg", None), "url", "")
+                print(f"[myflow] WARNING: ASR не отвечает ({url or 'локальная модель'}) — "
+                      f"фразы пойдут через резерв (GigaAM) или в retry")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[myflow] проверка ASR не удалась: {exc!r}")
+
     def _warm_asr(self) -> None:
         """Прогреть локальную ASR-модель в фоне (GigaAM грузится ~20-30 с).
 
@@ -508,6 +556,9 @@ class MyFlowApp:
             return
 
         def _run() -> None:
+            # Понижаем приоритет потока: загрузка ONNX-модели держит GIL и
+            # подтормаживает отрисовку панели (~0.6 с). Так интерфейс плавнее.
+            _set_thread_priority_below_normal()
             try:
                 if not warmup():
                     print("[myflow] локальная ASR-модель не загрузилась — "
@@ -921,7 +972,13 @@ class MyFlowApp:
         return False, f"неизвестный модуль: {key}"
 
     def stop(self) -> None:
-        self._stopping.set()      # гасим фоновые петли (в т.ч. сэмплер фокуса)
+        self._stopping.set()
+        # Гасим воркер рекордера: иначе он живёт после stop()
+        self._worker_stop.set()
+        try:
+            self.recorder.shutdown()
+        except Exception:  # noqa: BLE001
+            pass      # гасим фоновые петли (в т.ч. сэмплер фокуса)
         if self._listener:
             self._listener.stop()
         if self._pref_auto:
@@ -1015,11 +1072,28 @@ class MyFlowApp:
         )
         self._listener.start()
 
+    def _start_listener_async(self) -> None:
+        """Поднять слушатель хоткеев, не блокируя старт приложения."""
+        threading.Thread(target=self._start_listener_safe, daemon=True,
+                         name="listener-start").start()
+
+    def _start_listener_safe(self) -> None:
+        try:
+            self._start_listener()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[myflow] слушатель хоткеев не поднялся: {exc!r} "
+                  f"(сторож попробует снова)")
+
     def _listener_watchdog_loop(self, interval: float = 2.0) -> None:
-        """Страховка: если слушатель хоткеев умер — поднять заново."""
-        while True:
-            time.sleep(interval)
+        """Страховка: если слушатель хоткеев умер — поднять заново.
+
+        Цикл завершается по stop(): иначе при перезапуске пульта (клавиша r)
+        поток оставался жить и копился (замер: 4 потока на каждый перезапуск).
+        """
+        while not self._stopping.wait(interval):
             try:
+                if self._stopping.is_set():
+                    break
                 if self._listener is None or not self._listener.is_alive():
                     print("[myflow] ! слушатель хоткеев умер — перезапускаю")
                     self._start_listener()
@@ -1057,8 +1131,7 @@ class MyFlowApp:
 
     def _polish_watchdog_loop(self, interval: float = 30.0) -> None:
         """Если полировка выключена (сервер лежал) — вернуть её, когда поднимется."""
-        while True:
-            time.sleep(interval)
+        while not self._stopping.wait(interval):
             try:
                 if self.polish.cfg.enabled:
                     continue
@@ -1402,7 +1475,9 @@ class MyFlowApp:
     # ---- worker: последовательный пайплайн ----
 
     def _worker_loop(self) -> None:
-        while True:
+        # Отдельное событие: _stopping взводится ещё и тестами/встраиванием, а
+        # воркер должен жить до настоящего stop() приложения.
+        while not self._worker_stop.is_set():
             try:
                 job = self._queue.get(timeout=0.25)
             except queue.Empty:

@@ -249,6 +249,7 @@ def make_app(auto=False, busy=False, gen=0, polish_enabled=False, paster=None):
     app._deferred_polish_count = 0
     app._stopping = threading.Event()
     app._stopping.set()
+    app._worker_stop = threading.Event()      # воркер живёт до stop()
     app._guard_polish = MyFlowApp._guard_polish
     return app
 

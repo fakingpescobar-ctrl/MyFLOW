@@ -124,7 +124,6 @@ class GigaAmClient:
     # ---- инференс ----
 
     def transcribe(self, pcm_int16: np.ndarray):
-        from myflow.asr import AsrResult
         if pcm_int16.dtype != np.int16:
             raise TypeError(f"ожидался int16 PCM, получил {pcm_int16.dtype}")
         if pcm_int16.size == 0:

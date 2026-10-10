@@ -136,6 +136,9 @@ class DictationRecorder:
         # PortAudio-callback в отдельный поток: в колбэке только копия буфера.
         # Раньше инференс шёл в RT-потоке и рядом с whisper/llama давал underflow.
         self._work_q: queue.Queue = queue.Queue(maxsize=512)
+        # Остановка воркера: без неё поток живёт после stop() приложения и
+        # копится при каждом перезапуске пульта.
+        self._stopped = threading.Event()
         self._worker = threading.Thread(target=self._work_loop, daemon=True,
                                         name="audio-worker")
         self._worker.start()
@@ -581,10 +584,24 @@ class DictationRecorder:
                 print(f"[audio] очередь обработки переполнена "
                       f"(потеряно чанков: {self._dropped_chunks})")
 
+    def shutdown(self) -> None:
+        """Остановить воркер разбора чанков (вызывается из MyFlowApp.stop())."""
+        self._stopped.set()
+        try:
+            self._drain_work_queue()
+        except Exception:  # noqa: BLE001
+            pass
+        worker = getattr(self, "_worker", None)
+        if worker is not None and worker.is_alive():
+            worker.join(timeout=1.0)
+
     def _work_loop(self) -> None:
         """Разбор чанков вне RT-потока: VAD, Int16, состояние фразы."""
-        while True:
-            indata, frames, status = self._work_q.get()
+        while not self._stopped.is_set():
+            try:
+                indata, frames, status = self._work_q.get(timeout=0.25)
+            except Exception:  # noqa: BLE001 — queue.Empty
+                continue
             try:
                 if self._continuous:
                     self._on_audio_continuous(indata)

@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import queue
 import subprocess
 import threading
@@ -286,7 +285,6 @@ class AxWatcher:
 
 def main() -> int:
     """CLI-проба: `python -m myflow.axtext` — прочитать поле в фокусе."""
-    import sys
     reader = AxReader()
     if not reader.start():
         print(f"[ax] недоступно: {reader.last_error}")
