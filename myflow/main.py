@@ -33,7 +33,8 @@ from myflow.audio_store import AudioStore
 from myflow.axtext import AxReader, AxWatcher
 from myflow.db import Database, DictationRecord
 from myflow.config import SettingsStore, DATA_DIR, DEFAULT_APP_CATEGORIES, detect_category
-from myflow.fastpath import fast_path_allowed
+from myflow.fastpath import fast_path_allowed, looks_wellformed
+from myflow.lightclean import light_clean
 from myflow.pick_mic import fast_mic_list
 from myflow.voiceprint import VoiceGate
 from myflow.winfocus import (FocusHistory, WindowRef, current_window,
@@ -1481,14 +1482,30 @@ class MyFlowApp:
         # Экономит 110-180 мс на фразе (полировка дороже распознавания).
         fast_ok, fast_reason = False, ""
         cfg_polish = self.settings.get().polish
+        backend_name = getattr(self.whisper, "backend_name", "")
         if self.polish.cfg.enabled and getattr(cfg_polish, "skip_wellformed", True):
-            fast_ok, fast_reason = fast_path_allowed(
-                getattr(self.whisper, "backend_name", ""), style, asr.text)
+            fast_ok, fast_reason = fast_path_allowed(backend_name, style, asr.text)
+        # Лёгкая чистка БЕЗ LLM: филлеры/«...»/двойная пунктуация/заглавная.
+        # Если после неё текст стал оформленным — полировку не зовём вовсе
+        # (замер: такие фразы стоят ~280 мс LLM, а чистка — микросекунды).
+        local_rules: list[str] = []
+        fast_text = asr.text
+        if (not fast_ok and self.polish.cfg.enabled
+                and getattr(cfg_polish, "light_clean", True)
+                and "gigaam" in (backend_name or "").lower()
+                and style in ("plain", "casual")):
+            cleaned, local_rules = light_clean(asr.text)
+            if local_rules and looks_wellformed(cleaned)[0]:
+                fast_text = cleaned
+                fast_ok = True
+                fast_reason = "лёгкая чистка: " + ", ".join(local_rules)
+            else:
+                local_rules = []
         if fast_ok:
-            final_text = asr.text
-            divergence = 0.0
+            final_text = fast_text
+            divergence = divergence_score(asr.text, final_text) if local_rules else 0.0
             polish_failed = False
-            record_status = "fast_path"
+            record_status = "local_polish" if local_rules else "fast_path"
         else:
             if self.polish.cfg.enabled:
                 self.overlay.show("⚙ полировка…", "#f5c542")
@@ -1511,7 +1528,11 @@ class MyFlowApp:
 
         # Видимость полировки: показываем исходный ASR и результат LLM,
         # чтобы было понятно, что именно изменила модель.
-        if fast_ok:
+        if fast_ok and local_rules:
+            print(f"[myflow]   LLM: лёгкая чистка без модели ({', '.join(local_rules)})")
+            print(f"[myflow]   ASR : {asr.text}")
+            print(f"[myflow]   было→стало: {final_text}")
+        elif fast_ok:
             print(f"[myflow]   LLM: быстрый путь ({fast_reason}) — полировка не нужна")
         elif polished.skipped:
             print("[myflow]   LLM: выключена — вставлен сырой ASR")

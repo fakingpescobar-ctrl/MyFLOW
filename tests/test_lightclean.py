@@ -1,0 +1,148 @@
+"""Лёгкая чистка без LLM: филлеры, мусор в начале, пунктуация, заглавные."""
+import sys
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from myflow.fastpath import looks_wellformed
+from myflow.lightclean import light_clean
+
+
+class LightCleanTest(unittest.TestCase):
+    def test_removes_leading_fillers(self):
+        cases = {
+            "Ну что там, брат? Как дела?": "Что там, брат? Как дела?",
+            "Короче, я двигаю твоё окно.": "Я двигаю твоё окно.",
+            "Так, смотри, оно работает.": "Смотри, оно работает.",
+            "эээ ну это самое, проверка связи.": "Это самое, проверка связи.",
+            "Ну да, тогда делай всё по очереди.": "Да, тогда делай всё по очереди.",
+        }
+        for src, want in cases.items():
+            with self.subTest(src=src):
+                got, rules = light_clean(src)
+                self.assertEqual(got, want)
+                self.assertTrue(rules, "должны быть применённые правила")
+
+    def test_keeps_meaningful_words(self):
+        """«так»/«вот» без запятой — смысловые, их трогать нельзя."""
+        for src in ("Так работает.", "Вот дом стоит.", "Так и должно быть."):
+            with self.subTest(src=src):
+                got, rules = light_clean(src)
+                self.assertEqual(got, src)
+                self.assertEqual(rules, [])
+
+    def test_cleans_leading_noise_and_capitalizes(self):
+        got, rules = light_clean("...проверка связи идёт")
+        self.assertEqual(got, "Проверка связи идёт.")
+        self.assertIn("убран мусор в начале", rules)
+
+    def test_collapses_duplicate_punctuation(self):
+        got, _ = light_clean("Это телевизоре.. Работает .")
+        self.assertEqual(got, "Это телевизоре. Работает.")
+
+    def test_capitalizes_after_sentence_end(self):
+        got, rules = light_clean("Проверка связи. потому что важно.")
+        self.assertEqual(got, "Проверка связи. Потому что важно.")
+        self.assertIn("заглавная после точки", rules)
+
+    def test_adds_trailing_period(self):
+        got, rules = light_clean("проверка связи идёт")
+        self.assertEqual(got, "Проверка связи идёт.")
+        self.assertIn("добавлена точка", rules)
+
+    def test_already_clean_text_untouched(self):
+        for src in ("Проверка связи, один, два, три.",
+                    "Сегодня хорошая погода, пойдём гулять.",
+                    "Открой пожалуйста окно."):
+            with self.subTest(src=src):
+                got, rules = light_clean(src)
+                self.assertEqual(got, src)
+
+    def test_idempotent(self):
+        once, _ = light_clean("ну ...проверка связи.. как дела")
+        twice, rules = light_clean(once)
+        self.assertEqual(once, twice)
+        self.assertEqual(rules, [], "повторная чистка ничего не меняет")
+
+    def test_empty_and_short_safe(self):
+        for src in ("", "   ", "ну", "да."):
+            with self.subTest(src=src):
+                got, rules = light_clean(src)
+                self.assertIsInstance(got, str)
+                self.assertIsInstance(rules, list)
+
+    def test_does_not_break_word_with_filler_prefix(self):
+        """«нужно»/«такой» не должны попадать под правило филлеров."""
+        for src in ("Нужно проверить связь.", "Такой вариант подходит."):
+            with self.subTest(src=src):
+                got, rules = light_clean(src)
+                self.assertEqual(got, src)
+                self.assertEqual(rules, [])
+
+    def test_result_passes_fast_path(self):
+        """Смысл всей затеи: после чистки текст считается оформленным."""
+        for src in ("Ну что там, брат? Как дела?",
+                    "Короче, я двигаю твоё окно и смотрю.",
+                    "...проверка связи. потому что бывает",
+                    "Ну да, тогда делай всё по очереди."):
+            with self.subTest(src=src):
+                got, rules = light_clean(src)
+                self.assertTrue(rules)
+                ok, why = looks_wellformed(got)
+                self.assertTrue(ok, f"после чистки всё ещё не оформлено: {why}")
+
+
+class LightCleanInPipelineTest(unittest.TestCase):
+    """Фраза с филлером не должна звать LLM вообще."""
+
+    def setUp(self):
+        from unittest import mock
+        import myflow.main as M
+        from test_main_flow import make_app
+        self.mock = mock
+        self.app = make_app(polish_enabled=True)
+        self.app.polish.polish = mock.Mock(
+            side_effect=AssertionError("LLM не должна вызываться при лёгкой чистке"))
+        r = mock.Mock()
+        r.text = "Ну что там, брат? Как дела?"
+        r.language = "ru"
+        r.latency_ms = 120
+        self.app.whisper = mock.Mock(backend_name="gigaam", health=lambda: True,
+                                     transcribe=lambda *a, **k: r)
+        self.app._pick_style = lambda: "plain"
+        self.app.voice.check = lambda pcm: (True, None, "ок")
+
+    def _run(self, text):
+        from test_main_flow import Recording
+        import numpy as np
+        r = self.mock.Mock()
+        r.text = text
+        r.language = "ru"
+        r.latency_ms = 120
+        self.app.whisper.transcribe = lambda *a, **k: r
+        rec = Recording(pcm_int16=np.zeros(32000, dtype=np.int16),
+                        duration_ms=2000, max_amplitude=0.5)
+        self.app._process_recording(0, rec)
+
+    def test_filler_phrase_bypasses_llm(self):
+        self._run("Ну что там, брат? Как дела?")
+        self.app.polish.polish.assert_not_called()
+        inserted = " ".join(self.app.paster.calls)
+        self.assertIn("Что там", inserted, f"вставлено: {inserted!r}")
+        statuses = [r.status for r in self.app.db.records]
+        self.assertIn("local_polish", statuses, f"статусы: {statuses}")
+
+    def test_phrase_needing_real_polish_still_uses_llm(self):
+        """Опечатки/числа словами — по-прежнему в LLM."""
+        self.app.polish.polish = self.mock.Mock(
+            side_effect=AssertionError("LLM не должна вызываться"))
+        # «один, два, три» — числа словами, чистка их не трогает -> должен пойти LLM
+        try:
+            self._run("Проверка связи, один, два, три.")
+        except AssertionError:
+            self.fail("фраза с числами словами должна идти в LLM, а не в чистку")
+
+
+if __name__ == "__main__":
+    unittest.main()
