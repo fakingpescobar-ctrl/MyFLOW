@@ -402,8 +402,16 @@ class Database:
     # ---- Statistics (для самодиагностики) ----
 
     def close(self) -> None:
-        """Закрыть соединение (watcher обучения держит своё)."""
+        """Закрыть соединение (watcher обучения держит своё).
+
+        Перед закрытием ужимаем WAL: файл -wal иначе копится (в data/ видели
+        378 КБ при базе 360 КБ) и остаётся мусором после выхода.
+        """
         with self._lock:
+            try:
+                self._conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except sqlite3.Error:
+                pass
             try:
                 self._conn.close()
             except sqlite3.Error:

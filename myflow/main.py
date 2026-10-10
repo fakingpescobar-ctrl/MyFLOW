@@ -390,6 +390,10 @@ class MyFlowApp:
         self._ensure_mic_watchdog()
         # Сторож игр: полный экран -> выгружаем LLM, VRAM уходит игре.
         self._ensure_game_watch()
+        # Гигиена: не даём логам расти без предела.
+        rotated = rotate_all_logs()
+        if rotated:
+            print(f"[myflow] логи перевёрнуты: {', '.join(rotated)}")
         # И прогреваем LLM заранее: холодный старт llama-server — это ~8 секунд, и
         # если пользователь начнёт диктовать раньше, фраза уйдёт сырым ASR.
         self._prewarm_llm()
@@ -2284,6 +2288,29 @@ def _rotate_log(path: Path, max_bytes: int = 2_000_000) -> None:
             path.rename(backup)
     except OSError:
         pass
+
+
+def rotate_all_logs(max_bytes: int = 2_000_000) -> list[str]:
+    """Ротация всех логов проекта: main.log, llm.log, asr.log и *.log.err.
+
+    Серверные логи (llama/whisper) росли без ограничений: в data/ накопилось
+    больше десятка *.log.err от экспериментов с моделями. Теперь при старте
+    каждый лог больше лимита уезжает в <имя>.1 (один бэкап, старый удаляется).
+    """
+    rotated: list[str] = []
+    try:
+        data = Path(__file__).resolve().parent.parent / "data"
+        if not data.is_dir():
+            return rotated
+        for path in data.glob("*.log*"):
+            if path.name.endswith(".1") or not path.is_file():
+                continue
+            if path.stat().st_size > max_bytes:
+                _rotate_log(path, max_bytes)
+                rotated.append(path.name)
+    except OSError:
+        pass
+    return rotated
 
 
 def _tee_log(max_bytes: int = 2_000_000) -> None:
