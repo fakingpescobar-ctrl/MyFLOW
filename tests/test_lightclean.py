@@ -1,6 +1,7 @@
 """Лёгкая чистка без LLM: филлеры, мусор в начале, пунктуация, заглавные."""
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -181,6 +182,27 @@ class LightCleanInPipelineTest(unittest.TestCase):
         self.assertFalse(self.app.polish.polish.called,
                          "LLM вызвана при лёгкой чистке, стек:\n"
                          + "\n".join(self._llm_calls))
+
+# ---------------------------------------------------------------------------
+# Тесты маршрутизации (идёт фраза в LLM или нет) не должны зависеть от того,
+# запущен ли сейчас llama-server: _polish_safe сначала спрашивает живость LLM и
+# при мёртвом сервере честно уходит в быстрый отказ, не вызывая клиента.
+# ---------------------------------------------------------------------------
+_MODULE_PATCHES: list = []
+
+
+def setUpModule() -> None:
+    import myflow.main as _M
+    p = mock.patch.object(_M, "_health_check_llm", return_value=True)
+    p.start()
+    _MODULE_PATCHES.append(p)
+
+
+def tearDownModule() -> None:
+    for patcher in reversed(_MODULE_PATCHES):
+        patcher.stop()
+    _MODULE_PATCHES.clear()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -558,8 +558,8 @@ class MyFlowApp:
         modules = [
             {"key": "asr", "label": "ASR", "value": self._asr_label(), "on": True,
              "ok": asr_ok, "note": "распознавание речи",
-             "hint": "Enter — сменить движок: whisper поднимает сервер (:8081), "
-                     "GigaAM работает всегда и выгружает whisper"},
+             "hint": "Enter — сменить движок (спросит подтверждение): whisper "
+                     "поднимает сервер :8081, GigaAM работает всегда"},
             {"key": "vad", "label": "VAD", "value": f"Silero v6 · {vad_threshold:.2f}",
              "on": bool(s.auto_stop_by_silence), "ok": True, "note": "детектор речи",
              "hint": "←→ порог, Enter — автостоп по паузе"},

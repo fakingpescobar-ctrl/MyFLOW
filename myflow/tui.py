@@ -996,10 +996,56 @@ def key_legend(width: int, module_hint: str | None = None) -> list[str]:
     return lines
 
 
+def stamp_confirm(lines: Sequence[str], question: str, hint: str,
+                  w: int) -> list[str]:
+    """Наложить модальное подтверждение по центру кадра (Да/Нет).
+
+    Кадр уже нарисован (рамка на всю ширину), поэтому аккуратно подменяем
+    несколько центральных строк: рамку и выравнивание сохраняем, ширина каждой
+    строки остаётся w (draw() обрезает по ней).
+    """
+    out = list(lines)
+    inner = max(10, w - 2)
+    box_w = min(inner - 4, max(48, vlen(question) + 6, vlen(hint) + 6))
+    box_w = max(30, box_w)
+    pad = max(0, (inner - box_w) // 2)
+
+    def centered(text: str) -> str:
+        room = box_w - 2
+        text = fit_width(text, room)
+        visible = vlen(strip_ansi(text))
+        left = max(0, (room - visible) // 2)
+        return (" " * left + text + " " * max(0, room - visible - left))
+
+    title = " Подтверждение "
+    head = (f"{C_WARN}╔═{RESET}{BOLD}{C_WARN}{title}{RESET}"
+            f"{C_WARN}" + "═" * max(0, box_w - 2 - len(title)) + f"╗{RESET}")
+    bottom = f"{C_WARN}╚" + "═" * (box_w - 2) + f"╝{RESET}"
+    body = [
+        f"{C_WARN}║{RESET}{centered(C_TEXT + question + RESET)}{C_WARN}║{RESET}",
+        f"{C_WARN}║{RESET}{centered('')}{C_WARN}║{RESET}",
+        f"{C_WARN}║{RESET}{centered(C_OK + 'Да — Enter / y' + RESET + C_DIM + '     ' +
+                                C_ERR + 'Нет — n / Esc' + RESET)}{C_WARN}║{RESET}",
+        f"{C_WARN}║{RESET}{centered(C_DIM + hint + RESET)}{C_WARN}║{RESET}",
+    ]
+    box = [head] + body + [bottom]
+    top = max(1, (len(out) - len(box)) // 2)
+    for i, box_line in enumerate(box):
+        idx = top + i
+        if idx >= len(out) - 1:
+            break
+        visible = vlen(strip_ansi(box_line))
+        right = max(0, inner - pad - visible)
+        out[idx] = (f"{C_BORDER}║{RESET}" + " " * pad + box_line + " " * right
+                    + f"{C_BORDER}║{RESET}")
+    return out
+
+
 def render_panel(snap: dict, w: int, h: int, cfg_line: str,
                  journal: Sequence[str], scroll: int, sel: int,
                  level: tuple[float, str] | None = None,
-                 status_line: str = "", counters: dict | None = None) -> list[str]:
+                 status_line: str = "", counters: dict | None = None,
+                 confirm: tuple[str, str] | None = None) -> list[str]:
     """Единый пульт-центр: движки, управление, живой уровень, журнал, клавиши."""
     modules = snap.get("modules", [])
     values = snap.get("values", [])
@@ -1069,7 +1115,11 @@ def render_panel(snap: dict, w: int, h: int, cfg_line: str,
             "Журнал (PgUp/PgDn — листать)", [C_DIM + r + RESET for r in shown], w - 6)]
     body.append("")
     body += ["  " + line for line in legend]
-    return outer_frame("MyFLOW · пульт-центр", body, w, h)
+    frame = outer_frame("MyFLOW · пульт-центр", body, w, h)
+    if confirm is not None:
+        # Модальное подтверждение: перекрывает кадр, пока не ответишь.
+        frame = stamp_confirm(frame, confirm[0], confirm[1], w)
+    return frame
 
 
 def render_dashboard(state: TuiState, w: int, h: int, cfg_line: str) -> list[str]:
@@ -1181,6 +1231,10 @@ class TuiApp:
         self._overlay = None
         self._demo = False
         self._force_settings = False   # --settings: показать мастер даже при готовом конфиге
+        # True — приложение создали мы сами (тогда и гасим его при выходе).
+        self._app_owned = False
+        # Модальное подтверждение (смена движка ASR): (вопрос, подсказка, действие)
+        self._confirm: dict | None = None
 
     # ---- инфраструктура ----
     def _install_sink(self) -> None:
@@ -1408,19 +1462,24 @@ class TuiApp:
         self._overlay = TuiOverlay(self.state, self._gfx)
 
         self.state.add_log("MyFLOW запущен. F8 — диктовка, F9 — отмена, F7 — стиль.")
-        try:
-            self.app = MyFlowApp(overlay=self._overlay)
-        except Exception as exc:  # noqa: BLE001
-            self._show_error(str(exc))
-            return "quit"
-        # Автолечение LLM: приложение просит поднять/погасить сервер — TUI умеет.
-        self.app.set_server_guard(self._ensure_server_alive)
-        self.app.set_server_stopper(self._stop_server_by_key)
-        try:
-            self.app.start()
-        except Exception as exc:  # noqa: BLE001
-            self._show_error(str(exc))
-            return "quit"
+        # ВАЖНО: если приложение уже подсунуто (тесты, встраивание) — НЕ создаём
+        # своё. Раньше здесь всегда создавался новый MyFlowApp на ЖИВЫХ настройках,
+        # поэтому скриптовые тесты панели незаметно писали в data/settings.json.
+        if self.app is None:
+            try:
+                self.app = MyFlowApp(overlay=self._overlay)
+            except Exception as exc:  # noqa: BLE001
+                self._show_error(str(exc))
+                return "quit"
+            self._app_owned = True
+            # Автолечение LLM: приложение просит поднять/погасить сервер — TUI умеет.
+            self.app.set_server_guard(self._ensure_server_alive)
+            self.app.set_server_stopper(self._stop_server_by_key)
+            try:
+                self.app.start()
+            except Exception as exc:  # noqa: BLE001
+                self._show_error(str(exc))
+                return "quit"
         # Настройки — общие с приложением (одно хранилище, а не две копии).
         self.store = self.app.settings
         try:
@@ -1464,6 +1523,8 @@ class TuiApp:
                 self.console.draw(render_panel(
                     snap, w, h, self._panel_header(), journal, offset, sel,
                     level=(meter.peak(), meter.error),
+                    confirm=((self._confirm["question"], self._confirm["hint"])
+                             if self._confirm else None),
                     status_line=(f"{status_ansi}{norm_text(status_line)}{RESET}"
                                  f"  фраз: {counters.get('phrases', 0)}"
                                  f" · отложено: {counters.get('pending', 0)}"
@@ -1471,8 +1532,29 @@ class TuiApp:
                                  f"{scan_note}"),
                     counters=counters))
                 last_key = self._read_key(0.05)
-                if last_key in ("q", "ctrl-c"):
+                if last_key in ("q", "ctrl-c") and self._confirm is None:
                     return "quit"
+                if last_key == "ctrl-c":
+                    return "quit"
+                # Модальное подтверждение перехватывает клавиши, пока не ответишь.
+                if self._confirm is not None:
+                    if last_key in ("enter", "space", "y", "д"):
+                        action = self._confirm["action"]
+                        self._confirm = None
+                        self.state.add_log(f"подтверждено: {self._confirm_note(action)}")
+                        self._panel_apply(snap.get("modules", []),
+                                          snap.get("values", []), action["sel"],
+                                          action["key"], force=True)
+                    elif last_key in ("n", "esc", "backspace", "н", "q"):
+                        # ВАЖНО: q тоже закрывает окно (иначе из него нет выхода,
+                        # а выход из приложения заблокирован — окно модальное).
+                        self.state.add_log("отменено: движок не меняю")
+                        self._confirm = None
+                    else:
+                        # Любая другая клавиша при открытом окне — просто ждём
+                        # ответа (никаких действий по панели).
+                        pass
+                    continue
                 if last_key == "r":
                     return "settings"
                 if last_key == "s":
@@ -1492,15 +1574,23 @@ class TuiApp:
                 elif last_key in ("up", "down"):
                     sel = (sel + (1 if last_key == "down" else -1)) % max(1, len(rows))
                 elif last_key in ("left", "right", "enter", "space"):
-                    sel = self._panel_apply(snap.get("modules", []),
-                                             snap.get("values", []), sel, last_key)
+                    modules = snap.get("modules", [])
+                    values = snap.get("values", [])
+                    asr_sel = next((i for i, m in enumerate(modules)
+                                    if m.get("key") == "asr"), None)
+                    if (asr_sel == sel and self._confirm_needed()
+                            and last_key in ("enter", "space", "left", "right")):
+                        self._ask_asr_confirm(modules, values, sel, last_key)
+                    else:
+                        sel = self._panel_apply(modules, values, sel, last_key)
         finally:
             meter.stop()
-            try:
-                self.app.stop()
-            except Exception:  # noqa: BLE001
-                pass
-            self.app = None
+            if self._app_owned:
+                try:
+                    self.app.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+                self.app = None
         return "quit"
 
     def _control_snapshot(self) -> dict:
@@ -1514,8 +1604,46 @@ class TuiApp:
             self.state.add_log(f"панель: {exc!r}")
             return {"modules": [], "values": [], "counters": {}}
 
+    # ---- подтверждение опасных действий ----
+
+    def _confirm_needed(self) -> bool:
+        """Нужно ли подтверждать смену движка (настройка asr.confirm_switch)."""
+        try:
+            return bool(getattr(self._store().get().asr, "confirm_switch", True))
+        except Exception:  # noqa: BLE001
+            return True
+
+    def _ask_asr_confirm(self, modules: list[dict], values: list[dict],
+                         sel: int, key: str) -> None:
+        """Спросить подтверждение перед сменой движка распознавания.
+
+        Смена движка — не косметика: whisper требует поднять сервер на :8081, и
+        если это не выйдет, распознавание перестанет работать. Поэтому Enter на
+        строке ASR сначала спрашивает «уверен?».
+        """
+        engine = ""
+        try:
+            engine = getattr(getattr(self.app, "whisper", None), "backend_name", "")
+        except Exception:  # noqa: BLE001
+            engine = ""
+        to_whisper = "gigaam" in (engine or "").lower()
+        if to_whisper:
+            question = "Переключить распознавание на whisper?"
+            hint = "Будет поднят whisper-сервер на :8081; GigaAM останется резервом"
+        else:
+            question = "Вернуть распознавание на GigaAM?"
+            hint = "Локальная модель на CPU; whisper-сервер выгрузится (~1 ГБ VRAM)"
+        self._confirm = {"question": question, "hint": hint,
+                         "action": {"sel": sel, "key": "enter", "engine": engine}}
+
+    @staticmethod
+    def _confirm_note(action: dict) -> str:
+        engine = (action or {}).get("engine", "")
+        return ("переключаю на GigaAM" if "gigaam" in (engine or "").lower()
+                else "переключаю на whisper")
+
     def _panel_apply(self, modules: list[dict], values: list[dict],
-                     sel: int, key: str) -> int:
+                     sel: int, key: str, force: bool = False) -> int:
         """Применить нажатие к выделенной строке панели. Возвращает новый выбор.
 
         Тип строки определяем по позиции (индекс >= числа модулей). Раньше здесь

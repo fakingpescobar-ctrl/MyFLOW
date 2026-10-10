@@ -157,6 +157,9 @@ class AsrConfig:
     backend: str = "auto"
     gigaam_model: str = "gigaam-v3-e2e-ctc"
     gigaam_quantization: str = "int8"
+    # Подтверждать смену движка распознавания (whisper требует сервер
+    # на :8081, GigaAM работает всегда) — чтобы случайный Enter не ломал ASR.
+    confirm_switch: bool = True
 
 
 @dataclass
