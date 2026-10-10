@@ -465,6 +465,54 @@ class Console:
             pass
         self.mouse = False
 
+    def dump_screen(self, path, intended: list[str] | None = None) -> str:
+        """Сохранить то, что РЕАЛЬНО на экране, и то, что мы хотели нарисовать.
+
+        Нужно для диагностики: если картинка «слипается», видно разницу между
+        задуманным кадром и тем, что оказалось в консоли.
+        """
+        try:
+            class _Coord(ctypes.Structure):
+                _fields_ = [("X", ctypes.c_short), ("Y", ctypes.c_short)]
+
+            class _SmallRect(ctypes.Structure):
+                _fields_ = [("Left", ctypes.c_short), ("Top", ctypes.c_short),
+                            ("Right", ctypes.c_short), ("Bottom", ctypes.c_short)]
+
+            class _Csbi(ctypes.Structure):
+                _fields_ = [("dwSize", _Coord), ("dwCursorPosition", _Coord),
+                            ("wAttributes", ctypes.c_ushort), ("srWindow", _SmallRect),
+                            ("dwMaximumWindowSize", _Coord)]
+
+            handle = ctypes.windll.kernel32.GetStdHandle(-11)
+            info = _Csbi()
+            ctypes.windll.kernel32.GetConsoleScreenBufferInfo(handle, ctypes.byref(info))
+            win_w = info.srWindow.Right - info.srWindow.Left + 1
+            win_h = info.srWindow.Bottom - info.srWindow.Top + 1
+            rows: list[str] = []
+            buf = ctypes.create_unicode_buffer(win_w + 1)
+            written = ctypes.c_ulong()
+            for y in range(info.srWindow.Top, info.srWindow.Bottom + 1):
+                ctypes.windll.kernel32.ReadConsoleOutputCharacterW(
+                    handle, buf, win_w, _Coord(0, y), ctypes.byref(written))
+                rows.append(buf.value[: written.value].rstrip())
+            head = [f"окно={win_w}x{win_h} буфер={info.dwSize.X}x{info.dwSize.Y} "
+                    f"вьюпорт_top={info.srWindow.Top}",
+                    f"нарисованных строк в кадре={len(intended or [])}",
+                    "=== ЭКРАН (как видит пользователь) ==="]
+            out = head + [f"{i + 1:>3}|{r}" for i, r in enumerate(rows)]
+            if intended:
+                out += ["", "=== ЧТО МЫ ХОТЕЛИ НАРИСОВАТЬ ==="]
+                out += [f"{i + 1:>3}|{strip_ansi(r)}" for i, r in enumerate(intended)]
+            Path(path).write_text("\n".join(out), encoding="utf-8")
+            return str(path)
+        except Exception as exc:  # noqa: BLE001
+            try:
+                Path(path).write_text(f"не смог снять экран: {exc!r}", encoding="utf-8")
+            except Exception:  # noqa: BLE001
+                pass
+            return f"ошибка: {exc!r}"
+
     def viewport_top(self) -> int:
         """Верхняя строка видимого окна внутри буфера (растёт при прокрутке).
 
@@ -1815,6 +1863,7 @@ class TuiApp:
                     # и пишем в журнал, чтобы баг было видно.
                     self.state.add_log(f"ошибка отрисовки: {exc!r}")
                     frame_lines = render_error(f"Ошибка отрисовки панели: {exc}", w, h)
+                self._last_frame_lines = [strip_ansi(x) for x in frame_lines]
                 painted = self.console.draw(frame_lines)
                 # Частота опроса клавиш адаптивная: при записи/анимации часто,
                 # в покое редко — так TUI почти не занимает CPU, когда не нужен.
@@ -2216,6 +2265,30 @@ class TuiApp:
             first_run = not Path(SETTINGS_FILE).exists()
             if (first_run or self._force_settings) and not self._settings_phase():
                 return 0
+            # Диагностика без командной строки: если рядом лежит файл-маркер
+            # data\dump_screen_next_run, пульт сам снимет экран и удалит маркер.
+            marker = ROOT / "data" / "dump_screen_next_run"
+            if marker.exists() and not getattr(self, "_dump_after", 0):
+                self._dump_after = 8.0
+                try:
+                    marker.unlink()
+                except Exception:  # noqa: BLE001
+                    pass
+            if getattr(self, "_dump_after", 0):
+                import threading as _th
+
+                def _dump_later() -> None:
+                    time.sleep(float(self._dump_after))
+                    try:
+                        path = ROOT / "data" / "screen_dump.txt"
+                        self.console.dump_screen(
+                            path, list(getattr(self, "_last_frame_lines", []) or []))
+                        print(f"[myflow] экран сохранён: {path}")
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"[myflow] дамп экрана не удался: {exc!r}")
+
+                _th.Thread(target=_dump_later, daemon=True, name="screen-dump").start()
+
             while True:
                 # Окно должно ВСЕГДА оставаться зафиксированного размера: если
                 # пользователь (или терминал) его изменил — возвращаем как было.
@@ -2435,6 +2508,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--hold", type=float, default=8.0, help="сколько секунд держать демо-кадр")
     ap.add_argument("--size-check", action="store_true",
                     help="проверить, даёт ли этот терминал менять размер окна")
+    ap.add_argument("--dump-screen", type=float, default=0.0, metavar="СЕК",
+                    help="через СЕК секунд сохранить экран в data/screen_dump.txt "
+                         "(диагностика отрисовки)")
     args = ap.parse_args(argv)
 
     if args.size_check:
@@ -2449,6 +2525,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 3
     tui = TuiApp(no_servers=args.no_servers)
     tui._force_settings = bool(args.settings)
+    tui._dump_after = float(args.dump_screen or 0.0)
     return tui.run()
 
 
