@@ -11,9 +11,63 @@ import threading
 from dataclasses import dataclass, field, asdict, fields, is_dataclass
 from pathlib import Path
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+ROOT = Path(__file__).resolve().parent.parent
+DATA_DIR = ROOT / "data"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 DB_FILE = DATA_DIR / "myflow.sqlite"
+
+# ------------------------------------------------------------------ модели и бинарники
+# Проект самодостаточен: модели и llama.cpp лежат РЯДОМ С ПРОЕКТОМ
+# (<repo>/models и <repo>/bin/llama-cpp). Переопределяется переменными
+# окружения; если локальной копии нет, а старая (X:\llm\...) есть — берём её,
+# чтобы ничего не сломалось у тех, кто ещё не перенёс файлы.
+_LEGACY_MODELS_DIR = Path(r"X:\llm\models")
+_LEGACY_LLAMA_DIR = Path(r"X:\llm\llama-cpp")
+
+
+def _resolve_dir(env_name: str, local: Path, legacy: Path) -> Path:
+    """Каталог из окружения -> локальный в проекте -> старый (если существует)."""
+    import os
+
+    env = os.environ.get(env_name)
+    if env:
+        return Path(env)
+    if local.exists():
+        return local
+    if legacy.exists():
+        return legacy
+    return local            # его и создадут/положат в него файлы
+
+
+def models_dir() -> Path:
+    """Каталог моделей: <repo>/models (или MYFLOW_MODELS_DIR)."""
+    return _resolve_dir("MYFLOW_MODELS_DIR", ROOT / "models", _LEGACY_MODELS_DIR)
+
+
+def llama_dir() -> Path:
+    """Каталог llama.cpp: <repo>/bin/llama-cpp (или MYFLOW_LLAMA_DIR)."""
+    return _resolve_dir("MYFLOW_LLAMA_DIR", ROOT / "bin" / "llama-cpp",
+                        _LEGACY_LLAMA_DIR)
+
+
+def hf_cache_dir() -> Path:
+    """Кэш моделей с HuggingFace (GigaAM): <repo>/models/hf-cache."""
+    import os
+
+    env = os.environ.get("HF_HOME")
+    if env:
+        return Path(env)
+    return models_dir() / "hf-cache"
+
+
+def voiceprint_model_path() -> Path:
+    """Модель speaker verification: <repo>/models/voiceprint/model.onnx."""
+    import os
+
+    env = os.environ.get("MYFLOW_VOICEPRINT_MODEL")
+    if env:
+        return Path(env)
+    return models_dir() / "voiceprint" / "model.onnx"
 
 # Границы записи (как у Wispr: CHUNK_DURATION_MS=40, лимиты диктовки).
 SAMPLE_RATE = 16_000          # RECORDING_SAMPLE_RATE (Wispr: S=16e3)

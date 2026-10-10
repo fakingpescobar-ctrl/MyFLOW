@@ -494,11 +494,15 @@ class ServerSpec:
 
 
 def models_dir() -> Path:
-    return Path(os.environ.get("MYFLOW_MODELS_DIR", r"X:\llm\models"))
+    """Каталог моделей: рядом с проектом (<repo>/models), см. myflow.config."""
+    from myflow.config import models_dir as _models_dir
+    return _models_dir()
 
 
 def llama_dir() -> Path:
-    return Path(os.environ.get("MYFLOW_LLAMA_DIR", r"X:\llm\llama-cpp"))
+    """Каталог llama.cpp: рядом с проектом (<repo>/bin/llama-cpp)."""
+    from myflow.config import llama_dir as _llama_dir
+    return _llama_dir()
 
 
 def default_specs(root: Path = ROOT) -> list[ServerSpec]:

@@ -39,13 +39,9 @@ MIN_FRAMES = 9
 
 
 def default_model_path() -> Path:
-    import os
-    env = os.environ.get("MYFLOW_VOICEPRINT_MODEL")
-    if env:
-        return Path(env)
-    models = os.environ.get("MYFLOW_MODELS_DIR")
-    base = Path(models) if models else Path(r"X:\llm\models")
-    return base / "voiceprint" / "model.onnx"
+    """<repo>/models/voiceprint/model.onnx (или MYFLOW_VOICEPRINT_MODEL)."""
+    from myflow.config import voiceprint_model_path
+    return voiceprint_model_path()
 
 
 def default_profile_path() -> Path:

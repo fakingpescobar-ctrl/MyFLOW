@@ -141,6 +141,6 @@ class GigaAmClient:
 
 
 def _cache_dir() -> Path:
-    env = os.environ.get("MYFLOW_MODELS_DIR")
-    base = Path(env) if env else Path(r"X:\llm\models")
-    return base / "hf-cache"
+    """Кэш GigaAM: <repo>/models/hf-cache (или HF_HOME/MYFLOW_MODELS_DIR)."""
+    from myflow.config import hf_cache_dir
+    return hf_cache_dir()

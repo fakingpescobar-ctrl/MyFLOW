@@ -15,8 +15,15 @@
 param()
 $ErrorActionPreference = "Stop"
 
-$llamaDir = if ($env:MYFLOW_LLAMA_DIR) { $env:MYFLOW_LLAMA_DIR } else { "X:\llm\llama-cpp" }
-$models   = if ($env:MYFLOW_MODELS_DIR) { $env:MYFLOW_MODELS_DIR } else { "X:\llm\models" }
+$repoRoot = Split-Path -Parent $PSScriptRoot
+$models = if ($env:MYFLOW_MODELS_DIR) { $env:MYFLOW_MODELS_DIR }
+          elseif (Test-Path (Join-Path $repoRoot "models")) { Join-Path $repoRoot "models" }
+          elseif (Test-Path "X:\llm\models") { "X:\llm\models" }
+          else { Join-Path $repoRoot "models" }
+$llamaDir = if ($env:MYFLOW_LLAMA_DIR) { $env:MYFLOW_LLAMA_DIR }
+            elseif (Test-Path (Join-Path $repoRoot "bin\llama-cpp")) { Join-Path $repoRoot "bin\llama-cpp" }
+            elseif (Test-Path "X:\llm\llama-cpp") { "X:\llm\llama-cpp" }
+            else { Join-Path $repoRoot "bin\llama-cpp" }
 $llama = Join-Path $llamaDir "llama-server.exe"
 $model = Join-Path $models "Qwen3-4B-Instruct-2507-Q8_0.gguf"
 
