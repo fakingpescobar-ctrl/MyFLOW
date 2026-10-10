@@ -908,6 +908,11 @@ class MyFlowApp:
                 return True, "авто-выбор включён (whisper — второе мнение)"
             s.asr.router = False
             self.settings.save()
+            # Второе мнение нужно ещё и судье: если он включён — сервер и клиент
+            # НЕ трогаем, иначе судья останется без whisper.
+            if bool(getattr(s.asr, "judge", False)):
+                print("[myflow] авто-выбор ASR выключен (судья продолжает работать)")
+                return True, "авто-выбор выключен (судья LLM остаётся включённым)"
             self._second = None
             # Если основной движок не whisper, сервер больше не нужен — гасим
             # и освобождаем ~1 ГБ VRAM.

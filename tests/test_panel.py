@@ -496,3 +496,82 @@ class JudgeToggleTest(unittest.TestCase):
         cfg.judge = True
         cfg.router = False
         self.assertTrue(whisper_needed(cfg), "судье нужен whisper-сервер")
+
+
+class RouterJudgeCombinationTest(unittest.TestCase):
+    """Авто-выбор и судья — независимые переключатели (4 комбинации)."""
+
+    def setUp(self):
+        from unittest import mock
+        self.app = _app()
+        self.app.overlay = mock.Mock()
+        self.app._ensure_server = lambda key: True
+        self.app._stop_server = mock.Mock()
+        self.app._ensure_second_opinion = mock.Mock()
+        self.app.polish = mock.Mock()
+        self.app.polish.alive.return_value = True
+
+    def tearDown(self):
+        self.app.db.close()
+        try:
+            self.app.ax.stop()
+        except Exception:
+            pass
+        self.app._stopping.set()
+        self.app._tmp.cleanup()
+
+    def _cfg(self):
+        return self.app.settings.get().asr
+
+    def test_judge_alone_is_enough(self):
+        """Судью можно включить без авто-выбора: сервер поднимается сам."""
+        self._cfg().router = False
+        ok, message = self.app.control_apply("module", "judge")
+        self.assertTrue(ok, message)
+        self.assertTrue(self._cfg().judge)
+
+    def test_judge_works_without_router_at_startup(self):
+        from myflow.asr import whisper_needed
+        cfg = self._cfg()
+        cfg.router = False
+        cfg.judge = True
+        self.assertTrue(whisper_needed(cfg),
+                        "судье нужен whisper-сервер даже без авто-выбора")
+
+    def test_disabling_router_keeps_whisper_for_judge(self):
+        """Баг: выключение авто-выбора гасило whisper, нужный судье."""
+        cfg = self._cfg()
+        cfg.router = True
+        cfg.judge = True
+        ok, message = self.app.control_apply("module", "router")
+        self.assertTrue(ok)
+        self.assertFalse(cfg.router)
+        self.assertTrue(cfg.judge, "судья должен остаться включённым")
+        self.assertFalse(self.app._stop_server.called,
+                         "whisper-сервер нужен судье — гасить нельзя")
+        self.assertIn("судья", message)
+
+    def test_disabling_judge_keeps_whisper_for_router(self):
+        cfg = self._cfg()
+        cfg.router = True
+        cfg.judge = True
+        ok, message = self.app.control_apply("module", "judge")
+        self.assertTrue(ok)
+        self.assertFalse(cfg.judge)
+        self.assertTrue(cfg.router)
+        self.assertFalse(self.app._stop_server.called,
+                         "авто-выбор ещё включён — whisper нужен")
+
+    def test_disabling_both_stops_whisper(self):
+        cfg = self._cfg()
+        cfg.router = True
+        cfg.judge = False
+        self.app.control_apply("module", "router")
+        self.app._stop_server.assert_called_once_with("asr")
+
+    def test_both_disabled_means_no_second_opinion_at_all(self):
+        from myflow.asr import whisper_needed
+        cfg = self._cfg()
+        cfg.router = False
+        cfg.judge = False
+        self.assertFalse(whisper_needed(cfg), "без режимов whisper-сервер не нужен")
