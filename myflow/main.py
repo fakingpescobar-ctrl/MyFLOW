@@ -164,6 +164,18 @@ def app_descriptor() -> str:
     return f"{proc} | {title}" if proc else title
 
 
+def _with_router(cfg):
+    """Копия конфига ASR с включённым правилом авто-выбора (только для решения).
+
+    Нужна, когда режимы взаимоисключающие: судья включён, авто-выбор выключен,
+    но при отбраковке склейки правило авто-выбора надо всё равно применить.
+    """
+    import copy as _copy
+    clone = _copy.copy(cfg)
+    clone.router = True
+    return clone
+
+
 def _set_thread_priority_below_normal() -> None:
     """Понизить приоритет ТЕКУЩЕГО потока (Windows): фоновые загрузки не мешают UI."""
     if sys.platform != "win32":
@@ -902,10 +914,14 @@ class MyFlowApp:
                         return False, ("whisper-сервер не поднялся — авто-выбор НЕ "
                                        "включён (проверь bin\\whisper и модель)")
                 s.asr.router = True
+                turned_off = bool(getattr(s.asr, "judge", False))
+                s.asr.judge = False          # режимы взаимоисключающие
                 self.settings.save()
                 self._ensure_second_opinion()
-                print("[myflow] авто-выбор ASR включён: GigaAM, whisper — при сомнении")
-                return True, "авто-выбор включён (whisper — второе мнение)"
+                print("[myflow] авто-выбор ASR включён: GigaAM, whisper — при сомнении"
+                      + (" (судья выключен)" if turned_off else ""))
+                return True, ("авто-выбор включён (whisper — второе мнение)"
+                              + ("; судья выключен" if turned_off else ""))
             s.asr.router = False
             self.settings.save()
             # Второе мнение нужно ещё и судье: если он включён — сервер и клиент
@@ -931,10 +947,17 @@ class MyFlowApp:
                 if not getattr(self.polish, "alive", lambda: False)():
                     return False, "LLM недоступна — судье нечем склеивать (проверь :8082)"
                 s.asr.judge = True
+                # Режимы взаимоисключающие: судья точнее, а авто-выбор как
+                # отдельный режим не нужен — при отбраковке склейки правило
+                # авто-выбора всё равно применяется внутри (оба текста уже есть).
+                turned_off = bool(getattr(s.asr, "router", False))
+                s.asr.router = False
                 self.settings.save()
                 self._ensure_second_opinion()
-                print("[myflow] судья LLM включён: оба движка, LLM склеивает текст")
-                return True, "судья включён (оба движка + склейка LLM)"
+                print("[myflow] судья LLM включён: оба движка, LLM склеивает текст"
+                      + (" (авто-выбор выключен)" if turned_off else ""))
+                return True, ("судья включён (оба движка + склейка)"
+                              + ("; авто-выбор выключен" if turned_off else ""))
             s.asr.judge = False
             self.settings.save()
             print("[myflow] судья LLM выключен")
@@ -1761,7 +1784,14 @@ class MyFlowApp:
                     res = AsrResult(text=verdict.text, language=res.language,
                                     latency_ms=res.latency_ms + alt_all.latency_ms + verdict.latency_ms)
                     return res, f"judge:{verdict.reason}"
-                print(f"[myflow] ⚖ судья не помог ({verdict.reason}) — обычная логика")
+                # Судья не помог — применяем правило авто-выбора к уже готовым
+                # текстам (whisper повторно НЕ гоняем).
+                print(f"[myflow] ⚖ судья не помог ({verdict.reason}) — выбираю правило")
+                fallback = review_asr_quality(res.text, duration_ms=duration_ms,
+                                              cfg=_with_router(cfg))
+                if fallback.use_second:
+                    return alt_all, f"whisper:после судьи ({fallback.reason})"
+                return res, origin
 
         decision = review_asr_quality(res.text, duration_ms=duration_ms, cfg=cfg)
         if not decision.use_second:

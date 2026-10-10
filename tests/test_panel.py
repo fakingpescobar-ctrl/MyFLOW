@@ -499,7 +499,7 @@ class JudgeToggleTest(unittest.TestCase):
 
 
 class RouterJudgeCombinationTest(unittest.TestCase):
-    """Авто-выбор и судья — независимые переключатели (4 комбинации)."""
+    """Авто-выбор и судья — ВЗАИМОИСКЛЮЧАЮЩИЕ режимы (включён может быть один)."""
 
     def setUp(self):
         from unittest import mock
@@ -523,51 +523,46 @@ class RouterJudgeCombinationTest(unittest.TestCase):
     def _cfg(self):
         return self.app.settings.get().asr
 
-    def test_judge_alone_is_enough(self):
-        """Судью можно включить без авто-выбора: сервер поднимается сам."""
-        self._cfg().router = False
+    def test_enabling_judge_turns_off_router(self):
+        cfg = self._cfg()
+        cfg.router = True
+        cfg.judge = False
         ok, message = self.app.control_apply("module", "judge")
         self.assertTrue(ok, message)
-        self.assertTrue(self._cfg().judge)
+        self.assertTrue(cfg.judge)
+        self.assertFalse(cfg.router, "режимы взаимоисключающие")
+        self.assertIn("авто-выбор", message)
 
-    def test_judge_works_without_router_at_startup(self):
+    def test_enabling_router_turns_off_judge(self):
+        cfg = self._cfg()
+        cfg.judge = True
+        cfg.router = False
+        ok, message = self.app.control_apply("module", "router")
+        self.assertTrue(ok, message)
+        self.assertTrue(cfg.router)
+        self.assertFalse(cfg.judge)
+        self.assertIn("судья", message)
+
+    def test_judge_alone_is_enough(self):
+        """Судью можно включить без авто-выбора: сервер поднимается сам."""
         from myflow.asr import whisper_needed
         cfg = self._cfg()
         cfg.router = False
-        cfg.judge = True
-        self.assertTrue(whisper_needed(cfg),
-                        "судье нужен whisper-сервер даже без авто-выбора")
+        ok, _ = self.app.control_apply("module", "judge")
+        self.assertTrue(ok)
+        self.assertTrue(whisper_needed(cfg), "судье нужен whisper-сервер")
 
-    def test_disabling_router_keeps_whisper_for_judge(self):
-        """Баг: выключение авто-выбора гасило whisper, нужный судье."""
+    def test_disabling_router_while_judge_on_keeps_server(self):
+        """Страховка: выключение авто-выбора не гасит whisper, если он нужен судье."""
         cfg = self._cfg()
         cfg.router = True
         cfg.judge = True
         ok, message = self.app.control_apply("module", "router")
         self.assertTrue(ok)
         self.assertFalse(cfg.router)
-        self.assertTrue(cfg.judge, "судья должен остаться включённым")
+        self.assertIn("судья", message.lower())
         self.assertFalse(self.app._stop_server.called,
                          "whisper-сервер нужен судье — гасить нельзя")
-        self.assertIn("судья", message)
-
-    def test_disabling_judge_keeps_whisper_for_router(self):
-        cfg = self._cfg()
-        cfg.router = True
-        cfg.judge = True
-        ok, message = self.app.control_apply("module", "judge")
-        self.assertTrue(ok)
-        self.assertFalse(cfg.judge)
-        self.assertTrue(cfg.router)
-        self.assertFalse(self.app._stop_server.called,
-                         "авто-выбор ещё включён — whisper нужен")
-
-    def test_disabling_both_stops_whisper(self):
-        cfg = self._cfg()
-        cfg.router = True
-        cfg.judge = False
-        self.app.control_apply("module", "router")
-        self.app._stop_server.assert_called_once_with("asr")
 
     def test_both_disabled_means_no_second_opinion_at_all(self):
         from myflow.asr import whisper_needed
@@ -575,3 +570,11 @@ class RouterJudgeCombinationTest(unittest.TestCase):
         cfg.router = False
         cfg.judge = False
         self.assertFalse(whisper_needed(cfg), "без режимов whisper-сервер не нужен")
+
+    def test_rows_reflect_exclusive_state(self):
+        cfg = self._cfg()
+        cfg.judge = True
+        cfg.router = False
+        rows = {m["key"]: m for m in self.app.control_snapshot()["modules"]}
+        self.assertTrue(rows["judge"]["on"])
+        self.assertFalse(rows["router"]["on"])
