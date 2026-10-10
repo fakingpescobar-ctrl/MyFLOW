@@ -673,15 +673,15 @@ class MyFlowApp:
                        else "выключен: только GigaAM"),
              "on": bool(getattr(s.asr, "router", False)), "ok": True,
              "note": "второе мнение",
-             "hint": "Enter — включить/выключить: подозрительные фразы уходят в "
-                     "whisper (нужен сервер :8081; ~1 ГБ VRAM)"},
+             "hint": "Enter — вкл/выкл: подозрительные фразы уходят в whisper "
+                     "(несовместим с «Судья LLM»)"},
             {"key": "judge", "label": "Судья LLM",
              "value": ("оба движка → LLM склеивает" if getattr(s.asr, "judge", False)
                        else "выключен"),
              "on": bool(getattr(s.asr, "judge", False)), "ok": True,
              "note": "точность",
-             "hint": "Enter — включить/выключить: гоняем GigaAM и whisper, LLM "
-                     "склеивает лучший текст (~0.4 с; нужен сервер :8081)"},
+             "hint": "Enter — вкл/выкл: оба движка, LLM склеивает (~0.4 с; "
+                     "несовместим с «Авто-выбор»)"},
             {"key": "vad", "label": "VAD", "value": f"Silero v6 · {vad_threshold:.2f}",
              "on": bool(s.auto_stop_by_silence), "ok": True, "note": "детектор речи",
              "hint": "←→ порог, Enter — автостоп по паузе"},
@@ -913,15 +913,15 @@ class MyFlowApp:
                     if not self._ensure_server("asr"):
                         return False, ("whisper-сервер не поднялся — авто-выбор НЕ "
                                        "включён (проверь bin\\whisper и модель)")
+                # Защита: пока включён судья, авто-выбор включить нельзя.
+                if bool(getattr(s.asr, "judge", False)):
+                    return False, ("сначала выключи «Судья LLM» — режимы несовместимы "
+                                   "(оба гоняют whisper и LLM)")
                 s.asr.router = True
-                turned_off = bool(getattr(s.asr, "judge", False))
-                s.asr.judge = False          # режимы взаимоисключающие
                 self.settings.save()
                 self._ensure_second_opinion()
-                print("[myflow] авто-выбор ASR включён: GigaAM, whisper — при сомнении"
-                      + (" (судья выключен)" if turned_off else ""))
-                return True, ("авто-выбор включён (whisper — второе мнение)"
-                              + ("; судья выключен" if turned_off else ""))
+                print("[myflow] авто-выбор ASR включён: GigaAM, whisper — при сомнении")
+                return True, "авто-выбор включён (whisper — второе мнение)"
             s.asr.router = False
             self.settings.save()
             # Второе мнение нужно ещё и судье: если он включён — сервер и клиент
@@ -946,18 +946,15 @@ class MyFlowApp:
                                        "(проверь bin\\whisper и модель)")
                 if not getattr(self.polish, "alive", lambda: False)():
                     return False, "LLM недоступна — судье нечем склеивать (проверь :8082)"
+                # Защита: пока включён авто-выбор, судью включить нельзя.
+                if bool(getattr(s.asr, "router", False)):
+                    return False, ("сначала выключи «Авто-выбор» — режимы несовместимы "
+                                   "(оба гоняют whisper и LLM)")
                 s.asr.judge = True
-                # Режимы взаимоисключающие: судья точнее, а авто-выбор как
-                # отдельный режим не нужен — при отбраковке склейки правило
-                # авто-выбора всё равно применяется внутри (оба текста уже есть).
-                turned_off = bool(getattr(s.asr, "router", False))
-                s.asr.router = False
                 self.settings.save()
                 self._ensure_second_opinion()
-                print("[myflow] судья LLM включён: оба движка, LLM склеивает текст"
-                      + (" (авто-выбор выключен)" if turned_off else ""))
-                return True, ("судья включён (оба движка + склейка)"
-                              + ("; авто-выбор выключен" if turned_off else ""))
+                print("[myflow] судья LLM включён: оба движка, LLM склеивает текст")
+                return True, "судья включён (оба движка + склейка LLM)"
             s.asr.judge = False
             self.settings.save()
             print("[myflow] судья LLM выключен")

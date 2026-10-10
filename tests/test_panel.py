@@ -446,6 +446,8 @@ class JudgeToggleTest(unittest.TestCase):
         self.app._ensure_second_opinion = mock.Mock()
         self.app.polish = mock.Mock()
         self.app.polish.alive.return_value = True
+        # Режимы несовместимы: для теста судьи авто-выбор должен быть выключен.
+        self.app.settings.get().asr.router = False
 
     def tearDown(self):
         self.app.db.close()
@@ -499,7 +501,7 @@ class JudgeToggleTest(unittest.TestCase):
 
 
 class RouterJudgeCombinationTest(unittest.TestCase):
-    """Авто-выбор и судья — ВЗАИМОИСКЛЮЧАЮЩИЕ режимы (включён может быть один)."""
+    """Режимы несовместимы: второй НЕ включается, пока первый активен."""
 
     def setUp(self):
         from unittest import mock
@@ -523,58 +525,99 @@ class RouterJudgeCombinationTest(unittest.TestCase):
     def _cfg(self):
         return self.app.settings.get().asr
 
-    def test_enabling_judge_turns_off_router(self):
+    def test_router_cannot_be_enabled_while_judge_on(self):
+        cfg = self._cfg()
+        cfg.judge = True
+        cfg.router = False
+        ok, message = self.app.control_apply("module", "router")
+        self.assertFalse(ok, "должен быть отказ, а не автопереключение")
+        self.assertFalse(cfg.router, "состояние не меняется")
+        self.assertTrue(cfg.judge, "активный режим остаётся")
+        self.assertIn("Судья LLM", message)
+
+    def test_judge_cannot_be_enabled_while_router_on(self):
         cfg = self._cfg()
         cfg.router = True
         cfg.judge = False
         ok, message = self.app.control_apply("module", "judge")
-        self.assertTrue(ok, message)
-        self.assertTrue(cfg.judge)
-        self.assertFalse(cfg.router, "режимы взаимоисключающие")
-        self.assertIn("авто-выбор", message)
-
-    def test_enabling_router_turns_off_judge(self):
-        cfg = self._cfg()
-        cfg.judge = True
-        cfg.router = False
-        ok, message = self.app.control_apply("module", "router")
-        self.assertTrue(ok, message)
-        self.assertTrue(cfg.router)
+        self.assertFalse(ok)
         self.assertFalse(cfg.judge)
-        self.assertIn("судья", message)
+        self.assertTrue(cfg.router)
+        self.assertIn("Авто-выбор", message)
+
+    def test_after_disabling_first_mode_second_enables(self):
+        cfg = self._cfg()
+        cfg.router = True
+        cfg.judge = False
+        self.assertFalse(self.app.control_apply("module", "judge")[0])
+        # выключаем активный режим — теперь судью включить можно
+        self.assertTrue(self.app.control_apply("module", "router")[0])
+        self.assertFalse(cfg.router)
+        self.assertTrue(self.app.control_apply("module", "judge")[0])
+        self.assertTrue(cfg.judge)
 
     def test_judge_alone_is_enough(self):
-        """Судью можно включить без авто-выбора: сервер поднимается сам."""
         from myflow.asr import whisper_needed
         cfg = self._cfg()
         cfg.router = False
-        ok, _ = self.app.control_apply("module", "judge")
-        self.assertTrue(ok)
+        cfg.judge = False
+        self.assertTrue(self.app.control_apply("module", "judge")[0])
         self.assertTrue(whisper_needed(cfg), "судье нужен whisper-сервер")
-
-    def test_disabling_router_while_judge_on_keeps_server(self):
-        """Страховка: выключение авто-выбора не гасит whisper, если он нужен судье."""
-        cfg = self._cfg()
-        cfg.router = True
-        cfg.judge = True
-        ok, message = self.app.control_apply("module", "router")
-        self.assertTrue(ok)
-        self.assertFalse(cfg.router)
-        self.assertIn("судья", message.lower())
-        self.assertFalse(self.app._stop_server.called,
-                         "whisper-сервер нужен судье — гасить нельзя")
 
     def test_both_disabled_means_no_second_opinion_at_all(self):
         from myflow.asr import whisper_needed
         cfg = self._cfg()
         cfg.router = False
         cfg.judge = False
-        self.assertFalse(whisper_needed(cfg), "без режимов whisper-сервер не нужен")
+        self.assertFalse(whisper_needed(cfg))
 
-    def test_rows_reflect_exclusive_state(self):
+    def test_rows_reflect_state(self):
         cfg = self._cfg()
         cfg.judge = True
         cfg.router = False
         rows = {m["key"]: m for m in self.app.control_snapshot()["modules"]}
         self.assertTrue(rows["judge"]["on"])
         self.assertFalse(rows["router"]["on"])
+        self.assertIn("несовместим",
+                      rows["judge"]["hint"] + rows["router"]["hint"],
+                      "подсказки должны предупреждать о несовместимости")
+
+
+class IncompatibleModesJournalTest(unittest.TestCase):
+    """Отказ виден в журнале панели, а не только в настройке."""
+
+    def test_journal_shows_refusal(self):
+        from unittest import mock
+        import myflow.tui as T
+
+        app = _app()
+        app.overlay = mock.Mock()
+        app._ensure_server = lambda key: True
+        app._stop_server = mock.Mock()
+        app._ensure_second_opinion = mock.Mock()
+        app.polish = mock.Mock()
+        app.polish.alive.return_value = True
+        try:
+            cfg = app.settings.get().asr
+            cfg.judge = True
+            cfg.router = False
+            tui = T.TuiApp(no_servers=True)
+            tui.app = app
+            tui._app_owned = False
+            snap = app.control_snapshot()
+            index = next(i for i, m in enumerate(snap["modules"]) if m["key"] == "router")
+            tui._panel_apply(snap["modules"], snap["values"], index, "enter")
+            journal = "\n".join(tui.state.log)
+            self.assertIn("несовместимы", journal)
+            # norm_text() заменяет ✗ на ASCII-маркер, поэтому проверяем любой из них
+            self.assertTrue("!" in journal or "✗" in journal,
+                            "отказ должен быть помечен как проблема")
+            self.assertFalse(cfg.router)
+        finally:
+            app.db.close()
+            try:
+                app.ax.stop()
+            except Exception:
+                pass
+            app._stopping.set()
+            app._tmp.cleanup()
