@@ -282,6 +282,34 @@ def button_bar(buttons: Sequence[tuple[str, str]], width: int,
 
 
 # ----------------------------------------------------------------- консоль
+def size_plan(cur: tuple[int, int], want: tuple[int, int],
+              spare: int = 300) -> tuple[int, int, int, int]:
+    """Что ставить окну и буферу: (ширина_окна, высота_окна, ширина_буфера, высота_буфера).
+
+    Буфер ВСЕГДА выше окна — даже если окно уже нужного размера. Это не
+    оптимизация, а защита: при буфере, равном окну, первая же строка лога
+    прокручивает экран и кадр TUI «съезжает» (проверено в реальной консоли:
+    буфер=окно -> «всё в кучу», буфер с запасом -> кадр на месте).
+    """
+    cur_w, cur_h = int(cur[0]), int(cur[1])
+    win_w = max(60, int(want[0] or cur_w))
+    win_h = max(20, int(want[1] or cur_h))
+    return win_w, win_h, win_w, max(win_h + int(spare), win_h)
+
+
+def buffer_rows_for(window_rows: int, spare: int = 300) -> int:
+    """Высота буфера консоли для окна заданной высоты.
+
+    ВАЖНО (проверено в реальной консоли): если сделать буфер РАВНЫМ окну, то
+    любая посторонняя строка вывода (лог сервера, прогрев модели) прокручивает
+    экран и кадр «съезжает» — выглядит как «всё в кучу». Поэтому держим запас:
+    лишние строки уходят в историю и кадр не двигают. От прокрутки колесом
+    защищает мышиный режим (see Console.enable_mouse), а не размер буфера.
+    """
+    return max(int(window_rows) + 300 if spare == 300 else int(window_rows) + int(spare),
+               int(window_rows))
+
+
 class Console:
     """Низкоуровневый вывод кадра: VT-режим, размер, курсор."""
 
@@ -370,13 +398,6 @@ class Console:
                 _fields_ = [("Left", ctypes.c_short), ("Top", ctypes.c_short),
                             ("Right", ctypes.c_short), ("Bottom", ctypes.c_short)]
 
-            cur_w, cur_h = self.raw_size()
-            want_w = max(60, want_w or cur_w)
-            want_h = max(20, want_h or cur_h)
-            if (want_w, want_h) == (cur_w, cur_h):
-                self._locked_raw = (want_w, want_h)
-                return want_w, want_h
-
             def set_buffer(w: int, h: int) -> bool:
                 return bool(k.SetConsoleScreenBufferSize(handle, _Coord(w, h)))
 
@@ -384,12 +405,27 @@ class Console:
                 rect = _SmallRect(0, 0, w - 1, h - 1)
                 return bool(k.SetConsoleWindowInfo(handle, True, ctypes.byref(rect)))
 
+            cur_w, cur_h = self.raw_size()
+            want_w = max(60, want_w or cur_w)
+            want_h = max(20, want_h or cur_h)
+            if (want_w, want_h) == (cur_w, cur_h):
+                # Окно уже нужного размера, но буфер всё равно обязателен с
+                # запасом: иначе первая же строка лога прокрутит экран и кадр
+                # «съедет» (проверено в реальной консоли).
+                set_buffer(want_w, buffer_rows_for(want_h))
+                self._locked_raw = (want_w, want_h)
+                self.size_refused = False
+                return want_w, want_h
+
             if want_w > cur_w or want_h > cur_h:
                 set_buffer(max(want_w, cur_w), max(want_h, cur_h))   # растим буфер
                 set_window(want_w, want_h)
             else:
                 set_window(want_w, want_h)                           # сперва окно
-            set_buffer(want_w, want_h)         # буфер ровно под окно: прокрутки нет
+            # Буфер ВЫШЕ окна: иначе каждый посторонний лог прокручивает экран и
+            # кадр съезжает (проверено: буфер=окно -> после 3 строк лога «куча»,
+            # буфер с запасом -> кадр на месте).
+            set_buffer(want_w, buffer_rows_for(want_h))
         except Exception:  # noqa: BLE001 — не Windows/нет консоли
             pass
         raw = self.raw_size()
@@ -428,6 +464,33 @@ class Console:
         except Exception:  # noqa: BLE001
             pass
         self.mouse = False
+
+    def viewport_top(self) -> int:
+        """Верхняя строка видимого окна внутри буфера (растёт при прокрутке).
+
+        Если значение изменилось — консоль прокрутилась (например, посторонний
+        вывод), значит кадр сдвинулся и его надо нарисовать заново целиком.
+        """
+        try:
+            class _Coord(ctypes.Structure):
+                _fields_ = [("X", ctypes.c_short), ("Y", ctypes.c_short)]
+
+            class _SmallRect(ctypes.Structure):
+                _fields_ = [("Left", ctypes.c_short), ("Top", ctypes.c_short),
+                            ("Right", ctypes.c_short), ("Bottom", ctypes.c_short)]
+
+            class _Csbi(ctypes.Structure):
+                _fields_ = [("dwSize", _Coord), ("dwCursorPosition", _Coord),
+                            ("wAttributes", ctypes.c_ushort), ("srWindow", _SmallRect),
+                            ("dwMaximumWindowSize", _Coord)]
+
+            handle = ctypes.windll.kernel32.GetStdHandle(-11)
+            info = _Csbi()
+            if ctypes.windll.kernel32.GetConsoleScreenBufferInfo(handle, ctypes.byref(info)):
+                return int(info.srWindow.Top)
+        except Exception:  # noqa: BLE001
+            pass
+        return 0
 
     def size(self) -> tuple[int, int]:
         """Размер ВИДИМОГО окна консоли (не буфера!).
@@ -1426,6 +1489,7 @@ class TuiApp:
         self._pending_size: tuple[int, int] | None = None
         self._size_retry_left = 0
         self._size_retry_at = 0.0
+        self._last_top: int | None = None
         self._sink: PaneSink | None = None
         self._prev_stdout = None
         self._health_thread: threading.Thread | None = None
@@ -2185,6 +2249,15 @@ class TuiApp:
                                 self._pending_size = raw
                     except Exception:  # noqa: BLE001
                         pass
+                # Страж прокрутки: если консоль всё-таки прокрутилась
+                # (посторонний вывод), кадр сдвинулся — рисуем заново целиком.
+                try:
+                    top = self.console.viewport_top()
+                    if getattr(self, "_last_top", None) is not None and top != self._last_top:
+                        self.console.clear()
+                    self._last_top = top
+                except Exception:  # noqa: BLE001
+                    pass
                 self.console.clear()
                 self.state.add_log(
                     f"конфигурация: режим={self.store.get().mode}, "

@@ -896,3 +896,32 @@ class SizeDiagnosticsTest(unittest.TestCase):
     def test_size_check_command_runs(self):
         rc = T.size_check()
         self.assertEqual(rc, 0, "самопроверка должна завершаться успешно")
+
+
+class BufferSizePlanTest(unittest.TestCase):
+    """Буфер обязан быть ВЫШЕ окна — иначе логи прокручивают кадр («всё в кучу»)."""
+
+    def test_buffer_has_spare(self):
+        win_w, win_h, buf_w, buf_h = T.size_plan((120, 30), (120, 30))
+        self.assertEqual((win_w, win_h), (120, 30))
+        self.assertEqual(buf_w, 120)
+        self.assertGreater(buf_h, win_h,
+                           "буфер выше окна, иначе экран прокрутится от лога")
+
+    def test_spare_applied_even_when_window_matches(self):
+        """Тот самый баг: при совпадении размера буфер не увеличивался."""
+        _w, _h, _bw, buf_h = T.size_plan((120, 30), (120, 30), spare=300)
+        self.assertEqual(buf_h, 330)
+
+    def test_zero_means_keep_current(self):
+        win_w, win_h, _bw, _bh = T.size_plan((140, 44), (0, 0))
+        self.assertEqual((win_w, win_h), (140, 44))
+
+    def test_minimums_enforced(self):
+        win_w, win_h, _bw, _bh = T.size_plan((120, 30), (10, 5))
+        self.assertGreaterEqual(win_w, 60)
+        self.assertGreaterEqual(win_h, 20)
+
+    def test_buffer_rows_helper(self):
+        self.assertEqual(T.buffer_rows_for(30), 330)
+        self.assertGreater(T.buffer_rows_for(44), 44)

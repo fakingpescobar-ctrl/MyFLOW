@@ -37,8 +37,10 @@ if ($Check) {
 }
 
 try {
-    # Буфер делаем ровно под окно: тогда консоль не может «уехать» прокруткой.
-    [console]::SetBufferSize($cols, $rows)
+    # Буфер ВЫШЕ окна (запас на логи): если сделать его равным окну, любая
+    # посторонняя строка вывода прокручивает экран и кадр TUI «съезжает».
+    $bufferRows = [Math]::Max($rows + 300, $rows)
+    [console]::SetBufferSize($cols, $bufferRows)
     [console]::SetWindowSize($cols, $rows)
 } catch {
     # Если .NET-путь не сработал (или буфер уже меньше) — пробуем mode con.
