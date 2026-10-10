@@ -344,6 +344,35 @@ class Console:
         except Exception:  # noqa: BLE001
             return False
 
+    @staticmethod
+    def is_windows_terminal() -> bool:
+        """Размером управляет ТЕРМИНАЛ (Windows Terminal / conpty), а не мы.
+
+        Проверяем двумя способами, потому что одного мало:
+          * `WT_SESSION` — есть только если процесс запущен самим WT; при запуске
+            из Проводника/Start-Process переменной НЕТ, хотя окно — WT;
+          * **класс окна консоли** `PseudoConsoleWindow` — надёжный признак
+            псевдоконсоли (так работают все современные терминалы).
+
+        Зачем это важно: если задать размер псевдоконсоли (140x44), а окно
+        терминала останется 37 строк, пульт нарисует 43 строки в 37 видимых —
+        терминал прокрутит содержимое и кадр «слипнется» (проверено скриншотом).
+        """
+        import os
+        if os.environ.get("WT_SESSION", "").strip():
+            return True
+        try:
+            k = ctypes.windll.kernel32
+            user32 = ctypes.windll.user32
+            hwnd = k.GetConsoleWindow()
+            if not hwnd:
+                return False
+            buf = ctypes.create_unicode_buffer(256)
+            user32.GetClassNameW(hwnd, buf, 256)
+            return buf.value.strip() == "PseudoConsoleWindow"
+        except Exception:  # noqa: BLE001
+            return False
+
     def raw_size(self) -> tuple[int, int]:
         """Истинный размер видимого окна (без вычета строки под легенду)."""
         try:
@@ -387,6 +416,12 @@ class Console:
         """
         want_w = int(cols or 0)
         want_h = int(rows or 0)
+        if self.is_windows_terminal():
+            # Размером управляет Windows Terminal: только читаем, ничего не меняем.
+            raw = self.raw_size()
+            self._locked_raw = raw
+            self.size_refused = False
+            return raw
         try:
             k = ctypes.windll.kernel32
             handle = k.GetStdHandle(-11)
@@ -496,8 +531,12 @@ class Console:
                 ctypes.windll.kernel32.ReadConsoleOutputCharacterW(
                     handle, buf, win_w, _Coord(0, y), ctypes.byref(written))
                 rows.append(buf.value[: written.value].rstrip())
+            import os as _os
             head = [f"окно={win_w}x{win_h} буфер={info.dwSize.X}x{info.dwSize.Y} "
                     f"вьюпорт_top={info.srWindow.Top}",
+                    f"WT_SESSION={'ДА' if _os.environ.get('WT_SESSION') else 'нет'} "
+                    f"WT считаем={self.is_windows_terminal()} "
+                    f"размер фиксировали={getattr(self, '_locked_size', None)}",
                     f"нарисованных строк в кадре={len(intended or [])}",
                     "=== ЭКРАН (как видит пользователь) ==="]
             out = head + [f"{i + 1:>3}|{r}" for i, r in enumerate(rows)]
@@ -1405,6 +1444,18 @@ def render_panel(snap: dict, w: int, h: int, cfg_line: str,
 
     legend = key_legend(w - 6,
                         rows[sel].get("hint") if 0 <= sel < len(rows) else None)
+    # Журнал важнее легенды клавиш: в маленьком окне (например, 120x30 по
+    # умолчанию в Windows Terminal) легенда съедала всю высоту и журнала не было
+    # видно вообще. Сначала сжимаем легенду, и только потом отказываемся от журнала.
+    if journal:
+        def _space_for(legend_lines: list[str]) -> int:
+            # 2 рамки кадра + 2 рамки блока журнала + пустая строка перед журналом
+            return h - len(body) - len(legend_lines) - 4 - 2
+        if _space_for(legend) < 4:
+            for candidate in (legend[:1], []):
+                if _space_for(candidate) >= 4:
+                    legend = candidate
+                    break
     # Журнал забирает остаток высоты; окно строк считаем по отступу прокрутки
     # (в рендере, а не в вызывающем коде — только тут известна реальная высота).
     space = h - len(body) - len(legend) - 4 - 2      # 2 рамки кадра, 2 рамки блока
@@ -2100,6 +2151,11 @@ class TuiApp:
 
     def apply_window_size(self, cols: int, rows: int) -> None:
         """Применить размер окна (вызывается из панели: строка «Размер окна»)."""
+        if self.console.is_windows_terminal():
+            self.state.add_log(
+                f"окно {cols}x{rows} сохранено, но размером управляет Windows "
+                f"Terminal — растяни окно мышью (WT запомнит)")
+            return
         try:
             applied = self.console.lock_size(int(cols), int(rows))
             self._locked_size = applied
@@ -2246,6 +2302,11 @@ class TuiApp:
                 if self.app is not None:
                     # Панель может менять размер (строка «Размер окна»).
                     self.app.set_console_resize(self.apply_window_size)
+                    # Под Windows Terminal/conpty размер задаёт терминал — пульт
+                    # честно об этом скажет в строке «Размер окна».
+                    self.app.set_terminal_managed_size(self.console.is_windows_terminal())
+                    _raw = self.console.raw_size()
+                    self.app.set_window_size_now(_raw[0], _raw[1])
             if getattr(tui_cfg, "mouse_wheel", True):
                 self.console.enable_mouse()
         except Exception:  # noqa: BLE001 — оформление не должно мешать запуску
@@ -2312,7 +2373,7 @@ class TuiApp:
                         self.state.add_log(
                             "окно: терминал не даёт менять размер — растяни мышью "
                             "или выбери «Размер окна» в панели")
-                if getattr(self, "_locked_size", None):
+                if getattr(self, "_locked_size", None) and not self.console.is_windows_terminal():
                     try:
                         raw = self.console.raw_size()
                         if raw != self._locked_size:

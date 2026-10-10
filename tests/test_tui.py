@@ -823,6 +823,9 @@ class WindowSizeTest(unittest.TestCase):
             self.locked = None
             self.cleared = 0
 
+        def is_windows_terminal(self) -> bool:
+            return False
+
         def lock_size(self, cols=0, rows=0):
             self.locked = (cols, rows)
             return (cols, rows)

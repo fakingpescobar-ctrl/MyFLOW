@@ -352,6 +352,10 @@ class MyFlowApp:
         # Хук: TUI регистрирует функцию применения размера окна
         # (строка «Размер окна» в панели).
         self._console_resize = None
+        # True, если окном управляет терминал (Windows Terminal / conpty):
+        # тогда размер задавать нельзя — только растянуть окно мышью.
+        self._terminal_managed_size = False
+        self._window_size_now: tuple[int, int] | None = None
         # Остановка воркера фраз (отдельно от _stopping).
         self._worker_stop = threading.Event()
         # Выгрузка LLM под игры: стоп сервера + сторож полного экрана.
@@ -686,12 +690,21 @@ class MyFlowApp:
              "hint": "Enter — вкл/выкл: оба движка, LLM склеивает (~0.4 с; "
                      "несовместим с «Авто-выбор»)"},
             {"key": "size", "label": "Размер окна",
-             "value": f"{int(getattr(s.tui, 'cols', 140))}x{int(getattr(s.tui, 'rows', 44))}"
-                      + ("" if getattr(s.tui, "fixed_size", True) else " (свободный)"),
+             "value": ("управляет терминал — растяни окно"
+                       if getattr(self, "_terminal_managed_size", False)
+                       else ((f"{int(s.tui.cols)}x{int(s.tui.rows)}"
+                              + ("" if getattr(s.tui, "fixed_size", True) else " (свободный)"))
+                             if getattr(s.tui, "cols", 0) and getattr(s.tui, "rows", 0)
+                             else (f"{self._window_size_now[0]}x{self._window_size_now[1]} (текущий)"
+                                   if getattr(self, "_window_size_now", None)
+                                   else "как в терминале"))),
              "on": bool(getattr(s.tui, "fixed_size", True)), "ok": True,
              "note": "оформление",
-             "hint": "Enter — сменить размер окна (100x28 → 120x34 → 140x44 → 160x50); "
-                     "можно просто растянуть окно мышью — размер запомнится"},
+             "hint": ("Терминал (Windows Terminal) сам задаёт размер окна: растяни его "
+                      "мышью — терминал запомнит. Пульт подстроится и покажет журнал"
+                      if getattr(self, "_terminal_managed_size", False)
+                      else "Enter — сменить размер окна (100x28 → 120x34 → 140x44 → "
+                           "160x50); можно просто растянуть окно мышью")},
             {"key": "vad", "label": "VAD", "value": f"Silero v6 · {vad_threshold:.2f}",
              "on": bool(s.auto_stop_by_silence), "ok": True, "note": "детектор речи",
              "hint": "←→ порог, Enter — автостоп по паузе"},
@@ -1014,6 +1027,9 @@ class MyFlowApp:
             return True, "ASR: whisper (сервер поднят)"
 
         if key == "size":
+            if getattr(self, "_terminal_managed_size", False):
+                return False, ("размером управляет терминал — растяни окно мышью, "
+                               "он его запомнит")
             # Размер окна: перебираем пресеты. Можно и просто растянуть окно
             # мышью — TUI это заметит и запомнит (см. TuiApp._adopt_size).
             presets = [(100, 28), (120, 34), (140, 44), (160, 50)]
@@ -1371,6 +1387,14 @@ class MyFlowApp:
             stopper(key)
         except Exception:  # noqa: BLE001 — выгрузка не должна ломать приложение
             pass
+
+    def set_terminal_managed_size(self, managed: bool) -> None:
+        """Сообщить, что размером окна управляет терминал (WT/conpty)."""
+        self._terminal_managed_size = bool(managed)
+
+    def set_window_size_now(self, width: int, height: int) -> None:
+        """Текущий размер окна (для строки «Размер окна», когда в настройках 0)."""
+        self._window_size_now = (int(width), int(height))
 
     def set_console_resize(self, fn) -> None:
         """Зарегистрировать применение размера окна (делает TUI)."""

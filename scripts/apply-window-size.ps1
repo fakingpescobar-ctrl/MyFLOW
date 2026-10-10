@@ -26,6 +26,31 @@ if (Test-Path $settings) {
     }
 }
 
+# В Windows Terminal окно принадлежит терминалу: менять размер бесполезно и
+# вредно (conpty станет больше окна, и пульт нарисует лишние строки -> «куча»).
+Add-Type @"
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public class ConHost {
+    [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)]
+    public static extern int GetClassNameW(IntPtr h, StringBuilder s, int n);
+    public static string ClassName() {
+        var h = GetConsoleWindow();
+        if (h == IntPtr.Zero) return "";
+        var sb = new StringBuilder(256);
+        GetClassNameW(h, sb, sb.Capacity);
+        return sb.ToString();
+    }
+}
+"@
+$pseudo = ([ConHost]::ClassName() -eq "PseudoConsoleWindow")
+if ($env:WT_SESSION -or $pseudo) {
+    if ($Check) { Write-Host "[размер] терминал управляет окном (WT/conpty [$([ConHost]::ClassName())]) — пропускаю" }
+    exit 0
+}
+
 if ($cols -lt 60 -or $rows -lt 20) {
     if ($Check) { Write-Host "[размер] в настройках нет размера (tui.cols/rows) — пропускаю" }
     exit 0
