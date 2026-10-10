@@ -1956,6 +1956,10 @@ def _demo_snapshot() -> dict:
     return {"modules": [
         {"key": "asr", "label": "ASR", "value": "GigaAM v3 e2e (CPU)", "on": True,
          "ok": True, "note": "", "hint": "Enter — сменить движок (GigaAM ↔ whisper)"},
+        {"key": "router", "label": "Авто-выбор",
+         "value": "GigaAM → whisper при сомнении", "on": True, "ok": True,
+         "note": "второе мнение",
+         "hint": "Enter — включить/выключить: подозрительные фразы уходят в whisper"},
         {"key": "vad", "label": "VAD", "value": "Silero v6 · 0.30", "on": True, "ok": True,
          "note": "", "hint": "←→ порог, Enter — автостоп по паузе"},
         {"key": "llm", "label": "LLM", "value": "qwen3-4b · :8082", "on": True, "ok": True,

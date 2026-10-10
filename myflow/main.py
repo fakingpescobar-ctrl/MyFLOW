@@ -655,6 +655,13 @@ class MyFlowApp:
                  else "распознавание речи"),
              "hint": "Enter — сменить движок (спросит подтверждение): whisper "
                      "поднимает сервер :8081, GigaAM работает всегда"},
+            {"key": "router", "label": "Авто-выбор",
+             "value": ("GigaAM → whisper при сомнении" if getattr(s.asr, "router", False)
+                       else "выключен: только GigaAM"),
+             "on": bool(getattr(s.asr, "router", False)), "ok": True,
+             "note": "второе мнение",
+             "hint": "Enter — включить/выключить: подозрительные фразы уходят в "
+                     "whisper (нужен сервер :8081; ~1 ГБ VRAM)"},
             {"key": "vad", "label": "VAD", "value": f"Silero v6 · {vad_threshold:.2f}",
              "on": bool(s.auto_stop_by_silence), "ok": True, "note": "детектор речи",
              "hint": "←→ порог, Enter — автостоп по паузе"},
@@ -876,6 +883,30 @@ class MyFlowApp:
         """Включить/выключить модуль на лету."""
         s = self.settings.get()
         flags = s.flags
+
+        if key == "router":
+            # Авто-выбор движка: GigaAM первым, whisper — при подозрении.
+            if not bool(getattr(s.asr, "router", False)):
+                # Включаем: второму мнению нужен живой whisper-сервер, иначе
+                # подозрительные фразы будут просто оставаться на GigaAM.
+                if getattr(self.whisper, "backend_name", "") != "whisper":
+                    if not self._ensure_server("asr"):
+                        return False, ("whisper-сервер не поднялся — авто-выбор НЕ "
+                                       "включён (проверь bin\\whisper и модель)")
+                s.asr.router = True
+                self.settings.save()
+                self._ensure_second_opinion()
+                print("[myflow] авто-выбор ASR включён: GigaAM, whisper — при сомнении")
+                return True, "авто-выбор включён (whisper — второе мнение)"
+            s.asr.router = False
+            self.settings.save()
+            self._second = None
+            # Если основной движок не whisper, сервер больше не нужен — гасим
+            # и освобождаем ~1 ГБ VRAM.
+            if getattr(self.whisper, "backend_name", "") != "whisper":
+                self._stop_server("asr")
+            print("[myflow] авто-выбор ASR выключен")
+            return True, "авто-выбор выключен (только GigaAM)"
 
         if key == "asr":
             # Меняем движок распознавания: gigaam <-> whisper.

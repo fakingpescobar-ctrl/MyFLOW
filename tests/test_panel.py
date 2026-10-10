@@ -359,3 +359,76 @@ def tearDownModule() -> None:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RouterToggleTest(unittest.TestCase):
+    """Авто-выбор движка переключается из панели (строка «Авто-выбор»)."""
+
+    def setUp(self):
+        from unittest import mock
+        self.app = _app()                       # реальное приложение, временные настройки
+        self.app.overlay = mock.Mock()
+        self.app._ensure_server = lambda key: True       # сервер «поднимается»
+        self.app._stop_server = mock.Mock()
+        self.app._ensure_second_opinion = mock.Mock()
+
+    def tearDown(self):
+        self.app.db.close()
+        try:
+            self.app.ax.stop()
+        except Exception:
+            pass
+        self.app._stopping.set()
+        self.app._tmp.cleanup()
+
+    def _row(self):
+        return next(m for m in self.app.control_snapshot()["modules"]
+                    if m["key"] == "router")
+
+    def test_row_present_and_on_by_default(self):
+        row = self._row()
+        self.assertTrue(row["on"])
+        self.assertIn("whisper", row["value"])
+        self.assertIn("второе мнение", row["note"])
+        self.assertIn("Enter", row["hint"])
+
+    def test_toggle_off_then_on(self):
+        self.app.settings.get().asr.router = True
+        ok, message = self.app.control_apply("module", "router")
+        self.assertTrue(ok)
+        self.assertFalse(self.app.settings.get().asr.router)
+        self.assertIn("выключен", message)
+        ok, message = self.app.control_apply("module", "router")
+        self.assertTrue(ok)
+        self.assertTrue(self.app.settings.get().asr.router)
+        self.assertIn("включён", message)
+
+    def test_row_reflects_off_state(self):
+        self.app.settings.get().asr.router = False
+        row = self._row()
+        self.assertFalse(row["on"])
+        self.assertIn("только GigaAM", row["value"])
+
+    def test_enable_refuses_when_server_unavailable(self):
+        self.app.settings.get().asr.router = False
+        self.app._ensure_server = lambda key: False
+        ok, message = self.app.control_apply("module", "router")
+        self.assertFalse(ok)
+        self.assertFalse(self.app.settings.get().asr.router,
+                         "настройка не должна включаться без сервера")
+        self.assertIn("НЕ", message)
+
+    def test_disable_stops_whisper_server(self):
+        """Выключили авто-выбор при GigaAM — whisper-сервер гасим (VRAM)."""
+        self.app.settings.get().asr.router = True
+        self.app.control_apply("module", "router")
+        self.app._stop_server.assert_called_once_with("asr")
+
+    def test_toggle_does_not_touch_live_settings(self):
+        """Прогон панели не должен писать в живой data/settings.json."""
+        live = Path(__file__).resolve().parent.parent / "data" / "settings.json"
+        before = live.read_text(encoding="utf-8") if live.exists() else ""
+        self.app.control_apply("module", "router")
+        self.app.control_apply("module", "router")
+        after = live.read_text(encoding="utf-8") if live.exists() else ""
+        self.assertEqual(before, after, "живые настройки изменены тестом")
