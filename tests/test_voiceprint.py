@@ -194,11 +194,21 @@ class WhisperNeededTest(unittest.TestCase):
     def test_whisper_backend_always_needs_server(self):
         self.assertTrue(whisper_needed(AsrConfig(backend="whisper")))
 
-    def test_gigaam_backend_does_not_need_server(self):
+    def test_gigaam_backend_without_router_needs_no_server(self):
+        """Без авто-выбора whisper-сервер для GigaAM не нужен."""
         with mock.patch("myflow.asr_gigaam.GigaAmClient.package_available",
                         staticmethod(lambda: True)):
-            self.assertFalse(whisper_needed(AsrConfig(backend="gigaam")))
-            self.assertFalse(whisper_needed(AsrConfig(backend="auto")))
+            self.assertFalse(whisper_needed(AsrConfig(backend="gigaam", router=False)))
+            self.assertFalse(whisper_needed(AsrConfig(backend="auto", router=False)))
+
+    def test_router_needs_whisper_as_second_opinion(self):
+        """Авто-выбор зовёт whisper вторым мнением — значит, сервер нужен."""
+        with mock.patch("myflow.asr_gigaam.GigaAmClient.package_available",
+                        staticmethod(lambda: True)):
+            self.assertTrue(whisper_needed(AsrConfig(backend="gigaam", router=True)))
+            self.assertTrue(whisper_needed(AsrConfig(backend="auto", router=True)))
+            # Явный whisper и так требует сервер.
+            self.assertTrue(whisper_needed(AsrConfig(backend="whisper", router=False)))
 
     def test_fallback_when_package_missing(self):
         with mock.patch("myflow.asr_gigaam.GigaAmClient.package_available",

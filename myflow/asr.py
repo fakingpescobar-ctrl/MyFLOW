@@ -111,6 +111,18 @@ def whisper_needed(cfg: AsrConfig | None = None) -> bool:
     import os
     if os.environ.get("MYFLOW_KEEP_WHISPER", "").strip() in ("1", "true", "yes"):
         return True
+    # Авто-выбор движка: whisper нужен как «второе мнение» для подозрительных
+    # фраз (см. myflow/asr_router.py).
+    if cfg is None:
+        try:
+            from myflow.config import SettingsStore
+            cfg = SettingsStore().get().asr
+        except Exception:  # noqa: BLE001
+            cfg = None
+    if cfg is not None and getattr(cfg, "router", False):
+        backend = (getattr(cfg, "backend", "") or "").strip().lower()
+        if backend in ("auto", "gigaam"):
+            return True
     if cfg is None:
         try:
             from myflow.config import SettingsStore

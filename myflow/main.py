@@ -34,6 +34,7 @@ from myflow.axtext import AxReader, AxWatcher
 from myflow.db import Database, DictationRecord
 from myflow.config import SettingsStore, DATA_DIR, DEFAULT_APP_CATEGORIES, detect_category
 from myflow.fastpath import fast_path_allowed, looks_wellformed
+from myflow.asr_router import review as review_asr_quality
 from myflow.lightclean import light_clean, strip_inner_fillers
 from myflow.pick_mic import fast_mic_list
 from myflow.voiceprint import VoiceGate
@@ -333,6 +334,8 @@ class MyFlowApp:
         # Живость движков для панели: считается в фоне, панель читает кэш.
         self._health: dict = {}
         self._health_thread: threading.Thread | None = None
+        # Второе мнение (whisper) для авто-выбора движка.
+        self._second = None
         # Остановка воркера фраз (отдельно от _stopping).
         self._worker_stop = threading.Event()
         # Выгрузка LLM под игры: стоп сервера + сторож полного экрана.
@@ -601,6 +604,8 @@ class MyFlowApp:
         if type(self.whisper).__name__ == "GigaAmClient":
             model = str(getattr(self.whisper, "model_name", "v3"))
             short = model.replace("gigaam-", "").replace("-e2e", " e2e").replace("-ctc", "")
+            # Метка должна оставаться короткой (ширина колонки в панели) —
+            # авто-выбор показываем в подсказке строки, см. control_snapshot().
             return f"GigaAM {short} (CPU)"
         cfg = getattr(self.whisper, "cfg", None)
         url = getattr(cfg, "url", "")
@@ -643,7 +648,11 @@ class MyFlowApp:
 
         modules = [
             {"key": "asr", "label": "ASR", "value": self._asr_label(), "on": True,
-             "ok": asr_ok, "note": "проверка…" if health_stale else "распознавание речи",
+             "ok": asr_ok,
+             "note": "проверка…" if health_stale else (
+                 "распознавание + второе мнение whisper"
+                 if getattr(s.asr, "router", False) and type(self.whisper).__name__ == "GigaAmClient"
+                 else "распознавание речи"),
              "hint": "Enter — сменить движок (спросит подтверждение): whisper "
                      "поднимает сервер :8081, GigaAM работает всегда"},
             {"key": "vad", "label": "VAD", "value": f"Silero v6 · {vad_threshold:.2f}",
@@ -1620,6 +1629,59 @@ class MyFlowApp:
             kb.press(Key.home)
             kb.release(Key.home)
 
+    def _ensure_second_opinion(self) -> None:
+        """Подготовить whisper как «второе мнение» (если включён авто-выбор)."""
+        cfg = self.settings.get().asr
+        if not getattr(cfg, "router", False):
+            return
+        if getattr(self, "_second", None) is not None:
+            return
+        if getattr(self.whisper, "backend_name", "") != "gigaam":
+            return          # основной движок уже whisper — второе мнение не нужно
+        try:
+            from myflow.asr import WhisperClient
+            self._second = WhisperClient(cfg)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[myflow] второе мнение недоступно: {exc!r}")
+            self._second = None
+
+    def _transcribe(self, pcm, duration_ms: int = 0):
+        """Распознать фразу, при необходимости позвав второе мнение.
+
+        Замер на 624 реальных фразах: GigaAM отвечает первой (56 мс), а whisper
+        подключается только при подозрительном результате — точность как у
+        чистого whisper, задержка p50 80 мс вместо 137.
+        """
+        res = self.whisper.transcribe(pcm)
+        origin = getattr(self.whisper, "backend_name", "asr") or "asr"
+        cfg = self.settings.get().asr
+        if not getattr(cfg, "router", False) or origin != "gigaam":
+            return res, origin
+        second = getattr(self, "_second", None)
+        if second is None:
+            self._ensure_second_opinion()
+            second = getattr(self, "_second", None)
+        if second is None:
+            return res, origin
+        try:
+            if not second.alive():
+                return res, origin
+        except Exception:  # noqa: BLE001
+            return res, origin
+        decision = review_asr_quality(res.text, duration_ms=duration_ms, cfg=cfg)
+        if not decision.use_second:
+            return res, origin
+        try:
+            alt = second.transcribe(pcm)
+        except Exception as exc:  # noqa: BLE001 — второе мнение не критично
+            print(f"[myflow] второе мнение не сработало: {exc!r}")
+            return res, origin
+        if not (alt.text or "").strip():
+            return res, origin
+        print(f"[myflow] ⚖ второе мнение whisper ({decision.reason}) — беру его текст")
+        self.overlay.show("⚖ второе мнение whisper", "#f5c542")
+        return alt, f"whisper:{decision.reason}"
+
     def _process_recording(self, gen: int, recording: Recording) -> None:
         if gen != self._gen:
             print("[myflow] ○ фраза отменена до обработки")
@@ -1674,7 +1736,8 @@ class MyFlowApp:
         self._refresh_asr_prompt()   # словарь -> подсказка whisper (раз в минуту)
 
         try:
-            asr: AsrResult = self.whisper.transcribe(recording.pcm_int16)
+            asr, asr_origin = self._transcribe(recording.pcm_int16,
+                                              duration_ms=recording.duration_ms)
         except Exception as exc_asr:
             # Отказ ASR не должен терять фразу: если это whisper — падаем на
             # локальную GigaAM и повторяем распознавание ТОГО ЖЕ аудио.

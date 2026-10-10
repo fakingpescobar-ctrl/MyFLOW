@@ -29,7 +29,8 @@ sys.path.insert(0, str(ROOT))
 
 from myflow.config import SettingsStore                      # noqa: E402
 from myflow.fastpath import fast_path_allowed, looks_wellformed  # noqa: E402
-from myflow.lightclean import light_clean, strip_inner_fillers                    # noqa: E402
+from myflow.lightclean import light_clean, strip_inner_fillers
+from myflow.asr_router import review as review_asr_quality                    # noqa: E402
 
 WISPR_DIR = ROOT / "data" / "eval_wispr"
 _WORD = re.compile(r"[а-яёa-z0-9]+", re.IGNORECASE)
@@ -68,7 +69,8 @@ def pct(values: list[float], q: float) -> float:
     return v[min(len(v) - 1, int(len(v) * q))]
 
 
-def evaluate(rows: list[dict], use_polish: str = "auto", limit: int | None = None) -> dict:
+def evaluate(rows: list[dict], use_polish: str = "auto", limit: int | None = None,
+             router_client=None) -> dict:
     from myflow.asr import make_asr_client, whisper_needed  # noqa: PLC0415
     from myflow.polish import PolishClient                 # noqa: PLC0415
 
@@ -94,6 +96,21 @@ def evaluate(rows: list[dict], use_polish: str = "auto", limit: int | None = Non
         res = asr.transcribe(pcm)
         asr_ms = int((time.perf_counter() - t0) * 1000)
         our_asr = res.text
+        route_note = ""
+        # Боевой авто-выбор движка: тот же модуль, что в myflow.main._transcribe.
+        if (router_client is not None
+                and getattr(asr, "backend_name", "") == "gigaam"):
+            decision = review_asr_quality(our_asr, duration_ms=int((row.get("speech_seconds") or 0) * 1000),
+                                          cfg=cfg.asr)
+            if decision.use_second:
+                try:
+                    alt = router_client.transcribe(pcm)
+                    if (alt.text or "").strip():
+                        our_asr = alt.text
+                        asr_ms += alt.latency_ms
+                        route_note = f"second:{decision.reason}"
+                except Exception as exc:  # noqa: BLE001
+                    route_note = f"second_failed:{type(exc).__name__}"
 
         style = "plain"
         fast_ok, reason = fast_path_allowed(getattr(asr, "backend_name", ""), style, our_asr)
@@ -127,6 +144,7 @@ def evaluate(rows: list[dict], use_polish: str = "auto", limit: int | None = Non
         results.append({
             "id": row["id"],
             "route": route,
+            "asr_route": route_note or "primary",
             "our_asr": our_asr,
             "our_final": our_final,
             "their_asr": row["their_asr"],

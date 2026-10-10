@@ -196,6 +196,12 @@ def make_app(auto=False, busy=False, gen=0, polish_enabled=False, paster=None):
     app.overlay = _Overlay()
     app.paster = paster or _Paster()
     app.whisper = _Whisper()
+    # Пайплайн зовёт app._transcribe() (авто-выбор движка): в заглушке
+    # это просто прямой вызов распознавателя.
+    app._transcribe = lambda pcm, duration_ms=0: (
+        app.whisper.transcribe(pcm), getattr(app.whisper, 'backend_name', 'asr'))
+    app._ensure_second_opinion = lambda: None
+    app._second = None
     app.audio = mock.Mock()
     app.audio.save.return_value = None
     app.ax = mock.Mock()
