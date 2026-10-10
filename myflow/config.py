@@ -188,6 +188,10 @@ class PolishConfig:
     wait_on_fail_seconds: float = 2.5
     auto_repolish: bool = True
     auto_repolish_interval: float = 15.0
+    # Игра на весь экран -> выгрузить LLM, чтобы не отнимать VRAM. При следующей
+    # диктовке сервер поднимется сам (автолечение), а фраза попадёт в очередь.
+    auto_unload_on_game: bool = True
+    game_detect_seconds: float = 20.0     # столько секунд полного экрана = «игра»
 
 
 @dataclass
@@ -227,6 +231,8 @@ class HotkeyConfig:
     lock_target_key: str = "f6"
     # Вставить отложенные фразы немедленно (если ждал паузы, а нужно сейчас).
     flush_pending_key: str = "f10"
+    # Выгрузить/поднять локальную LLM (освободить VRAM под игру).
+    unload_llm_key: str = "f11"
     suppress: bool = False          # True: не отдавать эти клавиши активному окну
 
 

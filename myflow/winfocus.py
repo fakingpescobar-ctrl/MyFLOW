@@ -103,6 +103,50 @@ def current_window() -> WindowRef | None:
     return window_info(hwnd)
 
 
+def is_fullscreen_foreground(tolerance: int = 2) -> bool:
+    """Занят ли экран полноэкранным окном (игра/видео).
+
+    Сравниваем прямоугольник активного окна с границами его монитора: у
+    полноэкранных игр они совпадают (иногда с погрешностью в пару пикселей).
+    Нужно, чтобы выгрузить LLM и не отнимать VRAM у игры. Безопасно: при любой
+    ошибке возвращаем False (никаких действий).
+    """
+    if not _IS_WINDOWS:
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        hwnd = int(user32.GetForegroundWindow())
+        if not hwnd:
+            return False
+        rect = wintypes.RECT()
+        if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return False
+        # Монитор по центру окна (у мультимонитора границы разные).
+        cx = (rect.left + rect.right) // 2
+        cy = (rect.top + rect.bottom) // 2
+        MONITOR_DEFAULTTONEAREST = 2
+
+        class _MONITORINFO(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT),
+                        ("rcWork", wintypes.RECT), ("dwFlags", wintypes.DWORD)]
+
+        point = wintypes.POINT(cx, cy)
+        monitor = user32.MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST)
+        if not monitor:
+            return False
+        info = _MONITORINFO()
+        info.cbSize = ctypes.sizeof(_MONITORINFO)
+        if not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+            return False
+        screen = info.rcMonitor
+        return (abs(rect.left - screen.left) <= tolerance
+                and abs(rect.top - screen.top) <= tolerance
+                and abs(rect.right - screen.right) <= tolerance
+                and abs(rect.bottom - screen.bottom) <= tolerance)
+    except Exception:  # noqa: BLE001 — не Windows/нет доступа: не мешаем работать
+        return False
+
+
 def focus_window(hwnd: int) -> bool:
     """Вернуть фокус в окно. True, если окно стало активным.
 

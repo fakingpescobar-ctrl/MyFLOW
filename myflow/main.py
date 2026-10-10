@@ -318,6 +318,10 @@ class MyFlowApp:
         self._deferred_polish_count = 0
         self._polish_user_off = False   # полировку выключил сам пользователь
         self._mic_watchdog: threading.Thread | None = None
+        # Выгрузка LLM под игры: стоп сервера + сторож полного экрана.
+        self._server_stopper = None
+        self._game_watch: threading.Thread | None = None
+        self._fullscreen_since: float | None = None
         # Ф8: ручной стиль (F7) перекрывает per-app; None = авто по окну.
         self._style_override: str | None = None
         self._last_style_switch_t = 0.0
@@ -384,6 +388,8 @@ class MyFlowApp:
         self._ensure_repolish_worker()
         # Сторож микрофона: Bluetooth/USB отвалился -> переоткрываем поток.
         self._ensure_mic_watchdog()
+        # Сторож игр: полный экран -> выгружаем LLM, VRAM уходит игре.
+        self._ensure_game_watch()
         # И прогреваем LLM заранее: холодный старт llama-server — это ~8 секунд, и
         # если пользователь начнёт диктовать раньше, фраза уйдёт сырым ASR.
         self._prewarm_llm()
@@ -800,6 +806,11 @@ class MyFlowApp:
             s.polish.enabled = not s.polish.enabled
             self._polish_user_off = not s.polish.enabled
             self.settings.save()
+            # Выключил — сразу гасим сервер (VRAM освобождается), включил — поднимаем.
+            if s.polish.enabled:
+                self._ensure_llm_async()
+            else:
+                self._stop_llm_server()
             print(f"[myflow] полировка: {'вкл' if s.polish.enabled else 'выкл'}")
             return True, f"полировка: {'вкл' if s.polish.enabled else 'выкл'}"
 
@@ -895,6 +906,9 @@ class MyFlowApp:
             return
         if _matches(key, getattr(hk, "flush_pending_key", "f10")):
             self._flush_pending()
+            return
+        if _matches(key, getattr(hk, "unload_llm_key", "f11")):
+            self._toggle_llm_unload()
             return
         if _matches(key, hk.cancel_key):
             self._cancel_all()
@@ -1056,6 +1070,29 @@ class MyFlowApp:
             return PolishResult(text=text, latency_ms=0, skipped=True)
 
     # ---- автолечение LLM ----
+
+    def set_server_stopper(self, stopper) -> None:
+        """Подключить «останови сервер» (тоже даёт TUI/Supervisor).
+
+        Нужно для выгрузки LLM: гасим llama-server и освобождаем VRAM, а не
+        просто помечаем полировку выключенной.
+        """
+        self._server_stopper = stopper
+
+    def _stop_llm_server(self) -> None:
+        """Погасить LLM в фоне (не блокируя диктовку и UI)."""
+        stopper = self._server_stopper
+        if stopper is None:
+            return
+        threading.Thread(target=lambda: self._safe_stop(stopper),
+                         daemon=True, name="llm-unload").start()
+
+    @staticmethod
+    def _safe_stop(stopper) -> None:
+        try:
+            stopper("llm")
+        except Exception:  # noqa: BLE001 — выгрузка не должна ломать приложение
+            pass
 
     def set_server_guard(self, guard) -> None:
         """Подключить «подниматель» серверов (его даёт TUI/Supervisor).
@@ -2066,6 +2103,65 @@ class MyFlowApp:
                     pass
 
         threading.Thread(target=_run, daemon=True, name="edit-watcher").start()
+
+    def _toggle_llm_unload(self) -> None:
+        """F11: выгрузить LLM (освободить VRAM) или поднять обратно.
+
+        Для игр: одно нажатие — и 6 ГБ VRAM свободны. Полировка при этом
+        выключается и НЕ включается автолечением, пока не вернёшь сам.
+        """
+        cfg = self.settings.get().polish
+        if cfg.enabled:
+            cfg.enabled = False
+            self._polish_user_off = True
+            self.settings.save()
+            self._stop_llm_server()
+            print("[myflow] ⏏ LLM выгружена — VRAM освобождается "
+                  "(F11 — вернуть, полировка включится сама)")
+            self.overlay.show("⏏ LLM выгружена — VRAM свободна", "#f5c542")
+        else:
+            cfg.enabled = True
+            self._polish_user_off = False
+            self.settings.save()
+            print("[myflow] ▲ LLM включается — поднимаю сервер в фоне")
+            self.overlay.show("▲ LLM включается…", "#46a758")
+            self._ensure_llm_async()
+
+    def _game_watch_loop(self, interval: float = 5.0) -> None:
+        """Полноэкранная игра -> выгрузить LLM (не отнимать VRAM)."""
+        from myflow.winfocus import is_fullscreen_foreground
+        while not self._stopping.wait(interval):
+            try:
+                cfg = self.settings.get().polish
+                if not getattr(cfg, "auto_unload_on_game", True):
+                    continue
+                fullscreen = is_fullscreen_foreground()
+                now = time.monotonic()
+                if not fullscreen:
+                    if self._fullscreen_since is not None:
+                        self._fullscreen_since = None
+                        if self._polish_user_off and cfg.enabled is False:
+                            print("[myflow] игра/полный экран закрыт — LLM поднимется "
+                                  "при следующей фразе (или F11)")
+                    continue
+                if self._fullscreen_since is None:
+                    self._fullscreen_since = now
+                    continue
+                hold = float(getattr(cfg, "game_detect_seconds", 20.0))
+                if (now - self._fullscreen_since >= hold and cfg.enabled
+                        and not self._polish_user_off):
+                    print(f"[myflow] ⏏ полный экран уже {hold:.0f} с — выгружаю LLM, "
+                          f"чтобы не занимать VRAM")
+                    self._toggle_llm_unload()
+            except Exception as exc:  # noqa: BLE001 — сторож не должен падать
+                print(f"[myflow] сторож игр: {exc!r}")
+
+    def _ensure_game_watch(self) -> None:
+        if self._game_watch is not None and self._game_watch.is_alive():
+            return
+        self._game_watch = threading.Thread(target=self._game_watch_loop,
+                                           daemon=True, name="game-watch")
+        self._game_watch.start()
 
     def _llm_confirms_correction(self, src: str, dst: str) -> bool:
         """Спросить у LLM: это правка ОШИБКИ распознавания, а не грамматика?

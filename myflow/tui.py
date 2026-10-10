@@ -667,6 +667,25 @@ class Supervisor:
         self._errors[spec.key] = f"не ответил за {int(timeout)} с (лог: {spec.log.name})"
         return False
 
+    def stop(self, spec: ServerSpec) -> bool:
+        """Погасить ОДИН свой сервер (чужой не трогаем). True — процесс был наш."""
+        with self._lock:
+            proc = self._procs.pop(spec.key, None)
+            own = spec.key in self._own
+            self._own.discard(spec.key)
+        if proc is None or not own:
+            return False
+        try:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except Exception:  # noqa: BLE001
+                    proc.kill()
+        except Exception:  # noqa: BLE001
+            return False
+        return True
+
     def stop_all(self) -> None:
         """Гасим только СВОИ процессы: чужие экземпляры на портах не трогаем."""
         with self._lock:
@@ -969,7 +988,8 @@ def key_legend(width: int, module_hint: str | None = None) -> list[str]:
              ("r", "мастер"), ("q", "выход"),
              ("F6", "привязать окно"), ("F7", "стиль"), ("F8", "запись/стоп"),
              ("F9", "отмена"), ("F10", "вставить отложенное"),
-             ("F5", "пересканировать микрофоны")]
+             ("F5", "пересканировать микрофоны"),
+             ("F11", "выгрузить/поднять LLM")]
     lines = button_bar(chips, width)
     if module_hint:
         lines.append(f"{C_WARN}подсказка: {module_hint}{RESET}")
@@ -1393,8 +1413,9 @@ class TuiApp:
         except Exception as exc:  # noqa: BLE001
             self._show_error(str(exc))
             return "quit"
-        # Автолечение LLM: приложение просит поднять сервер — TUI это умеет.
+        # Автолечение LLM: приложение просит поднять/погасить сервер — TUI умеет.
         self.app.set_server_guard(self._ensure_server_alive)
+        self.app.set_server_stopper(self._stop_server_by_key)
         try:
             self.app.start()
         except Exception as exc:  # noqa: BLE001
@@ -1625,6 +1646,21 @@ class TuiApp:
             if self._overlay is not None:
                 self._overlay.gfx = None
             self.state.add_log("графическая плашка выключена")
+
+    def _stop_server_by_key(self, key: str) -> bool:
+        """Погасить сервер по ключу (для выгрузки LLM под игру). True — погасили."""
+        spec = next((x for x in self.supervisor.specs if x.key == key), None)
+        if spec is None:
+            return False
+        try:
+            stopped = self.supervisor.stop(spec)
+        except Exception:  # noqa: BLE001
+            return False
+        with self.state.lock:
+            self.state.servers = self.supervisor.health_snapshot()
+        if stopped:
+            self.state.add_log(f"{spec.title}: выгружен (память освобождена)")
+        return bool(stopped)
 
     def _ensure_server_alive(self, key: str) -> bool:
         """Поднять сервер по ключу (llm/asr) для автолечения. True — он доступен.
