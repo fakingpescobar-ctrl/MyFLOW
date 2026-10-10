@@ -10,6 +10,8 @@ import time
 from dataclasses import dataclass
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from myflow.config import PolishConfig
 
@@ -154,11 +156,36 @@ DATA_GUARD = (
 
 
 class PolishClient:
+    # На этой машине соединение с закрытым портом НЕ отвергается сразу, а висит
+    # до таймаута: с requests-дефолтом неудачная полировка стоила 4 секунды, а
+    # проверка живости — 2 секунды. Короткий connect-таймаут решает проблему:
+    # ConnectTimeout наступает за ~0.3 с, а на генерацию это не влияет (её
+    # ограничивает read-таймаут).
+    CONNECT_TIMEOUT = 0.35
+
     def __init__(self, cfg: PolishConfig) -> None:
         self.cfg = cfg
         self._model_cache: str | None = None
         self._model_cache_t: float = 0.0
         self._model_cache_ttl: float = 300.0   # модель на сервере могут сменить
+        # Без авторетраев: urllib3 добавлял backoff к и без того медленному отказу.
+        self.session = requests.Session()
+        self.session.trust_env = False
+        self.session.mount("http://", HTTPAdapter(
+            max_retries=Retry(total=0, connect=0, read=0)))
+
+    def _timeout(self) -> tuple[float, float]:
+        """(connect, read): connect — короткий, read — на генерацию."""
+        return (self.CONNECT_TIMEOUT, float(self.cfg.timeout_seconds))
+
+    def alive(self, timeout: float | None = None) -> bool:
+        """Быстрая проверка живости: ~0.3 с, если сервер лежит."""
+        try:
+            r = self.session.get(f"{self.cfg.url}/models",
+                                 timeout=(timeout or self.CONNECT_TIMEOUT, 2.0))
+            return bool(r.ok)
+        except requests.RequestException:
+            return False
 
     def _effective_model(self) -> str:
         """Точное имя загруженной модели (llama-server строг к 404)."""
@@ -166,7 +193,8 @@ class PolishClient:
         if self._model_cache is not None and now - self._model_cache_t < self._model_cache_ttl:
             return self._model_cache
         try:
-            resp = requests.get(f"{self.cfg.url}/models", timeout=3)
+            resp = self.session.get(f"{self.cfg.url}/models",
+                                    timeout=self._timeout())
             if resp.ok:
                 data = resp.json().get("data") or []
                 if data:
@@ -219,7 +247,7 @@ class PolishClient:
 
         started = time.perf_counter()
         try:
-            resp = requests.post(
+            resp = self.session.post(
                 f"{self.cfg.url}/chat/completions",
                 json={
                     "model": self._effective_model(),
@@ -235,7 +263,7 @@ class PolishClient:
                     # простынёй «Ошибка распознавания...» вместо текста).
                     "chat_template_kwargs": {"enable_thinking": False},
                 },
-                timeout=self.cfg.timeout_seconds,
+                timeout=self._timeout(),
             )
         except requests.RequestException as exc:
             raise RuntimeError(f"llama-server недоступен ({self.cfg.url}): {exc}") from exc

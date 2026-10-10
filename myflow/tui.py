@@ -1381,11 +1381,15 @@ class TuiApp:
         except Exception as exc:  # noqa: BLE001
             self._show_error(str(exc))
             return "quit"
+        # Автолечение LLM: приложение просит поднять сервер — TUI это умеет.
+        self.app.set_server_guard(self._ensure_server_alive)
         try:
             self.app.start()
         except Exception as exc:  # noqa: BLE001
             self._show_error(str(exc))
             return "quit"
+        # Настройки — общие с приложением (одно хранилище, а не две копии).
+        self.store = self.app.settings
         try:
             _install_console_handler(self._shutdown_now)
         except Exception:  # noqa: BLE001
@@ -1418,8 +1422,12 @@ class TuiApp:
                     journal = [f"{C_DIM}пока пусто — нажми F8 и говори{RESET}"]
                 status_line, status_ansi, _, _ = self.state.snapshot()
                 counters = snap.get("counters", {})
-                scan_note = ("  ·  сканирую микрофоны…"
-                             if counters.get("mic_scanning") else "")
+                notes = []
+                if counters.get("mic_scanning"):
+                    notes.append("сканирую микрофоны…")
+                if counters.get("deferred_polish"):
+                    notes.append(f"{counters['deferred_polish']} фраз ждут дополировки")
+                scan_note = ("  ·  " + "  ·  ".join(notes)) if notes else ""
                 self.console.draw(render_panel(
                     snap, w, h, self._panel_header(), journal, offset, sel,
                     level=(meter.peak(), meter.error),
@@ -1605,6 +1613,25 @@ class TuiApp:
             if self._overlay is not None:
                 self._overlay.gfx = None
             self.state.add_log("графическая плашка выключена")
+
+    def _ensure_server_alive(self, key: str) -> bool:
+        """Поднять сервер по ключу (llm/asr) для автолечения. True — он доступен.
+
+        Вызывается из фонового потока приложения, поэтому ничего не рисует:
+        только запускает процесс и ждёт готовности.
+        """
+        spec = next((x for x in self.supervisor.specs if x.key == key), None)
+        if spec is None:
+            return False
+        state, _ = self.supervisor.status(spec)
+        if state in ("ok", "external"):
+            return True
+        if not self.supervisor.start(spec):
+            return False
+        ok = self.supervisor.wait_ready(spec, 60.0)
+        with self.state.lock:
+            self.state.servers = self.supervisor.health_snapshot()
+        return ok
 
     def _restart_down_servers(self) -> None:
         for spec in self.supervisor.specs:

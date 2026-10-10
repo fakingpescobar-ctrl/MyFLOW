@@ -117,6 +117,15 @@ class PolishConfig:
     # e2e и стиля plain; экономит 110-180 мс на фразе.
     skip_wellformed: bool = True
     timeout_seconds: float = 60.0
+    # Автолечение LLM: если сервер не отвечает, приложение само поднимает его,
+    # ждёт до wait_on_fail_seconds и повторяет полировку ЭТОЙ ЖЕ фразы — чтобы
+    # не вставлять сырой ASR, когда сервер просто не успел стартовать.
+    # Недополированные фразы копятся в очереди и дополировываются, когда LLM
+    # оживёт (см. Database.deferred_polish).
+    auto_start_server: bool = True
+    wait_on_fail_seconds: float = 2.5
+    auto_repolish: bool = True
+    auto_repolish_interval: float = 15.0
 
 
 @dataclass

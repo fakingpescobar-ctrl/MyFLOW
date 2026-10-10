@@ -325,5 +325,33 @@ class PanelInteractTest(unittest.TestCase):
         self.assertIs(self.tui._store(), self.app.settings)
 
 
+# ---------------------------------------------------------------------------
+# Тесты не должны трогать сеть и звуковое железо: фоновое сканирование
+# микрофонов (PortAudio) доживало до выключения интерпретатора и роняло процесс
+# повреждением кучи, а реальные HTTP-проверки тормозили прогон.
+# ---------------------------------------------------------------------------
+_MODULE_PATCHES: list = []
+
+
+def setUpModule() -> None:
+    from unittest import mock as _mock
+    import myflow.main as _M
+    import myflow.pick_mic as _PM
+    _MODULE_PATCHES.extend([
+        _mock.patch.object(_M, "_health_check_llm", return_value=False),
+        _mock.patch.object(_M.MyFlowApp, "_refresh_mics_async", lambda self: None),
+        _mock.patch.object(_PM, "fast_mic_list", return_value=[]),
+        _mock.patch.object(_PM, "gather_mics", return_value=[]),
+    ])
+    for patcher in _MODULE_PATCHES:
+        patcher.start()
+
+
+def tearDownModule() -> None:
+    for patcher in reversed(_MODULE_PATCHES):
+        patcher.stop()
+    _MODULE_PATCHES.clear()
+
+
 if __name__ == "__main__":
     unittest.main()

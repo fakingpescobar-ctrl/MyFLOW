@@ -180,13 +180,31 @@ def _health_check(whisper) -> bool:
         return False
 
 
-def _health_check_llm(polish: PolishClient) -> bool:
-    import requests
-    try:
-        r = requests.get(f"{polish.cfg.url}/models", timeout=3)
-        return r.ok
-    except requests.RequestException:
+# Пока LLM лежит, не долбим её на каждой фразе: на этой машине отказ соединения
+# стоит до ~2 секунд (порт не отвергает, а «висит»), и каждое обращение
+# превращалось в заметную задержку диктовки. Держим короткий кэш «лежит».
+_LLM_DOWN_UNTIL = 0.0
+_LLM_DOWN_TTL = 3.0
+
+
+def _health_check_llm(polish: PolishClient, *, cached: bool = True) -> bool:
+    """Жива ли LLM. Быстро (~0.3 с) и с кэшем неудачи на несколько секунд."""
+    global _LLM_DOWN_UNTIL
+    now = time.monotonic()
+    if cached and now < _LLM_DOWN_UNTIL:
         return False
+    alive = False
+    checker = getattr(polish, "alive", None)
+    try:
+        if checker is not None:
+            alive = bool(checker())
+    except Exception:  # noqa: BLE001
+        alive = False
+    if alive:
+        _LLM_DOWN_UNTIL = 0.0
+    else:
+        _LLM_DOWN_UNTIL = now + _LLM_DOWN_TTL
+    return alive
 
 
 class MyFlowApp:
@@ -285,6 +303,11 @@ class MyFlowApp:
         self._last_history_id: int | None = None
         self._polish_fails = 0
         self._polish_watchdog: threading.Thread | None = None
+        # Автолечение LLM: «подниматель» серверов + очередь недополированных.
+        self._server_guard = None
+        self._llm_revive: threading.Thread | None = None
+        self._repolish_thread: threading.Thread | None = None
+        self._deferred_polish_count = 0
         # Ф8: ручной стиль (F7) перекрывает per-app; None = авто по окну.
         self._style_override: str | None = None
         self._last_style_switch_t = 0.0
@@ -346,6 +369,27 @@ class MyFlowApp:
                   f"cancel={self.settings.get().hotkey.cancel_key}, "
                   f"style={self.settings.get().hotkey.style_cycle_key} (цикл стилей)")
         self._log_stats()
+
+        # Автолечение LLM: следим за очередью недополированных фраз.
+        self._ensure_repolish_worker()
+        # И прогреваем LLM заранее: холодный старт llama-server — это ~8 секунд, и
+        # если пользователь начнёт диктовать раньше, фраза уйдёт сырым ASR.
+        self._prewarm_llm()
+
+    def _prewarm_llm(self) -> None:
+        """Поднять LLM сразу при запуске (фоном), не дожидаясь первой фразы."""
+        if not self.polish.cfg.enabled:
+            return
+        if not getattr(self.polish.cfg, "auto_start_server", True):
+            return
+        try:
+            if _health_check_llm(self.polish):
+                print("[myflow] LLM уже отвечает — прогрев не нужен")
+                return
+        except Exception:  # noqa: BLE001
+            pass
+        print("[myflow] LLM не отвечает — поднимаю заранее (в фоне)")
+        self._ensure_llm_async()
 
     def _log_stats(self) -> None:
         """Сводка надёжности по истории (аналог их телеметрии: ошибки/перцентили)."""
@@ -455,13 +499,7 @@ class MyFlowApp:
                 asr_ok = bool(self.whisper.health())
             except Exception:  # noqa: BLE001
                 asr_ok = False
-            llm_ok = False
-            if s.polish.enabled:
-                try:
-                    import requests
-                    llm_ok = bool(requests.get(f"{s.polish.url}/models", timeout=1.5).ok)
-                except Exception:  # noqa: BLE001
-                    llm_ok = False
+            llm_ok = bool(s.polish.enabled) and _health_check_llm(self.polish)
             self._health_cache = (now, asr_ok, llm_ok)
 
         voice = getattr(self, "voice", None)
@@ -543,8 +581,13 @@ class MyFlowApp:
              "hint": "Enter — закрепить/снять окно (F6)"},
         ]
 
+        try:
+            self._deferred_polish_count = self.db.count_deferred_polish()
+        except Exception:  # noqa: BLE001
+            pass
         counters = {
             "mic_scanning": bool(getattr(self, "_mic_scanning", False)),
+            "deferred_polish": int(getattr(self, "_deferred_polish_count", 0)),
             "phrases": int(getattr(self, "_phrases", 0)),
             "pending": len(getattr(self, "_pending", [])),
             "queue": self._queue.qsize() if hasattr(self, "_queue") else 0,
@@ -928,6 +971,22 @@ class MyFlowApp:
         """
         if not self.polish.cfg.enabled:
             return PolishResult(text=text, latency_ms=0, skipped=True)
+        # Быстрый отказ: если LLM заведомо лежит (или её только что не стало),
+        # не тратим на неё секунды — сразу сырой ASR, автолечение в фоне и
+        # очередь на дополировку.
+        if not _health_check_llm(self.polish):
+            self._polish_fails += 1
+            print("[myflow] ! LLM не отвечает — вставлю сырой ASR "
+                  "(поднимаю сервер в фоне, фраза в очереди на дополировку)")
+            # Ждать здесь НЕЛЬЗЯ: холодный старт llama-server ~8 с, диктовка
+            # встала бы. Поднимаем в фоне, а фразу дополирует очередь.
+            self._ensure_llm_async()
+            if self._polish_fails >= 3:
+                self.polish.cfg.enabled = False
+                print("[myflow] ! LLM недоступна 3 раза подряд — полировка выключена "
+                      "до восстановления сервера (проверяю раз в 30с)")
+                self._ensure_polish_watchdog()
+            return PolishResult(text=text, latency_ms=0, skipped=True)
         try:
             result = self.polish.polish(text, style=style, dictionary=dic)
             self._polish_fails = 0
@@ -935,13 +994,142 @@ class MyFlowApp:
         except Exception as exc:  # noqa: BLE001 — это защитный слой
             self._polish_fails += 1
             _tb_to_file("ОШИБКА ПОЛИРОВКИ")
-            print(f"[myflow] ! полировка не удалась ({exc}) — вставлю сырой ASR")
+            print(f"[myflow] ! полировка не удалась ({exc})")
+            # АВТОЛЕЧЕНИЕ: поднимаем сервер и ждём его до wait_on_fail_seconds,
+            # затем пробуем ещё раз — иначе фраза уйдёт сырым ASR из-за того,
+            # что llama-server просто не успел стартовать.
+            if self._revive_llm_and_retry(text, style, dic):
+                # ВАЖНО: счётчик ошибок сбрасываем только при успехе повтора —
+                # иначе фраза попадёт в историю как polish_error, хотя полировка
+                # на самом деле удалась (это поймал тест).
+                try:
+                    result = self.polish.polish(text, style=style, dictionary=dic)
+                    self._polish_fails = 0
+                    return result
+                except Exception as exc2:  # noqa: BLE001
+                    print(f"[myflow] ! повторная полировка не удалась ({exc2})")
             if self._polish_fails >= 3:
                 self.polish.cfg.enabled = False
                 print("[myflow] ! LLM недоступна 3 раза подряд — полировка выключена "
                       "до восстановления сервера (проверяю раз в 30с)")
                 self._ensure_polish_watchdog()
+            print("[myflow]   вставлю сырой ASR; фраза в очереди на дополировку")
             return PolishResult(text=text, latency_ms=0, skipped=True)
+
+    # ---- автолечение LLM ----
+
+    def set_server_guard(self, guard) -> None:
+        """Подключить «подниматель» серверов (его даёт TUI/Supervisor).
+
+        guard(key) -> bool: True, если сервер уже поднят или поднялся.
+        Приложение не знает, как запускать llama-server, поэтому спрашивает.
+        """
+        self._server_guard = guard
+
+    def _ensure_llm_async(self) -> None:
+        """Поднять LLM в фоне (не блокируя вставку фразы)."""
+        guard = self._server_guard
+        cfg = self.polish.cfg
+        # getattr — чтобы старые конфиги (и тестовые заглушки) не падали.
+        if not getattr(cfg, "auto_start_server", True) or guard is None:
+            return
+        if self._llm_revive is not None and self._llm_revive.is_alive():
+            return
+
+        def worker() -> None:
+            try:
+                started = bool(guard("llm"))
+                if started:
+                    print("[myflow] ▲ LLM поднята автоматически")
+            except Exception:  # noqa: BLE001 — автолечение не должно ломать диктовку
+                pass
+
+        self._llm_revive = threading.Thread(target=worker, daemon=True,
+                                            name="llm-revive")
+        self._llm_revive.start()
+
+    def _wait_llm_ready(self, seconds: float) -> bool:
+        """Ждать живости LLM до seconds (шаг 0.25 с). True — дождались."""
+        if seconds <= 0:
+            return False
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if self._stopping.is_set():
+                return False
+            if _health_check_llm(self.polish):
+                return True
+            time.sleep(0.25)
+        return False
+
+    def _revive_llm_and_retry(self, text: str, style: str, dic: list[dict]) -> bool:
+        """Поднять LLM и дождаться её. True — можно пробовать полировку снова."""
+        cfg = self.polish.cfg
+        if not getattr(cfg, "auto_start_server", True):
+            return False
+        # Сервер мог просто перезапускаться — короткое ожидание без запуска.
+        if _health_check_llm(self.polish):
+            return True
+        self._ensure_llm_async()
+        waited = self._wait_llm_ready(float(getattr(cfg, "wait_on_fail_seconds", 2.5)))
+        if waited:
+            print(f"[myflow]   LLM поднялась — повторяю полировку "
+                  f"(ждали до {getattr(cfg, 'wait_on_fail_seconds', 2.5):.1f} с)")
+        return waited
+
+    def _repolish_loop(self) -> None:
+        """Фон: когда LLM ожила — дополировать фразы из очереди (status=polish_error)."""
+        cfg0 = self.polish.cfg
+        interval = max(5.0, float(getattr(cfg0, "auto_repolish_interval", 15.0)))
+        while not self._stopping.wait(interval):
+            try:
+                if not getattr(self.polish.cfg, "auto_repolish", True):
+                    continue
+                pending = self.db.count_deferred_polish()
+                self._deferred_polish_count = pending
+                if not pending:
+                    continue
+                if not self.polish.cfg.enabled:
+                    self.polish.cfg.enabled = True     # дадим шанс после автолечения
+                if not _health_check_llm(self.polish):
+                    self._ensure_llm_async()
+                    continue
+                done = 0
+                for row in self.db.deferred_polish(limit=5):
+                    try:
+                        res = self.polish.polish(row["asr_text"],
+                                                 style=row.get("style") or "plain",
+                                                 dictionary=self.db.get_dictionary(
+                                                     row.get("app_window")))
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"[myflow] ! дополировка #{row['id']} не удалась: {exc!r}")
+                        break
+                    score = divergence_score(row["asr_text"], res.text)
+                    self.db.set_polished(row["id"], res.text, score)
+                    self.db.mark_status(row["id"], "ok")
+                    done += 1
+                    print(f"[myflow] ✓ дополировано #{row['id']}: {res.text[:60]}")
+                left = self.db.count_deferred_polish()
+                self._deferred_polish_count = left
+                if done:
+                    print(f"[myflow] дополировано фраз: {done}, осталось {left}")
+                    self.overlay.show(f"✓ дополировано {done}", "#46a758")
+            except Exception:  # noqa: BLE001 — фон не должен падать
+                pass
+
+    def _ensure_repolish_worker(self) -> None:
+        if self._repolish_thread is not None and self._repolish_thread.is_alive():
+            return
+        try:
+            self._deferred_polish_count = self.db.count_deferred_polish()
+        except Exception:  # noqa: BLE001
+            self._deferred_polish_count = 0
+        if self._deferred_polish_count:
+            print(f"[myflow] ! фраз в очереди на дополировку: "
+                  f"{self._deferred_polish_count} (LLM оживёт — дополирую)")
+        self._repolish_thread = threading.Thread(target=self._repolish_loop, daemon=True,
+                                                name="repolish")
+        self._repolish_thread.start()
+
 
     # ---- жизненный цикл записи (PTT) ----
 

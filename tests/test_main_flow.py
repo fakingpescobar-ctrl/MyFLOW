@@ -232,9 +232,17 @@ def make_app(auto=False, busy=False, gen=0, polish_enabled=False, paster=None):
                  "_remember_insert_target", "_watch_with_ax", "_watch_with_clipboard",
                  "retry_pending", "_log_stats", "_refresh_asr_prompt",
                  "_paste_to_target", "_toggle_target_lock", "_on_utterance",
-                 "_deliver", "_pending_worker", "_flush_pending",
-                 "_deliver_pending_once"):
+                 "_deliver", "_pending_worker", "_flush_pending", "_deliver_pending_once",
+                 "_revive_llm_and_retry", "_ensure_llm_async", "_wait_llm_ready",
+                 "_ensure_repolish_worker"):
         setattr(app, name, types.MethodType(getattr(MyFlowApp, name), app))
+    # Автолечение LLM: по умолчанию сервер не поднимаем (в тестах его нет).
+    app._server_guard = None
+    app._llm_revive = None
+    app._repolish_thread = None
+    app._deferred_polish_count = 0
+    app._stopping = threading.Event()
+    app._stopping.set()
     app._guard_polish = MyFlowApp._guard_polish
     return app
 
@@ -293,9 +301,11 @@ class PolishFallbackTest(unittest.TestCase):
 
     def test_success_resets_failure_counter(self):
         app = make_app(polish_enabled=True)
-        app._polish_safe("раз", "plain", [])
+        app._polish_safe("раз", "plain", [])          # LLM лежит -> счётчик растёт
         app.polish.polish = lambda *a, **k: PolishResult(text="Раз.", latency_ms=5)
-        app._polish_safe("раз", "plain", [])
+        # LLM ожила: теперь вызов клиента проходит и счётчик ошибок сбрасывается.
+        with mock.patch("myflow.main._health_check_llm", return_value=True):
+            app._polish_safe("раз", "plain", [])
         self.assertEqual(app._polish_fails, 0)
 
     def test_disabled_polish_returns_raw(self):
@@ -664,6 +674,11 @@ class FastPathFlowTest(unittest.TestCase):
         self.p1 = mock.patch("myflow.main._tb_to_file")
         self.p1.start()
         self.addCleanup(self.p1.stop)
+        # _polish_safe сначала спрашивает живость LLM (быстрый отказ при мёртвой).
+        # В этих тестах LLM «жива», иначе фраза уходит сырой до вызова клиента.
+        self.p3 = mock.patch("myflow.main._health_check_llm", return_value=True)
+        self.p3.start()
+        self.addCleanup(self.p3.stop)
 
     @staticmethod
     def _rec():

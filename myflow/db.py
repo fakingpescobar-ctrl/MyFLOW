@@ -226,6 +226,43 @@ class Database:
             self._conn.execute(
                 "UPDATE history SET status=? WHERE id=?", (status, history_id))
 
+    def deferred_polish(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Фразы, у которых полировка не удалась (сервер LLM лежал).
+
+        Это очередь автолечения: как только LLM оживёт, дополируем их из
+        сохранённого текста ASR — аудио для этого не нужно.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT id, asr_text, polished_text, style, app_window, created_at
+                   FROM history
+                   WHERE status = 'polish_error'
+                     AND asr_text IS NOT NULL AND TRIM(asr_text) <> ''
+                   ORDER BY id DESC LIMIT ?""",
+                (int(limit),)).fetchall()
+            return [dict(r) for r in rows]
+
+    def count_deferred_polish(self) -> int:
+        """Сколько фраз ждут дополировки (для панели)."""
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT COUNT(*) AS n FROM history
+                   WHERE status = 'polish_error'
+                     AND asr_text IS NOT NULL AND TRIM(asr_text) <> ''""").fetchone()
+            return int(row["n"]) if row else 0
+
+    def set_polished(self, history_id: int, text: str,
+                     divergence: float | None = None) -> None:
+        """Записать дополированный текст (после того как LLM ожила)."""
+        with self._lock, self._conn:
+            if divergence is None:
+                self._conn.execute(
+                    "UPDATE history SET polished_text=? WHERE id=?", (text, history_id))
+            else:
+                self._conn.execute(
+                    "UPDATE history SET polished_text=?, divergence=? WHERE id=?",
+                    (text, float(divergence), history_id))
+
     def last_retryable(self) -> dict | None:
         """Последняя неуспешная фраза, для которой сохранено аудио."""
         with self._lock, self._conn:

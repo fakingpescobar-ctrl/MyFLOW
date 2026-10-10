@@ -135,6 +135,64 @@ def cmd_retry(args) -> int:
         app.db.close()
 
 
+# ---------------------------------------------------------------- дополировка
+def cmd_repolish(args) -> int:
+    """Дополировать фразы, у которых LLM лежала (очередь status=polish_error).
+
+    Автолечение делает это само в фоне; команда нужна, чтобы запустить сейчас,
+    посмотреть очередь и (при --insert) вставить последнюю дополированную фразу
+    в активное окно — на случай, если сырой текст уже улетел в документ.
+    """
+    from myflow.main import MyFlowApp, _health_check_llm
+    from myflow.textdiff import divergence_score
+    app = MyFlowApp()
+    try:
+        pending = app.db.deferred_polish(limit=max(1, args.limit))
+        total = app.db.count_deferred_polish()
+        if not pending:
+            _out("Очередь пуста: все фразы дополированы.")
+            return 0
+        _out(f"В очереди: {total} фраз(ы). Показываю последние {len(pending)}:")
+        for row in pending:
+            _out(f"  #{row['id']}  {row['created_at']}  ASR: {row['asr_text'][:70]}")
+        if not _health_check_llm(app.polish):
+            _out("llama-server недоступен — подними сервер (или запусти MyFLOW) и повтори.")
+            return 1
+        done = 0
+        last_text = ""
+        last_id = None
+        for row in pending:
+            try:
+                res = app.polish.polish(row["asr_text"],
+                                        style=row.get("style") or "plain",
+                                        dictionary=app.db.get_dictionary(row.get("app_window")))
+            except Exception as exc:  # noqa: BLE001
+                _out(f"  #{row['id']}: не удалось ({exc!r})")
+                continue
+            app.db.set_polished(row["id"], res.text,
+                                divergence_score(row["asr_text"], res.text))
+            app.db.mark_status(row["id"], "ok")
+            done += 1
+            last_text, last_id = res.text, row["id"]
+            _out(f"  ✓ #{row['id']} -> {res.text[:70]}")
+        _out(f"Дополировано: {done}. Осталось: {app.db.count_deferred_polish()}")
+        if args.insert and last_text:
+            ok = False
+            try:
+                ok = bool(app.paster.paste(last_text))
+            except Exception as exc:  # noqa: BLE001
+                _out(f"вставка не удалась: {exc!r}")
+            _out(f"{'✓ вставлено в активное окно' if ok else '✗ вставить не удалось'}"
+                 f" (фраза #{last_id})")
+        return 0 if done else 1
+    finally:
+        try:
+            app.ax.stop()
+        except Exception:  # noqa: BLE001
+            pass
+        app.db.close()
+
+
 # ---------------------------------------------------------------- AX-диагностика
 def cmd_ax(args) -> int:
     from myflow.axtext import AxReader
@@ -463,6 +521,12 @@ def build_parser() -> argparse.ArgumentParser:
     st = sub.add_parser("stats", help="метрики надёжности и качества")
     st.set_defaults(func=cmd_stats)
 
+    rp = sub.add_parser("repolish",
+                        help="дополировать фразы, у которых сервер LLM лежал")
+    rp.add_argument("--limit", type=int, default=20, help="сколько фраз за раз")
+    rp.add_argument("--insert", action="store_true",
+                    help="вставить последнюю дополированную фразу в активное окно")
+    rp.set_defaults(func=cmd_repolish)
     rt = sub.add_parser("retry", help="перераспознать упавшие фразы из сохранённого аудио")
     rt.add_argument("--limit", type=int, default=5)
     rt.set_defaults(func=cmd_retry)
