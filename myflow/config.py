@@ -17,37 +17,42 @@ SETTINGS_FILE = DATA_DIR / "settings.json"
 DB_FILE = DATA_DIR / "myflow.sqlite"
 
 # ------------------------------------------------------------------ модели и бинарники
-# Проект самодостаточен: модели и llama.cpp лежат РЯДОМ С ПРОЕКТОМ
-# (<repo>/models и <repo>/bin/llama-cpp). Переопределяется переменными
-# окружения; если локальной копии нет, а старая (X:\llm\...) есть — берём её,
-# чтобы ничего не сломалось у тех, кто ещё не перенёс файлы.
-_LEGACY_MODELS_DIR = Path(r"X:\llm\models")
-_LEGACY_LLAMA_DIR = Path(r"X:\llm\llama-cpp")
+# ПРОЕКТ САМОДОСТАТОЧЕН: все модели и бинарники лежат ВНУТРИ проекта —
+# <repo>/models (модели) и <repo>/bin (llama.cpp, whisper.cpp). Никаких путей
+# на другие диски: раньше ассеты лежали ВНЕ репозитория и проект без них не работал.
+# Переменные окружения оставлены только для переноса на другую машину/диск —
+# по умолчанию всё берётся из репозитория.
 
 
-def _resolve_dir(env_name: str, local: Path, legacy: Path) -> Path:
-    """Каталог из окружения -> локальный в проекте -> старый (если существует)."""
+def _dir(env_name: str, local: Path) -> Path:
+    """Каталог проекта; переменная окружения переопределяет (для переноса)."""
     import os
 
     env = os.environ.get(env_name)
-    if env:
-        return Path(env)
-    if local.exists():
-        return local
-    if legacy.exists():
-        return legacy
-    return local            # его и создадут/положат в него файлы
+    return Path(env) if env else local
 
 
 def models_dir() -> Path:
     """Каталог моделей: <repo>/models (или MYFLOW_MODELS_DIR)."""
-    return _resolve_dir("MYFLOW_MODELS_DIR", ROOT / "models", _LEGACY_MODELS_DIR)
+    return _dir("MYFLOW_MODELS_DIR", ROOT / "models")
 
 
 def llama_dir() -> Path:
     """Каталог llama.cpp: <repo>/bin/llama-cpp (или MYFLOW_LLAMA_DIR)."""
-    return _resolve_dir("MYFLOW_LLAMA_DIR", ROOT / "bin" / "llama-cpp",
-                        _LEGACY_LLAMA_DIR)
+    return _dir("MYFLOW_LLAMA_DIR", ROOT / "bin" / "llama-cpp")
+
+
+def whisper_dir() -> Path:
+    """Каталог whisper.cpp: <repo>/bin/whisper (или MYFLOW_WHISPER_DIR)."""
+    return _dir("MYFLOW_WHISPER_DIR", ROOT / "bin" / "whisper")
+
+
+def whisper_model_path() -> Path:
+    """Модель whisper (fallback ASR): <repo>/models/ggml-large-v3-turbo-q5_0.bin."""
+    import os
+
+    env = os.environ.get("MYFLOW_WHISPER_MODEL")
+    return Path(env) if env else models_dir() / "ggml-large-v3-turbo-q5_0.bin"
 
 
 def hf_cache_dir() -> Path:

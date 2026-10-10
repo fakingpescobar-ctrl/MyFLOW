@@ -1,5 +1,4 @@
 # start-asr.ps1 — локальный whisper-server (CUDA) в видимом окне.
-# Модель кладётся в $env:MYFLOW_MODELS_DIR (по умолчанию X:\llm\models).
 #
 # Тюнинг 10.10.2026 (замеры на RTX 3080):
 #   -l ru   без авто-детекта языка: он стоит лишний проход и иногда промахивается
@@ -17,11 +16,9 @@ $whisper = Join-Path $root "bin\whisper\Release\whisper-server.exe"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $models = if ($env:MYFLOW_MODELS_DIR) { $env:MYFLOW_MODELS_DIR }
           elseif (Test-Path (Join-Path $repoRoot "models")) { Join-Path $repoRoot "models" }
-          elseif (Test-Path "X:\llm\models") { "X:\llm\models" }
           else { Join-Path $repoRoot "models" }
 $llamaDir = if ($env:MYFLOW_LLAMA_DIR) { $env:MYFLOW_LLAMA_DIR }
             elseif (Test-Path (Join-Path $repoRoot "bin\llama-cpp")) { Join-Path $repoRoot "bin\llama-cpp" }
-            elseif (Test-Path "X:\llm\llama-cpp") { "X:\llm\llama-cpp" }
             else { Join-Path $repoRoot "bin\llama-cpp" }
 # Модель можно подменить: "режим качества" — ggml-large-v3-q5_0.bin.
 # Замеры на своих записях (tools/eval_asr.py): large-v3 в ~4 раза медленнее

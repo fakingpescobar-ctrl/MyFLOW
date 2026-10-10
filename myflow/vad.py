@@ -21,7 +21,7 @@ import onnxruntime as ort
 
 # Путь к модели VAD: переменная окружения MYFLOW_SILERO_PATH или
 # data/vad_models/silero_v6.onnx рядом с репозиторием (раньше был жёстко
-# прописан C:\Projects\MyFLOW — проект не переносился на другую машину).
+# считался от корня репозитория, поэтому проект можно переносить).
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 SILERO_PATH = os.environ.get(
     "MYFLOW_SILERO_PATH", str(_REPO_ROOT / "data" / "vad_models" / "silero_v6.onnx")

@@ -255,12 +255,21 @@ CPU, 10-20 мс на фразу). Вход — 80-мерный kaldi-fbank (25/1
 | llama.cpp | `X:\llm\llama-cpp` | `bin\llama-cpp` | 0.56 ГБ |
 | Голос | `X:\llm\models\voiceprint` | `models\voiceprint` | 32 МБ |
 | GigaAM-кэш | `X:\llm\models\hf-cache` | `models\hf-cache` | 215 МБ |
+| whisper (fallback) | `X:\llm\models\ggml-large-v3-turbo-q5_0.bin` | `models\ggml-large-v3-turbo-q5_0.bin` | 547 МБ |
 
-Единый резолвер в `myflow/config.py`: `models_dir()`, `llama_dir()`, `hf_cache_dir()`,
-`voiceprint_model_path()` — порядок «переменная окружения -> локальная папка
-проекта -> старая `X:\llm\...`». На него переведены `tui.py` (спеки серверов),
-`asr_gigaam.py`, `voiceprint.py` и все `scripts\*.ps1`. `models/` и `bin/` — в
-`.gitignore` (гигабайты в git не кладём).
+Единый резолвер в `myflow/config.py`: `models_dir()`, `llama_dir()`,
+`whisper_dir()`, `whisper_model_path()`, `hf_cache_dir()`,
+`voiceprint_model_path()`. По умолчанию — **только внутри проекта**; внешние
+откаты на `X:\llm\...` убраны полностью (переменные окружения остались как
+осознанный способ вынести модели). На резолвер переведены `tui.py` (спеки
+серверов), `asr_gigaam.py`, `voiceprint.py` и все `scripts\*.ps1`; в коде и
+скриптах не осталось ни одного абсолютного пути с буквой диска. `models/` и
+`bin/` — в `.gitignore` (гигабайты в git не кладём).
+
+Страж: `tests/test_paths.py` — проверяет, что все ассеты внутри репозитория,
+что нужные файлы на месте, что `models/`/`bin/` игнорируются git, и что в коде
+нет абсолютных путей. Проверено, что и whisper-режим (`MYFLOW_KEEP_WHISPER=1`)
+берёт бинарник и модель из проекта.
 
 Проверено: SHA256 модели совпадает с оригиналом; LLM стартует из
 `bin\llama-cpp\llama-server.exe` и полирует; GigaAM грузится из `models\hf-cache`

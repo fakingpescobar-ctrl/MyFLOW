@@ -20,13 +20,15 @@ py -3.13 -m venv .venv
 #    нужен whisper-server.exe (+ dll-ки CUDA 12)
 #    релизы: https://github.com/ggml-org/whisper.cpp/releases
 
-# 3) модели и llama.cpp — РЯДОМ С ПРОЕКТОМ (проект самодостаточен):
-#    models\Qwen3-4B-Instruct-2507-Q8_0.gguf     (LLM-полировка, ~4 ГБ)
-#    models\voiceprint\model.onnx                (проверка голоса, ~32 МБ)
-#    models\hf-cache\                            (GigaAM ASR, ~215 МБ, качается сам)
-#    bin\llama-cpp\llama-server.exe              (llama.cpp + CUDA-dll, ~560 МБ)
-#    Другой диск/путь — задай переменные окружения (см. ниже);
-#    если локальных копий нет, а старые (X:\llm\...) есть — возьмутся они.
+# 3) модели — ВНУТРИ проекта (проект самодостаточен, ~5.7 ГБ всего):
+#    models\Qwen3-4B-Instruct-2507-Q8_0.gguf        (LLM-полировка, 4.0 ГБ)
+#    models\ggml-large-v3-turbo-q5_0.bin            (whisper-fallback, 547 МБ)
+#    models\voiceprint\model.onnx                   (проверка голоса, 32 МБ)
+#    models\hf-cache\                               (GigaAM ASR, 215 МБ, качается сам)
+#    bin\llama-cpp\llama-server.exe                 (llama.cpp + CUDA-dll, 560 МБ)
+#    bin\whisper\Release\whisper-server.exe         (whisper.cpp, 1.1 ГБ)
+#    Никаких путей на другие диски: всё рядом с кодом.
+#    Вынести на другой диск можно осознанно — переменными окружения (ниже).
 
 # 4) проверка
 .venv\Scripts\python -m unittest discover -s tests -t .
@@ -38,13 +40,17 @@ py -3.13 -m venv .venv
 |---|---|---|
 | `MYFLOW_MODELS_DIR` | `<проект>\models` | каталог моделей (`.gguf`, `voiceprint/`, `hf-cache/`) |
 | `MYFLOW_LLAMA_DIR` | `<проект>\bin\llama-cpp` | каталог с `llama-server.exe` |
+| `MYFLOW_WHISPER_DIR` | `<проект>\bin\whisper` | каталог с `whisper-server.exe` |
+| `MYFLOW_WHISPER_MODEL` | `<проект>\models\ggml-large-v3-turbo-q5_0.bin` | модель whisper |
 | `HF_HOME` | `<проект>\models\hf-cache` | где искать кэш GigaAM |
 | `MYFLOW_VOICEPRINT_MODEL` | `<проект>\models\voiceprint\model.onnx` | модель speaker verification |
 | `MYFLOW_SILERO_PATH` | `data\vad_models\silero_v6.onnx` | ONNX-модель Silero VAD |
 
-Порядок поиска: переменная окружения -> локальная папка проекта -> старое место
-`X:\llm\...` (если локальной копии ещё нет). Каталоги `models/` и `bin/` в git не
-попадают (модели весят гигабайты).
+По умолчанию всё берётся из самого проекта; переменные окружения нужны только
+чтобы осознанно вынести модели на другой диск. Каталоги `models/` и `bin/` в git
+не попадают (модели весят гигабайты). Самодостаточность проверяется тестом
+`tests/test_paths.py`: он падает, если ассет оказался вне проекта или в коде
+появился абсолютный путь с буквой диска.
 
 Модель VAD (`data/vad_models/silero_v6.onnx`) лежит в репозитории данных и нужна для работы
 (исключена из git — при переносе скопируй `data/vad_models/` вручную).
@@ -693,7 +699,7 @@ GigaAM e2e отдаёт текст с пунктуацией и заглавны
 .venv\Scripts\python -X utf8 tools\eval_polish.py --url http://127.0.0.1:8083/v1 --label "9B"
 ```
 
-Мелочь: `X:\llm\models\ggml-v3-turbo-q5_1.bin` у тебя **0 байт** (битая докачка) —
+Мелочь: `models\ggml-v3-turbo-q5_1.bin` (если появится) должен быть не **0 байт** —
 если он нужен, перекачай, иначе он молча не используется.
 
 ## Ограничения / честно

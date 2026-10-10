@@ -522,13 +522,14 @@ def default_specs(root: Path = ROOT) -> list[ServerSpec]:
                              скорости (RTF 0.02); -sns против не-речевых токенов.
     """
     models = models_dir()
-    whisper = root / "bin" / "whisper" / "Release" / "whisper-server.exe"
+    from myflow.config import whisper_dir
+    whisper = whisper_dir() / "Release" / "whisper-server.exe"
     from myflow.asr import whisper_needed      # локально: без циклических импортов
     # Модель ASR можно подменить через MYFLOW_WHISPER_MODEL (например, на
     # ggml-large-v3-q5_0.bin для «режима качества»: медленнее в ~4 раза, по
     # замерам на своих записях выигрыша по WER не даёт — см. README).
-    whisper_model = Path(os.environ.get("MYFLOW_WHISPER_MODEL")
-                         or (models / "ggml-large-v3-turbo-q5_0.bin"))
+    from myflow.config import whisper_model_path
+    whisper_model = whisper_model_path()
     specs: list[ServerSpec] = []
     # whisper-сервер поднимаем ТОЛЬКО если он реально нужен: при бэкенде GigaAM
     # (локальная ONNX-модель на CPU) он занимал бы ~1 ГБ VRAM впустую.
