@@ -240,7 +240,7 @@ def make_app(auto=False, busy=False, gen=0, polish_enabled=False, paster=None):
                  "_paste_to_target", "_toggle_target_lock", "_on_utterance",
                  "_deliver", "_pending_worker", "_flush_pending", "_deliver_pending_once",
                  "_revive_llm_and_retry", "_ensure_llm_async", "_wait_llm_ready",
-                 "_ensure_repolish_worker"):
+                 "_ensure_repolish_worker", "_asr_fallback", "_ensure_server", "_stop_server"):
         setattr(app, name, types.MethodType(getattr(MyFlowApp, name), app))
     # Автолечение LLM: по умолчанию сервер не поднимаем (в тестах его нет).
     app._server_guard = None

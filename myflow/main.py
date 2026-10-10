@@ -558,7 +558,8 @@ class MyFlowApp:
         modules = [
             {"key": "asr", "label": "ASR", "value": self._asr_label(), "on": True,
              "ok": asr_ok, "note": "распознавание речи",
-             "hint": "Enter — сменить движок (GigaAM ↔ whisper)"},
+             "hint": "Enter — сменить движок: whisper поднимает сервер (:8081), "
+                     "GigaAM работает всегда и выгружает whisper"},
             {"key": "vad", "label": "VAD", "value": f"Silero v6 · {vad_threshold:.2f}",
              "on": bool(s.auto_stop_by_silence), "ok": True, "note": "детектор речи",
              "hint": "←→ порог, Enter — автостоп по паузе"},
@@ -782,21 +783,42 @@ class MyFlowApp:
 
         if key == "asr":
             # Меняем движок распознавания: gigaam <-> whisper.
+            # ВАЖНО: переключение должно быть РАБОТОСПОСОБНЫМ. Реальный случай:
+            # пользователь нажал Enter на строке ASR, движок сменился на whisper,
+            # а whisper-сервер (порт 8081) не был поднят — и все фразы падали
+            # с «whisper-server недоступен». Поэтому сначала проверяем цель:
+            # для whisper поднимаем сервер и ждём, для GigaAM — проверяем пакет.
             cur = getattr(self.whisper, "backend_name", "whisper")
             target = "whisper" if cur == "gigaam" else "gigaam"
-            s.asr.backend = target
-            self.settings.save()
-            client = make_asr_client(s.asr)
-            if target == "gigaam" and getattr(client, "backend_name", "") != "gigaam":
-                s.asr.backend = "whisper"
+            previous = s.asr.backend
+
+            if target == "gigaam":
+                from myflow.asr_gigaam import GigaAmClient
+                if not GigaAmClient.package_available():
+                    return False, "GigaAM недоступен (нет onnx-asr) — оставил whisper"
+                client = GigaAmClient(s.asr)
+                self.whisper = client
+                s.asr.backend = "gigaam"
                 self.settings.save()
-                return False, "GigaAM недоступен (нет onnx-asr) — оставил whisper"
-            self.whisper = client
-            warm = getattr(client, "warmup", None)
-            if warm is not None:
-                threading.Thread(target=warm, daemon=True, name="asr-switch-warmup").start()
-            print(f"[myflow] ASR: {self._asr_label()}")
-            return True, f"ASR: {target}"
+                threading.Thread(target=client.warmup, daemon=True,
+                                 name="asr-switch-warmup").start()
+                # whisper-сервер больше не нужен: гасим, освобождаем ~1 ГБ VRAM.
+                self._stop_server("asr")
+                print(f"[myflow] ASR: {self._asr_label()}")
+                return True, "ASR: GigaAM (whisper-сервер выгружен)"
+
+            # target == "whisper": без живого сервера он бесполезен.
+            if not self._ensure_server("asr"):
+                s.asr.backend = previous          # откатываем настройку
+                self.settings.save()
+                return False, ("whisper-сервер не поднялся (проверь bin\\whisper и "
+                               "модель) — оставил " + (previous or "gigaam"))
+            from myflow.asr import WhisperClient
+            self.whisper = WhisperClient(s.asr)
+            s.asr.backend = "whisper"
+            self.settings.save()
+            print("[myflow] ASR: whisper (сервер поднят и проверен)")
+            return True, "ASR: whisper (сервер поднят)"
 
         if key == "vad":
             s.auto_stop_by_silence = not s.auto_stop_by_silence
@@ -1083,6 +1105,29 @@ class MyFlowApp:
         """
         self._server_stopper = stopper
 
+    def _ensure_server(self, key: str, timeout: float = 90.0) -> bool:
+        """Синхронно поднять сервер (для осознанного действия пользователя).
+
+        Обычная диктовка серверы не ждёт, но переключение движка — действие
+        явное: лучше подождать пару секунд, чем получить нерабочий ASR.
+        """
+        guard = self._server_guard
+        if guard is None:
+            return False
+        try:
+            return bool(guard(key))
+        except Exception as exc:  # noqa: BLE001
+            print(f"[myflow] не удалось поднять {key}: {exc!r}")
+            return False
+
+    def _stop_server(self, key: str) -> None:
+        """Погасить сервер в фоне (освободить VRAM/память)."""
+        stopper = self._server_stopper
+        if stopper is None:
+            return
+        threading.Thread(target=lambda: self._safe_stop(stopper, key),
+                         daemon=True, name=f"stop-{key}").start()
+
     def _stop_llm_server(self) -> None:
         """Погасить LLM в фоне (не блокируя диктовку и UI)."""
         stopper = self._server_stopper
@@ -1092,9 +1137,9 @@ class MyFlowApp:
                          daemon=True, name="llm-unload").start()
 
     @staticmethod
-    def _safe_stop(stopper) -> None:
+    def _safe_stop(stopper, key: str = "llm") -> None:
         try:
-            stopper("llm")
+            stopper(key)
         except Exception:  # noqa: BLE001 — выгрузка не должна ломать приложение
             pass
 
@@ -1520,13 +1565,18 @@ class MyFlowApp:
         try:
             asr: AsrResult = self.whisper.transcribe(recording.pcm_int16)
         except Exception as exc_asr:
-            # Раньше ошибка ASR просто теряла фразу: в истории её не было,
-            # а в статистике — ни следа. Теперь это строка со статусом.
-            _tb_to_file("ОШИБКА ASR")
-            print(f"[myflow] ✗ ASR не справился: {exc_asr}")
-            self.overlay.show("✗ ASR ошибка", "#e5484d")
-            self._record_failure("asr_error", app, app_category, recording, audio_path)
-            return
+            # Отказ ASR не должен терять фразу: если это whisper — падаем на
+            # локальную GigaAM и повторяем распознавание ТОГО ЖЕ аудио.
+            asr = self._asr_fallback(recording, exc_asr)
+            if asr is None:
+                # Раньше ошибка ASR просто теряла фразу: в истории её не было,
+                # а в статистике — ни следа. Теперь это строка со статусом.
+                _tb_to_file("ОШИБКА ASR")
+                print(f"[myflow] ✗ ASR не справился: {exc_asr}")
+                self.overlay.show("✗ ASR ошибка", "#e5484d")
+                self._record_failure("asr_error", app, app_category, recording,
+                                     audio_path)
+                return
         if not asr.text:
             print("[myflow] ✗ пустой результат распознавания")
             self.overlay.show("✗ не распознано", "#e5484d")
@@ -1681,6 +1731,41 @@ class MyFlowApp:
             self.overlay.show("✓ готово", "#46a758")
         polish_ms = 0 if fast_ok else polished.latency_ms
         print(f"[myflow] e2e={e2e_ms} мс (asr={asr.latency_ms}, polish={polish_ms})")
+
+    def _asr_fallback(self, recording: Recording,
+                      exc: Exception) -> AsrResult | None:
+        """Резервное распознавание через GigaAM, если текущий движок отказал.
+
+        Реальный случай: backend=whisper, а whisper-сервер не поднялся — каждая
+        фраза падала с «whisper-server недоступен» и диктовка не работала. Теперь
+        мы один раз пробуем локальную GigaAM (CPU, сервер не нужен), и если она
+        справилась — переключаемся на неё и запоминаем это в настройках.
+        """
+        if getattr(self.whisper, "backend_name", "") == "gigaam":
+            return None                     # уже GigaAM — резерва нет
+        try:
+            from myflow.asr_gigaam import GigaAmClient
+            if not GigaAmClient.package_available():
+                return None
+        except Exception:  # noqa: BLE001
+            return None
+        try:
+            client = GigaAmClient(self.settings.get().asr)
+            if not client.warmup():
+                print(f"[myflow] ✗ ASR-резерв: GigaAM не загрузилась "
+                      f"({client._load_error})")
+                return None
+            result = client.transcribe(recording.pcm_int16)
+            self.whisper = client
+            self.settings.get().asr.backend = "gigaam"
+            self.settings.save()
+            print(f"[myflow] ⚠ {type(exc).__name__}: основной ASR отказал "
+                  f"({str(exc)[:80]}) — распознал через GigaAM, переключился на неё")
+            self.overlay.show("⚠ ASR переключён на GigaAM", "#f5c542")
+            return result
+        except Exception as exc2:  # noqa: BLE001
+            print(f"[myflow] ✗ ASR-резерв не сработал: {exc2!r}")
+            return None
 
     def _refresh_asr_prompt(self, force: bool = False) -> None:
         """Подмешать словарь в подсказку whisper (имена, термины, топонимы).

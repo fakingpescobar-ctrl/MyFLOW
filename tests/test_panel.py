@@ -142,12 +142,16 @@ class ControlApplyTest(unittest.TestCase):
         self.assertIn("неизвестное", msg)
 
     def test_module_switch_asr_backend(self):
-        client = mock.Mock(backend_name="gigaam", warmup=lambda: True)
-        with mock.patch.object(M, "make_asr_client", return_value=client) as make:
-            ok, msg = self.app.control_apply("module", "asr")
+        """Переключение на whisper только если сервер реально поднимается."""
+        # без сервера — отказ, движок и настройка остаются прежними
+        ok, msg = self.app.control_apply("module", "asr")
+        self.assertFalse(ok, msg)
+        self.assertIn("whisper", msg)
+        # сервер поднимается — переключаемся
+        self.app.set_server_guard(lambda key: True)
+        ok, msg = self.app.control_apply("module", "asr")
         self.assertTrue(ok, msg)
-        self.assertTrue(make.called, "движок ASR пересоздаётся на лету")
-        self.assertIs(self.app.whisper, client)
+        self.assertEqual(type(self.app.whisper).__name__, "WhisperClient")
 
 
 class PanelRenderTest(unittest.TestCase):
