@@ -349,6 +349,9 @@ class MyFlowApp:
         self._health_thread: threading.Thread | None = None
         # Второе мнение (whisper) для авто-выбора движка.
         self._second = None
+        # Хук: TUI регистрирует функцию применения размера окна
+        # (строка «Размер окна» в панели).
+        self._console_resize = None
         # Остановка воркера фраз (отдельно от _stopping).
         self._worker_stop = threading.Event()
         # Выгрузка LLM под игры: стоп сервера + сторож полного экрана.
@@ -682,6 +685,13 @@ class MyFlowApp:
              "note": "точность",
              "hint": "Enter — вкл/выкл: оба движка, LLM склеивает (~0.4 с; "
                      "несовместим с «Авто-выбор»)"},
+            {"key": "size", "label": "Размер окна",
+             "value": f"{int(getattr(s.tui, 'cols', 120))}x{int(getattr(s.tui, 'rows', 30))}"
+                      + ("" if getattr(s.tui, "fixed_size", True) else " (свободный)"),
+             "on": bool(getattr(s.tui, "fixed_size", True)), "ok": True,
+             "note": "оформление",
+             "hint": "Enter — сменить размер окна (100x28 → 120x34 → 132x40 → 150x44); "
+                     "можно просто растянуть окно мышью — размер запомнится"},
             {"key": "vad", "label": "VAD", "value": f"Silero v6 · {vad_threshold:.2f}",
              "on": bool(s.auto_stop_by_silence), "ok": True, "note": "детектор речи",
              "hint": "←→ порог, Enter — автостоп по паузе"},
@@ -1002,6 +1012,20 @@ class MyFlowApp:
             self.settings.save()
             print("[myflow] ASR: whisper (сервер поднят и проверен)")
             return True, "ASR: whisper (сервер поднят)"
+
+        if key == "size":
+            # Размер окна: перебираем пресеты. Можно и просто растянуть окно
+            # мышью — TUI это заметит и запомнит (см. TuiApp._adopt_size).
+            presets = [(100, 28), (120, 34), (132, 40), (150, 44)]
+            cur = (int(getattr(s.tui, "cols", 0)), int(getattr(s.tui, "rows", 0)))
+            nxt = next((p for p in presets if p[0] > cur[0]), presets[0])
+            s.tui.cols, s.tui.rows = nxt
+            s.tui.fixed_size = True
+            self.settings.save()
+            if callable(getattr(self, "_console_resize", None)):
+                self._console_resize(*nxt)
+            print(f"[myflow] размер окна: {nxt[0]}x{nxt[1]}")
+            return True, f"размер окна: {nxt[0]}x{nxt[1]}"
 
         if key == "vad":
             s.auto_stop_by_silence = not s.auto_stop_by_silence
@@ -1347,6 +1371,10 @@ class MyFlowApp:
             stopper(key)
         except Exception:  # noqa: BLE001 — выгрузка не должна ломать приложение
             pass
+
+    def set_console_resize(self, fn) -> None:
+        """Зарегистрировать применение размера окна (делает TUI)."""
+        self._console_resize = fn
 
     def set_server_guard(self, guard) -> None:
         """Подключить «подниматель» серверов (его даёт TUI/Supervisor).

@@ -773,3 +773,88 @@ class MouseWheelTest(unittest.TestCase):
         console.raw_size = lambda: (120, 35)
         w, h = console.lock_size(0, 0)
         self.assertEqual((w, h), (120, 35))
+
+
+class WindowSizeTest(unittest.TestCase):
+    """Размер окна: применяем сохранённый, а ручное растягивание ЗАПОМИНАЕМ."""
+
+    def _tui(self, cols=120, rows=30):
+        import tempfile
+        from pathlib import Path as _P
+        from myflow.config import SettingsStore
+        tmp = tempfile.TemporaryDirectory()
+        store = SettingsStore(_P(tmp.name) / "s.json")
+        store.get().tui.cols, store.get().tui.rows = cols, rows
+        store.save()
+        tui = T.TuiApp(no_servers=True)
+        tui.store = store
+        tui._tmp = tmp
+        return tui, store
+
+    def test_adopt_manual_resize_is_remembered(self):
+        tui, store = self._tui()
+        tui._locked_size = (120, 30)
+        tui._pending_size = (140, 42)
+        tui._adopt_size((140, 42))
+        self.assertEqual(tui._locked_size, (140, 42))
+        cfg = store.get().tui
+        self.assertEqual((cfg.cols, cfg.rows), (140, 42),
+                         "растянутое окно должно сохраниться в настройках")
+        self.assertIsNone(tui._pending_size)
+        tui._tmp.cleanup()
+
+    def test_adopt_ignores_same_size(self):
+        tui, store = self._tui()
+        tui._locked_size = (120, 30)
+        tui._adopt_size((120, 30))
+        self.assertEqual((store.get().tui.cols, store.get().tui.rows), (120, 30))
+        tui._tmp.cleanup()
+
+    def test_apply_window_size_updates_lock(self):
+        tui, store = self._tui()
+        tui.console = self._FakeConsole()
+        tui.apply_window_size(132, 40)
+        self.assertEqual(tui._locked_size, (132, 40))
+        self.assertEqual(tui.console.locked, (132, 40))
+        tui._tmp.cleanup()
+
+    class _FakeConsole:
+        def __init__(self):
+            self.locked = None
+            self.cleared = 0
+
+        def lock_size(self, cols=0, rows=0):
+            self.locked = (cols, rows)
+            return (cols, rows)
+
+        def clear(self):
+            self.cleared += 1
+
+    def test_settings_row_presets_cycle(self):
+        """Строка «Размер окна» перебирает пресеты и зовёт хук применения."""
+        import tempfile
+        from pathlib import Path as _P
+        from myflow.config import SettingsStore
+        from myflow.db import Database
+        import myflow.main as M
+        from unittest import mock
+
+        tmp = tempfile.TemporaryDirectory()
+        store = SettingsStore(_P(tmp.name) / "s.json")
+        store.get().tui.cols, store.get().tui.rows = 100, 28
+        app = M.MyFlowApp(settings=store, db=Database(_P(tmp.name) / "d.sqlite"))
+        app._mic_cache = ([], 0.0)
+        app.overlay = mock.Mock()
+        calls = []
+        app.set_console_resize(lambda c, r: calls.append((c, r)))
+        try:
+            ok, message = app.control_apply("module", "size")
+            self.assertTrue(ok)
+            self.assertEqual(calls[-1], (120, 34), "следующий пресет после 100x28")
+            self.assertIn("120x34", message)
+            row = next(m for m in app.control_snapshot()["modules"] if m["key"] == "size")
+            self.assertEqual(row["value"], "120x34")
+        finally:
+            app.db.close()
+            app._stopping.set()
+            tmp.cleanup()

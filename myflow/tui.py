@@ -1416,6 +1416,8 @@ class TuiApp:
         self._stop = threading.Event()
         # Зафиксированный размер окна (ширина, высота кадра) — см. run().
         self._locked_size: tuple[int, int] | None = None
+        # Размер, который пользователь растянул (принимаем, если продержался кадр).
+        self._pending_size: tuple[int, int] | None = None
         self._sink: PaneSink | None = None
         self._prev_stdout = None
         self._health_thread: threading.Thread | None = None
@@ -1957,6 +1959,35 @@ class TuiApp:
         ok, msg = self.app.control_apply("style", new)
         self.state.add_log(f"{'✓' if ok else '✗'} {msg}")
 
+    def _adopt_size(self, raw: tuple[int, int]) -> None:
+        """Запомнить размер окна, который пользователь выбрал вручную.
+
+        Не откатываем и не спорим: растянул — значит так и надо, в следующий раз
+        пульт откроется в этом размере (значения уходят в settings.json → tui).
+        """
+        if raw == self._locked_size:
+            return
+        self._locked_size = raw
+        self._pending_size = None
+        try:
+            cfg = self.store.get().tui
+            cfg.cols, cfg.rows = int(raw[0]), int(raw[1])
+            self.store.save()
+            self.state.add_log(f"окно: {raw[0]}x{raw[1]} — запомнил")
+        except Exception:  # noqa: BLE001
+            pass
+
+    def apply_window_size(self, cols: int, rows: int) -> None:
+        """Применить размер окна (вызывается из панели: строка «Размер окна»)."""
+        try:
+            applied = self.console.lock_size(int(cols), int(rows))
+            self._locked_size = applied
+            self._pending_size = None
+            self.console.clear()
+            self.state.add_log(f"окно: {applied[0]}x{applied[1]}")
+        except Exception:  # noqa: BLE001
+            pass
+
     def _on_wheel(self, key: str, height: int) -> bool:
         """Колесо мыши: листаем журнал, и только если курсор над журналом.
 
@@ -2081,6 +2112,9 @@ class TuiApp:
                     tui_cfg.cols, tui_cfg.rows = w0, max(20, h0)
                     self.store.save()
                 self._locked_size = (tui_cfg.cols, tui_cfg.rows)
+                if self.app is not None:
+                    # Панель может менять размер (строка «Размер окна»).
+                    self.app.set_console_resize(self.apply_window_size)
             if getattr(tui_cfg, "mouse_wheel", True):
                 self.console.enable_mouse()
         except Exception:  # noqa: BLE001 — оформление не должно мешать запуску
@@ -2103,18 +2137,18 @@ class TuiApp:
             while True:
                 # Окно должно ВСЕГДА оставаться зафиксированного размера: если
                 # пользователь (или терминал) его изменил — возвращаем как было.
+                # Размер окна. ВАЖНО: если пользователь растянул окно сам — это
+                # его выбор, и мы его ЗАПОМИНАЕМ, а не откатываем назад. Раньше
+                # пульт «защищал» размер и сжимал окно обратно — выглядело как
+                # «окно сбивается на стандартные настройки».
                 if getattr(self, "_locked_size", None):
                     try:
-                        # Размер сравниваем «сырой» (как его вернул lock_size).
-                        # Пере-фиксируем не чаще раза в 2 с и не больше 5 попыток:
-                        # если терминал не даёт менять размер, не бьёмся в цикле.
-                        if (self.console.raw_size() != self._locked_size
-                                and time.monotonic() >= getattr(self, "_relock_at", 0.0)
-                                and getattr(self, "_relock_tries", 0) < 5):
-                            self._relock_at = time.monotonic() + 2.0
-                            self._relock_tries = getattr(self, "_relock_tries", 0) + 1
-                            self.console.lock_size(*self._locked_size)
-                            self.console.clear()
+                        raw = self.console.raw_size()
+                        if raw != self._locked_size:
+                            if raw == getattr(self, "_pending_size", None):
+                                self._adopt_size(raw)
+                            else:
+                                self._pending_size = raw
                     except Exception:  # noqa: BLE001
                         pass
                 self.console.clear()
