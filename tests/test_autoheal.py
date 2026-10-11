@@ -246,3 +246,68 @@ def tearDownModule() -> None:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LlmStartupStateTest(unittest.TestCase):
+    """Запуск LLM: «загружается» — не ошибка; полировка не гаснет на время загрузки."""
+
+    def test_own_server_loading_is_starting_not_error(self):
+        """Порт открыт, health ещё не отвечает, процесс НАШ -> «загружается»."""
+        from myflow.tui import Supervisor, ServerSpec, default_specs
+        spec = next(s for s in default_specs() if s.key == "llm")
+        sup = Supervisor([spec], enabled=True)
+        sup.health = lambda url, path, timeout=1.5: False      # модель ещё грузится
+        sup.port_open = lambda port: True
+        sup._own.add("llm")
+        proc = mock.Mock()
+        proc.poll.return_value = None                          # процесс жив
+        sup._procs["llm"] = proc
+        state, note = sup.status(spec)
+        self.assertEqual(state, "starting", note)
+        self.assertIn("загружает", note)
+
+    def test_foreign_process_on_port_is_error(self):
+        """Порт занят ЧУЖИМ процессом и health молчит -> честная ошибка."""
+        from myflow.tui import Supervisor, default_specs
+        spec = next(s for s in default_specs() if s.key == "llm")
+        sup = Supervisor([spec], enabled=True)
+        sup.health = lambda url, path, timeout=1.5: False
+        sup.port_open = lambda port: True
+        state, note = sup.status(spec)
+        self.assertEqual(state, "error")
+        self.assertIn("ЧУЖИМ", note)
+
+    def test_polish_not_disabled_while_server_loads(self):
+        """Прогрев: если LLM ожила во время ожидания — полировка остаётся включённой."""
+        import types
+        import myflow.main as M
+        from test_main_flow import make_app
+        app = make_app()
+        # make_app() — заглушка: привязываем к ней НАСТОЯЩИЕ методы
+        app._prewarm_llm_work = types.MethodType(M.MyFlowApp._prewarm_llm_work, app)
+        app.polish.cfg.enabled = True
+        app._ensure_llm_async = mock.Mock()
+        app._ensure_polish_watchdog = mock.Mock()
+        calls = {"n": 0}
+
+        def flaky(*a, **k):
+            calls["n"] += 1
+            return calls["n"] > 1          # первый раз «нет», второй — «да»
+
+        with mock.patch.object(M, "_health_check_llm", flaky), \
+             mock.patch.object(app, "_wait_llm_ready", lambda s: True):
+            app._prewarm_llm_work()
+        self.assertTrue(app.polish.cfg.enabled, "полировка не должна гаснуть")
+        app._ensure_polish_watchdog.assert_not_called()
+        app._ensure_llm_async.assert_called_once()
+
+    def test_watchdog_interval_is_fast_while_polish_off(self):
+        import types
+        import myflow.main as M
+        from test_main_flow import make_app
+        app = make_app()
+        app._watchdog_interval = types.MethodType(M.MyFlowApp._watchdog_interval, app)
+        app.polish.cfg.enabled = False
+        self.assertLessEqual(app._watchdog_interval(30.0), 5.0)
+        app.polish.cfg.enabled = True
+        self.assertEqual(app._watchdog_interval(30.0), 30.0)

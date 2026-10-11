@@ -909,12 +909,19 @@ class Supervisor:
             if proc is not None and proc.poll() is not None:
                 note = f"процесс завершился (код {proc.returncode}); лог: {spec.log.name}"
                 return "error", note
-        if self.health(spec.url, spec.health_path):
-            return ("ok", "наш процесс") if spec.key in self._own else ("external", "был запущен раньше")
-        if self.port_open(spec.port):
-            return "error", f"порт {spec.port} занят, но health не отвечает"
+        # Наш процесс: пока модель грузится (llama-server открывает порт ПОСЛЕ
+        # загрузки 4 ГБ модели, а бывает и раньше) — это НОРМАЛЬНОЕ состояние
+        # «загружается», а не ошибка. Раньше здесь писалось «порт занят, но health
+        # не отвечает», и пользователь видел это как ошибку при каждом запуске.
         if self.enabled and spec.key in self._own:
+            if self.health(spec.url, spec.health_path):
+                return "ok", "наш процесс"
             return "starting", "загружает модель..."
+        if self.health(spec.url, spec.health_path):
+            return "external", "был запущен раньше"
+        if self.port_open(spec.port):
+            return "error", (f"порт {spec.port} занят ЧУЖИМ процессом "
+                             f"(health не отвечает) — освободи порт")
         if not self.enabled:
             return "down", "запуск серверов отключён (--no-servers)"
         return "down", "не запущен"

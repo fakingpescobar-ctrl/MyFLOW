@@ -530,16 +530,21 @@ class MyFlowApp:
                 return
         except Exception:  # noqa: BLE001
             pass
-        # Сервера нет: честно говорим и выключаем полировку до его поднятия —
-        # раньше это делал start(), но проверка блокировала запуск на ~0.35 с.
-        if self.polish.cfg.enabled:
-            print(f"[myflow] WARNING: llama-server не отвечает на "
-                  f"{self.polish.cfg.url} — полировка отключена до поднятия "
-                  f"сервера (scripts/start-llm.ps1)")
-            self.polish.cfg.enabled = False
-            self._ensure_polish_watchdog()
         print("[myflow] LLM не отвечает — поднимаю заранее (в фоне)")
         self._ensure_llm_async()
+        # ВАЖНО: не выключаем полировку сразу. При запуске llama-server грузит
+        # 4 ГБ модели ~5-15 с, и если в этот момент считать её мёртвой, первые
+        # фразы уйдут «сырым ASR» (именно это и видел пользователь). Ждём.
+        deadline_wait = max(5.0, float(getattr(self.polish.cfg, "wait_on_fail_seconds", 2.5)) * 8)
+        if self._wait_llm_ready(deadline_wait):
+            print("[myflow] LLM готова (прогрев завершён) — полировка работает")
+            return
+        if self.polish.cfg.enabled:
+            print(f"[myflow] WARNING: llama-server не отвечает на "
+                  f"{self.polish.cfg.url} спустя {deadline_wait:.0f} с — полировка "
+                  f"отключена до поднятия сервера (scripts/start-llm.ps1)")
+            self.polish.cfg.enabled = False
+            self._ensure_polish_watchdog()
 
     def _log_stats(self) -> None:
         """Сводка надёжности по истории (аналог их телеметрии: ошибки/перцентили)."""
@@ -1266,8 +1271,16 @@ class MyFlowApp:
     # ---- наблюдение за LLM (полировка) ----
 
     def _polish_watchdog_loop(self, interval: float = 30.0) -> None:
-        """Если полировка выключена (сервер лежал) — вернуть её, когда поднимется."""
-        while not self._stopping.wait(interval):
+        """Если полировка выключена (сервер лежал) — вернуть её, когда поднимется.
+
+        Пока полировка выключена, проверяем ЧАСТО (5 с): сервер обычно поднимается
+        за считанные секунды, и ждать полминуты «сырого ASR» незачем.
+        """
+        # getattr: фоновый поток не должен падать, если приложение-заглушка
+        # (тесты, встраивание) не имеет вспомогательного метода.
+        interval_fn = getattr(self, "_watchdog_interval", None)
+        while not self._stopping.wait(
+                interval_fn(interval) if callable(interval_fn) else interval):
             try:
                 if self.polish.cfg.enabled:
                     continue
@@ -1278,6 +1291,10 @@ class MyFlowApp:
                     self.overlay.show("✓ полировка включена", "#46a758")
             except Exception:  # noqa: BLE001
                 pass
+
+    def _watchdog_interval(self, idle_interval: float = 30.0) -> float:
+        """Как часто проверять LLM: часто, пока полировка выключена, потом редко."""
+        return 5.0 if not self.polish.cfg.enabled else float(idle_interval)
 
     def _ensure_polish_watchdog(self) -> None:
         if self._polish_watchdog is not None and self._polish_watchdog.is_alive():
