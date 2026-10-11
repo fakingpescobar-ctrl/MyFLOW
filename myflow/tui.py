@@ -2506,7 +2506,7 @@ def _demo_snapshot() -> dict:
          "hint": "Enter — оба движка, LLM склеивает лучший текст"},
         {"key": "vad", "label": "VAD", "value": "Silero v6 · 0.30", "on": True, "ok": True,
          "note": "", "hint": "←→ порог, Enter — автостоп по паузе"},
-        {"key": "llm", "label": "LLM", "value": "qwen3-4b · :8082", "on": True, "ok": True,
+        {"key": "llm", "label": "Полировка", "value": "qwen3-4b · :8082", "on": True, "ok": True,
          "note": "", "hint": "Enter — включить/выключить полировку"},
         {"key": "voice", "label": "Голос", "value": "31 фраз · auto · 0.25", "on": True,
          "ok": True, "note": "", "hint": "Enter вкл/выкл, ←→ режим (auto/always/off)"},

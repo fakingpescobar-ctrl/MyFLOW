@@ -799,11 +799,13 @@ class MyFlowApp:
             {"key": "vad", "label": "VAD", "value": f"Silero v6 · {vad_threshold:.2f}",
              "on": bool(s.auto_stop_by_silence), "ok": True, "note": "детектор речи",
              "hint": "←→ порог, Enter — автостоп по паузе"},
-            {"key": "llm", "label": "LLM",
-             "value": f"{s.polish.model.split('-instruct')[0]} · :8082",
+            {"key": "llm", "label": "Полировка",
+             "value": "включена" if s.polish.enabled else "выключена",
              "on": bool(s.polish.enabled), "ok": llm_ok,
-             "note": "проверка…" if health_stale else "полировка текста",
-             "hint": "Enter — включить/выключить полировку"},
+             "note": "проверка…" if health_stale else "вкл/выкл",
+             # Строки легко перепутать: эта — ТУМБЛЕР, а «Модель полировки» ниже — ВЫБОР.
+             "hint": "Enter — включить/выключить полировку; какой моделью — строка "
+                     "«Модель полировки»"},
                 {"key": "voice", "label": "Голос",
              "value": f"{voice_profile} фраз · {s.voiceprint.mode} · {s.voiceprint.threshold:.2f}",
              "on": voice_on, "ok": voice_profile > 0, "note": "проверка владельца",
@@ -890,14 +892,16 @@ class MyFlowApp:
         # обещала бы то, чего нет (модель дообучается отдельно, tools/train_postproc.md).
         if list(models_dir().glob("myflow-postproc-*.gguf")):
             modules.append({
-                "key": "postproc", "label": "Постпроцессор",
-                "value": ("свой Qwen3-0.6B · ~50 мс"
+                "key": "postproc", "label": "Модель полировки",
+                "value": ("своя Qwen3-0.6B · 424 МБ"
                           if getattr(s.polish, "postproc", False)
-                          else "выключен: работает Qwen3-4B"),
+                          else "Qwen3-4B · 4 ГБ"),
                 "on": bool(getattr(s.polish, "postproc", False)), "ok": True,
-                "note": "скорость",
-                "hint": "Enter — вкл/выкл: дообученная модель MyFLOW оформляет текст, "
-                        "4B остаётся для Oracle LLM"})
+                "note": "~50 мс" if getattr(s.polish, "postproc", False) else "~150 мс",
+                # Это ВЫБОР модели, а не второй тумблер: одна и та же фраза идёт либо
+                # через 4B, либо через 0.6B — одновременно они не работают.
+                "hint": "Enter — полировать своей Qwen3-0.6B вместо 4B "
+                        "(по замерам не хуже, втрое быстрее); 4B нужен только Oracle LLM"})
 
         try:
             self._deferred_polish_count = self.db.count_deferred_polish()
