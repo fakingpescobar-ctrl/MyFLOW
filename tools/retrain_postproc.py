@@ -78,6 +78,12 @@ def main() -> int:
                     help="доля примеров «ничего не менять»")
     ap.add_argument("--quant", default="Q5_K_M")
     ap.add_argument("--backup", action="store_true", default=True)
+    ap.add_argument("--holdout", type=int, default=80,
+                    help="последние N диктовок не учим, а проверяем на них новую модель")
+    ap.add_argument("--tolerance", type=float, default=0.05,
+                    help="допустимое ухудшение относительно текущей модели (5%%)")
+    ap.add_argument("--force", action="store_true",
+                    help="установить новую модель даже если она хуже")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
@@ -92,7 +98,8 @@ def main() -> int:
     # 1) датасет
     if not run([str(RUNTIME_PY), "-X", "utf8", "tools/build_postproc_dataset.py",
                 "--out", str(WORK), "--variants", str(args.variants),
-                "--identity-share", str(args.identity_share)],
+                "--identity-share", str(args.identity_share),
+                "--holdout-last", str(args.holdout)],
                "собираю датасет из текущей истории"):
         return 1
     train_file = WORK / "postproc_train.jsonl"
@@ -123,6 +130,29 @@ def main() -> int:
     if not built.exists():
         log(f"не нашёл собранную модель: {built}")
         return 1
+
+    # 3.5) ЗАЩИТА: измеряем новую модель на диктовках, которых она не видела, и
+    # ставим только если она не хуже текущей. Проверено на себе: обучение на всех
+    # диктовках (включая короткие «уже чистые») дало 0.170 против 0.140 — то есть
+    # автоматическая установка «свежей» модели ухудшила полировку.
+    if SHIPPED.exists() and args.holdout > 0:
+        from compare_postproc_models import compare, should_install
+        from build_postproc_dataset import real_pairs
+        ordered = sorted(real_pairs(), key=lambda x: x["id"])
+        holdout_pairs = ordered[-args.holdout:]
+        log(f"проверяю новую модель на {len(holdout_pairs)} отложенных диктовках")
+        try:
+            means = compare(SHIPPED, built, holdout_pairs)
+            log(f"среднее расстояние: новая {means['new']:.3f} "
+                f"против текущей {means['current']:.3f}")
+            if not should_install(means["new"], means["current"],
+                                  tolerance=args.tolerance, force=args.force):
+                log("новая модель ХУЖЕ текущей — оставляю прежнюю "
+                    "(переопределить: --force)")
+                return 0
+        except Exception as exc:  # noqa: BLE001
+            log(f"сравнение не удалось ({type(exc).__name__}: {exc}) — "
+                "устанавливаю без проверки")
 
     # 4) ставим в пульт с резервной копией
     if args.backup and SHIPPED.exists():

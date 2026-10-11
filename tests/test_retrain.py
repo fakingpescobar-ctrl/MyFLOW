@@ -178,3 +178,33 @@ class RetrainStartTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InstallGuardTest(unittest.TestCase):
+    """Защита от автоматической установки ХУДШЕЙ модели.
+
+    Реальный случай: обучение на всех диктовках (включая последние 80 — короткие и
+    уже чистые) дало 0.170 против 0.140 у текущей. Без защиты такая модель уехала бы
+    в пульт молча.
+    """
+
+    def _should_install(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        from compare_postproc_models import should_install
+        return should_install
+
+    def test_better_model_is_installed(self):
+        self.assertTrue(self._should_install()(0.13, 0.14))
+
+    def test_equal_model_is_installed(self):
+        self.assertTrue(self._should_install()(0.14, 0.14))
+
+    def test_slightly_worse_within_tolerance(self):
+        self.assertTrue(self._should_install()(0.145, 0.14, tolerance=0.05))
+
+    def test_clearly_worse_is_refused(self):
+        self.assertFalse(self._should_install()(0.17, 0.14),
+                         "модель заметно хуже — ставить нельзя")
+
+    def test_force_overrides_refusal(self):
+        self.assertTrue(self._should_install()(0.17, 0.14, force=True))
