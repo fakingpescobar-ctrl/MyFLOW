@@ -122,3 +122,85 @@ class MasterSwitchTest(unittest.TestCase):
         result = app._polish_safe("проверка связи", "plain", [])
         self.assertTrue(getattr(result, "skipped", False),
                         "при выключенной полировке постпроцессор не должен зваться")
+
+
+class PostprocPanelRowTest(unittest.TestCase):
+    """Строка «Постпроцессор» в панели: появляется с моделью, переключает режим."""
+
+    def setUp(self):
+        # Настоящее приложение с временными настройками (как в тестах панели):
+        # нужны control_snapshot/control_apply, а не заглушка.
+        from test_panel import _app
+        self.app = _app()
+        self.app.overlay = mock.Mock()
+        self.app._stop_server = mock.Mock()
+        self.app._ensure_server = mock.Mock(return_value=True)
+        self.app.settings.get().polish.enabled = True
+        self.app.settings.get().polish.postproc = False
+
+    def tearDown(self):
+        try:
+            self.app.ax.stop()
+        except Exception:
+            pass
+        self.app._stopping.set()
+        try:
+            self.app.db.close()
+        except Exception:
+            pass
+        self.app._tmp.cleanup()
+
+    def _rows(self):
+        return {m["key"]: m for m in self.app.control_snapshot()["modules"]}
+
+    def test_no_row_without_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("myflow.main.models_dir", lambda: Path(tmp)):
+                rows = self._rows()
+        self.assertNotIn("postproc", rows, "без модели строка не должна показываться")
+
+    def test_row_appears_with_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "myflow-postproc-qwen3-06b-q8_0.gguf").write_bytes(b"GGUF")
+            with mock.patch("myflow.main.models_dir", lambda: Path(tmp)):
+                rows = self._rows()
+        self.assertIn("postproc", rows)
+        self.assertFalse(rows["postproc"]["on"])
+        self.assertIn("Qwen3-4B", rows["postproc"]["value"])
+
+    def test_toggle_on_ensures_server_and_saves(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "myflow-postproc-x.gguf").write_bytes(b"GGUF")
+            with mock.patch("myflow.main.models_dir", lambda: Path(tmp)):
+                ok, message = self.app.control_apply("module", "postproc")
+        self.assertTrue(ok, message)
+        self.assertTrue(self.app.settings.get().polish.postproc)
+        self.app._ensure_server.assert_called_once_with("postproc")
+        self.assertIn("включён", message)
+
+    def test_toggle_on_without_model_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("myflow.main.models_dir", lambda: Path(tmp)):
+                ok, message = self.app.control_apply("module", "postproc")
+        self.assertFalse(ok)
+        self.assertIn("не собрана", message)
+        self.assertFalse(self.app.settings.get().polish.postproc)
+
+    def test_toggle_on_refused_when_polish_disabled(self):
+        self.app.settings.get().polish.enabled = False
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "myflow-postproc-x.gguf").write_bytes(b"GGUF")
+            with mock.patch("myflow.main.models_dir", lambda: Path(tmp)):
+                ok, message = self.app.control_apply("module", "postproc")
+        self.assertFalse(ok)
+        self.assertIn("полировка выключена", message)
+
+    def test_toggle_off_stops_server_and_drops_client(self):
+        self.app.settings.get().polish.postproc = True
+        self.app._postproc_client = object()
+        ok, message = self.app.control_apply("module", "postproc")
+        self.assertTrue(ok, message)
+        self.assertFalse(self.app.settings.get().polish.postproc)
+        self.assertIsNone(self.app._postproc_client)
+        self.app._stop_server.assert_called_once_with("postproc")
+        self.assertIn("Qwen3-4B", message)

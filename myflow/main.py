@@ -38,6 +38,7 @@ from myflow.asr_router import review as review_asr_quality
 from myflow.asr_judge import merge as judge_merge
 from myflow.lightclean import light_clean, strip_inner_fillers
 from myflow.postproc_prompt import POSTPROC_STYLE
+from myflow.config import models_dir
 from myflow.pick_mic import fast_mic_list
 from myflow.voiceprint import VoiceGate
 from myflow.winfocus import (FocusHistory, WindowRef, current_window,
@@ -719,7 +720,7 @@ class MyFlowApp:
              "on": bool(s.polish.enabled), "ok": llm_ok,
              "note": "проверка…" if health_stale else "полировка текста",
              "hint": "Enter — включить/выключить полировку"},
-            {"key": "voice", "label": "Голос",
+                {"key": "voice", "label": "Голос",
              "value": f"{voice_profile} фраз · {s.voiceprint.mode} · {s.voiceprint.threshold:.2f}",
              "on": voice_on, "ok": voice_profile > 0, "note": "проверка владельца",
              "hint": "Enter вкл/выкл, ←→ режим (auto/always/off)"},
@@ -781,6 +782,19 @@ class MyFlowApp:
             {"key": "target", "label": "Цель вставки", "value": target_label,
              "hint": "Enter — закрепить/снять окно (F6)"},
         ]
+
+        # Строка «Постпроцессор» появляется ТОЛЬКО когда модель собрана: иначе она
+        # обещала бы то, чего нет (модель дообучается отдельно, tools/train_postproc.md).
+        if list(models_dir().glob("myflow-postproc-*.gguf")):
+            modules.append({
+                "key": "postproc", "label": "Постпроцессор",
+                "value": ("свой Qwen3-0.6B · ~50 мс"
+                          if getattr(s.polish, "postproc", False)
+                          else "выключен: работает Qwen3-4B"),
+                "on": bool(getattr(s.polish, "postproc", False)), "ok": True,
+                "note": "скорость",
+                "hint": "Enter — вкл/выкл: дообученная модель MyFLOW оформляет текст, "
+                        "4B остаётся для Oracle LLM"})
 
         try:
             self._deferred_polish_count = self.db.count_deferred_polish()
@@ -965,6 +979,31 @@ class MyFlowApp:
                 self._stop_server("asr")
             print("[myflow] авто-выбор ASR выключен")
             return True, "авто-выбор выключен (только GigaAM)"
+
+        if key == "postproc":
+            # Полировка дообученной моделью (:8083). 4B при этом остаётся живым —
+            # он нужен Oracle LLM, где требуется смекалка, а не форматирование.
+            cfg = s.polish
+            if not bool(getattr(cfg, "postproc", False)):
+                if not list(models_dir().glob("myflow-postproc-*.gguf")):
+                    return False, ("модель постпроцессора не собрана "
+                                   "(models/myflow-postproc-*.gguf)")
+                if not self._ensure_server("postproc"):
+                    return False, ("сервер постпроцессора не поднялся (:8083) — "
+                                   "проверь data/llm-postproc.log")
+                if not bool(getattr(cfg, "enabled", True)):
+                    return False, ("полировка выключена — сначала включи строку «LLM», "
+                                   "иначе постпроцессору нечего оформлять")
+                cfg.postproc = True
+                self.settings.save()
+                print("[myflow] постпроцессор включён: полировка на своей модели (:8083)")
+                return True, "постпроцессор включён (Qwen3-0.6B, ~50 мс)"
+            cfg.postproc = False
+            self.settings.save()
+            self._postproc_client = None          # свой клиент больше не нужен
+            self._stop_server("postproc")         # освобождаем VRAM
+            print("[myflow] постпроцессор выключен: полировка снова на Qwen3-4B")
+            return True, "постпроцессор выключен (полировка на Qwen3-4B)"
 
         if key == "judge":
             # Oracle LLM: оба движка + склейка. Требует живой whisper-сервер.
