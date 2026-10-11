@@ -332,7 +332,8 @@ def to_chat(src: str, dst: str) -> dict:
 
 def build(variants: int = 3, seed: int = 20261011, val_every: int = 7,
           identity_cap: int = 1200, limit: int | None = None,
-          out_dir: Path | None = None, include_wispr: bool = True) -> dict:
+          out_dir: Path | None = None, include_wispr: bool = True,
+          holdout_last: int = 0) -> dict:
     """Собрать датасет.
 
     Разбиение — СТАБИЛЬНОЕ по id диктовки (`id % val_every == 0` идёт в валидацию):
@@ -343,7 +344,15 @@ def build(variants: int = 3, seed: int = 20261011, val_every: int = 7,
     dictionary = load_dictionary()
     error_pairs = word_error_pairs()
 
+    # «Новые» диктовки: последние по id держим в стороне ЦЕЛИКОМ (как будто они
+    # надиктованы после обучения) — на них проверяем, не деградирует ли модель на
+    # свежих фразах. Это честнее обычной валидации: она мала и шумит.
+    ordered = sorted(all_pairs, key=lambda x: x["id"])
+    holdout_rows = ordered[-holdout_last:] if holdout_last > 0 else []
+    holdout_ids = {p["id"] for p in holdout_rows}
+
     val_ids = {p["id"] for p in all_pairs if p["id"] % val_every == 0}
+    val_ids |= holdout_ids
     train_ids = {p["id"] for p in all_pairs} - val_ids
     val_rows = [p for p in all_pairs if p["id"] in val_ids]
 
@@ -437,6 +446,8 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=20261011)
     ap.add_argument("--limit", type=int, default=None, help="ограничить реальные пары")
     ap.add_argument("--out", type=Path, default=None, help="каталог для датасета")
+    ap.add_argument("--holdout-last", type=int, default=0,
+                    help="последние N диктовок не брать в обучение (проверка на свежих)")
     ap.add_argument("--no-wispr", dest="wispr", action="store_false",
                     help="не брать эталоны Wispr в синтетику (для честного замера на них)")
     args = ap.parse_args()
@@ -452,7 +463,7 @@ def main() -> int:
         con.close()
     st = build(variants=args.variants, seed=args.seed,
                val_every=args.val_every, limit=args.limit, out_dir=args.out,
-               include_wispr=args.wispr)
+               include_wispr=args.wispr, holdout_last=args.holdout_last)
     if raw_count:
         dropped = raw_count - st["real_total"]
         print(f"  отсеяно мусорных пар: {dropped} из {raw_count} "
