@@ -70,11 +70,14 @@ def pct(values: list[float], q: float) -> float:
 
 
 def evaluate(rows: list[dict], use_polish: str = "auto", limit: int | None = None,
-             router_client=None) -> dict:
+             router_client=None, url: str | None = None) -> dict:
     from myflow.asr import make_asr_client, whisper_needed  # noqa: PLC0415
     from myflow.polish import PolishClient                 # noqa: PLC0415
 
     cfg = SettingsStore().get()
+    if url:
+        cfg.polish.url = url
+        cfg.polish.enabled = True          # мерим модель, а не рантайм-тумблер
     asr = make_asr_client(cfg.asr)
     if hasattr(asr, "warmup"):
         asr.warmup()
@@ -220,6 +223,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Сравнение MyFLOW и Wispr на одном аудио")
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--polish", choices=("auto", "on", "off"), default="auto")
+    ap.add_argument("--url", default=None,
+                    help="URL LLM для полировки (например http://127.0.0.1:8083/v1)")
     ap.add_argument("--only-edited", action="store_true",
                     help="только фразы, где пользователь сам правил текст")
     ap.add_argument("--report", type=Path, default=WISPR_DIR / "report.md")
@@ -231,7 +236,7 @@ def main() -> int:
     if args.only_edited:
         rows = [r for r in rows if r.get("their_edited")]
     print(f"Фраз к прогону: {len(rows)}")
-    report = evaluate(rows, use_polish=args.polish, limit=args.limit)
+    report = evaluate(rows, use_polish=args.polish, limit=args.limit, url=args.url)
     write_report(report, args.report)
     args.save.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in report["results"]),
                          encoding="utf-8")
