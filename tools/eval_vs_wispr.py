@@ -29,7 +29,8 @@ sys.path.insert(0, str(ROOT))
 
 from myflow.config import SettingsStore                      # noqa: E402
 from myflow.fastpath import fast_path_allowed, looks_wellformed  # noqa: E402
-from myflow.lightclean import light_clean, strip_inner_fillers
+from myflow.lightclean import light_clean
+from myflow.postproc_prompt import POSTPROC_STYLE, strip_inner_fillers
 from myflow.asr_router import review as review_asr_quality                    # noqa: E402
 
 WISPR_DIR = ROOT / "data" / "eval_wispr"
@@ -70,7 +71,8 @@ def pct(values: list[float], q: float) -> float:
 
 
 def evaluate(rows: list[dict], use_polish: str = "auto", limit: int | None = None,
-             router_client=None, url: str | None = None) -> dict:
+             router_client=None, url: str | None = None,
+             style: str = "plain") -> dict:
     from myflow.asr import make_asr_client, whisper_needed  # noqa: PLC0415
     from myflow.polish import PolishClient                 # noqa: PLC0415
 
@@ -115,7 +117,11 @@ def evaluate(rows: list[dict], use_polish: str = "auto", limit: int | None = Non
                 except Exception as exc:  # noqa: BLE001
                     route_note = f"second_failed:{type(exc).__name__}"
 
-        style = "plain"
+        # Стиль задаётся снаружи: дообученному постпроцессору нужен ЕГО промпт.
+    # С чужим стилем он получит не тот вход, на котором обучался (замер: 0.618
+    # вместо 0.262), поэтому для :8083 стиль подставляется автоматически.
+    if url and "8083" in url and style == "plain":
+        style = POSTPROC_STYLE
         fast_ok, reason = fast_path_allowed(getattr(asr, "backend_name", ""), style, our_asr)
         rules: list[str] = []
         our_final = our_asr
@@ -223,6 +229,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Сравнение MyFLOW и Wispr на одном аудио")
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--polish", choices=("auto", "on", "off"), default="auto")
+    ap.add_argument("--style", default="plain",
+                    help="стиль полировки (для :8083 подставляется postproc)")
     ap.add_argument("--url", default=None,
                     help="URL LLM для полировки (например http://127.0.0.1:8083/v1)")
     ap.add_argument("--only-edited", action="store_true",
@@ -236,7 +244,8 @@ def main() -> int:
     if args.only_edited:
         rows = [r for r in rows if r.get("their_edited")]
     print(f"Фраз к прогону: {len(rows)}")
-    report = evaluate(rows, use_polish=args.polish, limit=args.limit, url=args.url)
+    report = evaluate(rows, use_polish=args.polish, limit=args.limit, url=args.url,
+                      style=args.style)
     write_report(report, args.report)
     args.save.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in report["results"]),
                          encoding="utf-8")

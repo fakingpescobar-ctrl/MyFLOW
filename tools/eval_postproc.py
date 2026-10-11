@@ -74,7 +74,14 @@ def load_pairs(path: Path, limit: int | None = None) -> list[dict]:
     return pairs[:limit] if limit else pairs
 
 
-def run_llm(pairs: list[dict], url: str, style: str = "plain") -> tuple[list[float], list[int]]:
+def run_llm(pairs: list[dict], url: str,
+            style: str = "plain") -> tuple[list[float], list[int]]:
+    # Дообученный постпроцессор (:8083) зовётся ТОЛЬКО своим стилем: с чужим
+    # системным промптом он получает не тот вход, на котором обучался (замер:
+    # 0.119 вместо 0.079 — та же ловушка, что была в боевом пути).
+    if "8083" in url and style == "plain":
+        from myflow.postproc_prompt import POSTPROC_STYLE
+        style = POSTPROC_STYLE
     cfg = SettingsStore().get().polish
     cfg.url = url
     cfg.enabled = True          # мерим модель, а не рантайм-тумблер полировки
