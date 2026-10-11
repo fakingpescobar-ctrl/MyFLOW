@@ -333,7 +333,7 @@ def to_chat(src: str, dst: str) -> dict:
 def build(variants: int = 3, seed: int = 20261011, val_every: int = 7,
           identity_cap: int = 1200, limit: int | None = None,
           out_dir: Path | None = None, include_wispr: bool = True,
-          holdout_last: int = 0) -> dict:
+          holdout_last: int = 0, identity_share: float = 0.0) -> dict:
     """Собрать датасет.
 
     Разбиение — СТАБИЛЬНОЕ по id диктовки (`id % val_every == 0` идёт в валидацию):
@@ -405,7 +405,23 @@ def build(variants: int = 3, seed: int = 20261011, val_every: int = 7,
             identity.append(to_chat(dst, dst))
 
     rng.shuffle(identity)
-    synthetic += identity[:identity_cap]
+    identity = identity[:identity_cap]
+
+    # БАЛАНС «ничего не менять». Замер: в первой версии датасета 86 % примеров
+    # требовали правки и лишь 14 % — «оставь как есть», поэтому модель правила даже
+    # готовый текст (на свежих диктовках промах 0.104 против 0.029 у «не трогать»).
+    # Повторяем примеры-идентичности до заданной доли; дубли здесь ОСОЗНАННЫЕ, это
+    # взвешивание класса (тест разрешает дубли только среди пар src == dst).
+    n_change = len(train_real) - sum(
+        1 for row in train_real if parts_key(row)[0] == parts_key(row)[1]) + len(synthetic)
+    n_ident = len(identity)
+    if identity_share > 0 and n_ident and n_change:
+        need = int(n_change * identity_share / (1.0 - identity_share))
+        copies = max(1, -(-need // n_ident))
+        identity = identity * copies
+        print(f"  баланс: «менять» {n_change}, «не менять» {n_ident} x {copies} копий "
+              f"= {len(identity)} ({len(identity) / (n_change + len(identity)) * 100:.0f}%)")
+    synthetic += identity
 
     rng.shuffle(synthetic)
     train = [row for row in train_real + synthetic
@@ -446,6 +462,8 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=20261011)
     ap.add_argument("--limit", type=int, default=None, help="ограничить реальные пары")
     ap.add_argument("--out", type=Path, default=None, help="каталог для датасета")
+    ap.add_argument("--identity-share", type=float, default=0.0,
+                    help="доля примеров «ничего не менять» (0.45 = 45%%)")
     ap.add_argument("--holdout-last", type=int, default=0,
                     help="последние N диктовок не брать в обучение (проверка на свежих)")
     ap.add_argument("--no-wispr", dest="wispr", action="store_false",
@@ -463,7 +481,8 @@ def main() -> int:
         con.close()
     st = build(variants=args.variants, seed=args.seed,
                val_every=args.val_every, limit=args.limit, out_dir=args.out,
-               include_wispr=args.wispr, holdout_last=args.holdout_last)
+               include_wispr=args.wispr, holdout_last=args.holdout_last,
+               identity_share=args.identity_share)
     if raw_count:
         dropped = raw_count - st["real_total"]
         print(f"  отсеяно мусорных пар: {dropped} из {raw_count} "

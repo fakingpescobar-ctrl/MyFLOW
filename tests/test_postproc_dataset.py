@@ -38,7 +38,7 @@ class DatasetBuildTest(unittest.TestCase):
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
         cls.out = Path(cls.tmp.name)
-        cls.stats = bpd.build(out_dir=cls.out)
+        cls.stats = bpd.build(out_dir=cls.out, identity_share=0.45)
         cls.train = [json.loads(l) for l in
                      (cls.out / "postproc_train.jsonl").read_text(encoding="utf-8").splitlines()
                      if l.strip()]
@@ -64,9 +64,19 @@ class DatasetBuildTest(unittest.TestCase):
         leaks = [src for src, _ in map(parts, self.val) if src in train_inputs]
         self.assertEqual(leaks, [], f"утечка входов: {len(leaks)}")
 
-    def test_no_duplicate_pairs_in_training(self):
+    def test_no_duplicate_change_pairs_in_training(self):
+        """Дубли допустимы ТОЛЬКО среди «ничего не менять»: это взвешивание класса.
+
+        Перекос был настоящей проблемой: при 86 % примеров «поменяй» модель правила
+        даже готовый текст (0.104 против 0.029 у «не трогать»), поэтому идентичности
+        повторяются намеренно.
+        """
         pairs = list(map(parts, self.train))
-        self.assertEqual(len(pairs), len(set(pairs)), "есть дубли пар (вход, ответ)")
+        change = [p for p in pairs if p[0] != p[1]]
+        identity = [p for p in pairs if p[0] == p[1]]
+        self.assertEqual(len(change), len(set(change)), "дубли среди пар с правкой")
+        self.assertGreaterEqual(len(identity), len(change) * 0.2,
+                                "идентичностей слишком мало для баланса")
 
     def test_every_example_has_system_prompt(self):
         for row in self.train[:200]:
@@ -80,7 +90,7 @@ class DatasetBuildTest(unittest.TestCase):
 
     def test_build_is_deterministic(self):
         other = Path(self.tmp.name) / "again"
-        bpd.build(out_dir=other)
+        bpd.build(out_dir=other, identity_share=0.45)     # те же параметры, что в setUpClass
         a = (self.out / "postproc_train.jsonl").read_text(encoding="utf-8")
         b = (other / "postproc_train.jsonl").read_text(encoding="utf-8")
         self.assertEqual(a, b, "при том же seed датасет должен совпадать")
@@ -89,7 +99,7 @@ class DatasetBuildTest(unittest.TestCase):
         """Одни и те же диктовки остаются в валидации при пересборке."""
         v1 = {parts(r)[1] for r in self.val}
         other = Path(self.tmp.name) / "stable"
-        bpd.build(out_dir=other)
+        bpd.build(out_dir=other, identity_share=0.45)
         val2 = [json.loads(l) for l in
                 (other / "postproc_val.jsonl").read_text(encoding="utf-8").splitlines()
                 if l.strip()]

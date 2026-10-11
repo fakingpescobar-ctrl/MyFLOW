@@ -32,7 +32,8 @@ from myflow.asr import WhisperClient, AsrResult, make_asr_client
 from myflow.audio_store import AudioStore
 from myflow.axtext import AxReader, AxWatcher
 from myflow.db import Database, DictationRecord
-from myflow.config import SettingsStore, DATA_DIR, DEFAULT_APP_CATEGORIES, detect_category
+from myflow.config import (SettingsStore, DATA_DIR, DEFAULT_APP_CATEGORIES,
+                        ROOT, detect_category)
 from myflow.fastpath import fast_path_allowed, looks_wellformed
 from myflow.asr_router import review as review_asr_quality
 from myflow.asr_judge import merge as judge_merge
@@ -651,6 +652,85 @@ class MyFlowApp:
                 break
         return text.rstrip(") ").strip() or name
 
+    # Порог, после которого пульт предлагает дообучение: каждая диктовка — это
+    # размеченный пример (что услышали -> что осталось), и модель стоит освежать.
+    RETRAIN_THRESHOLD = 100
+
+    def _train_python(self) -> Path:
+        """Интерпретатор учебного окружения (CUDA-torch)."""
+        return ROOT / ".venv-train" / "Scripts" / "python.exe"
+
+    def retrain_state(self) -> dict:
+        """Что накопилось для дообучения: новые диктовки, когда учились, идёт ли прогон."""
+        import json as _json
+        state_path = ROOT / "data" / "train" / "state.json"
+        trained_at, trained_on, max_trained = "", 0, 0
+        if state_path.exists():
+            try:
+                data = _json.loads(state_path.read_text(encoding="utf-8"))
+                trained_at = str(data.get("trained_at", ""))
+                trained_on = int(data.get("dictations") or 0)
+                max_trained = int(data.get("max_id") or 0)
+            except Exception:  # noqa: BLE001
+                pass
+        dictations, max_id = 0, 0
+        try:
+            import sqlite3
+            db = ROOT / "data" / "myflow.sqlite"
+            if db.exists():
+                con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+                dictations = int(con.execute(
+                    "SELECT COUNT(*) FROM history WHERE asr_text IS NOT NULL "
+                    "AND TRIM(asr_text) != ''").fetchone()[0])
+                max_id = int(con.execute(
+                    "SELECT COALESCE(MAX(id), 0) FROM history").fetchone()[0])
+                con.close()
+        except Exception:  # noqa: BLE001
+            pass
+        proc = getattr(self, "_retrain_proc", None)
+        running = proc is not None and proc.poll() is None
+        new = max(0, max_id - max_trained) if max_trained else dictations
+        last_log = ""
+        log_path = ROOT / "data" / "retrain.log"
+        if log_path.exists():
+            try:
+                lines = [ln for ln in log_path.read_text(encoding="utf-8").splitlines()
+                         if ln.strip()]
+                last_log = lines[-1][:60] if lines else ""
+            except Exception:  # noqa: BLE001
+                pass
+        return {"new": new, "dictations": dictations, "trained_on": trained_on,
+                "trained_at": trained_at, "running": running, "last_log": last_log,
+                # getattr: приложение-заглушка (тесты, встраивание) может не иметь
+                # атрибута класса — берём разумный порог по умолчанию.
+                "threshold": getattr(self, "RETRAIN_THRESHOLD", 100),
+                "env_ready": self._train_python().exists()}
+
+    def start_retrain(self) -> tuple[bool, str]:
+        """Запустить дообучение в фоне (журнал: data/retrain.log)."""
+        state = self.retrain_state()
+        if state["running"]:
+            return False, "дообучение уже идёт (смотри журнал)"
+        if not state["env_ready"]:
+            return False, ("нет учебного окружения .venv-train — "
+                           "см. tools/train_postproc.md")
+        import subprocess
+        log_path = ROOT / "data" / "retrain.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fh = open(log_path, "a", encoding="utf-8")
+            self._retrain_proc = subprocess.Popen(
+                [str(self._train_python()), "-X", "utf8",
+                 str(ROOT / "tools" / "retrain_postproc.py")],
+                cwd=str(ROOT), stdout=fh, stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except Exception as exc:  # noqa: BLE001
+            return False, f"не смог запустить дообучение: {exc!r}"
+        print("[myflow] дообучение постпроцессора запущено в фоне "
+              "(data/retrain.log)")
+        return True, "дообучение запущено (~20 мин, GPU занят)"
+
     def control_snapshot(self) -> dict:
         """Живое состояние всех узлов для панели управления.
 
@@ -782,6 +862,25 @@ class MyFlowApp:
             {"key": "target", "label": "Цель вставки", "value": target_label,
              "hint": "Enter — закрепить/снять окно (F6)"},
         ]
+
+        # Строка «Дообучение»: показываем, сколько свежих диктовок накопилось.
+        # Каждая диктовка — размеченный пример, модель стоит освежать; показываем
+        # только там, где дообучение реально возможно (есть учебное окружение).
+        retrain = self.retrain_state()
+        if retrain["env_ready"]:
+            if retrain["running"]:
+                value, note = "идёт обучение…", "фон, ~20 мин"
+            elif retrain["new"] >= retrain["threshold"]:
+                value, note = f"пора: +{retrain['new']} диктовок", "Enter"
+            else:
+                value = f"+{retrain['new']} из {retrain['threshold']}"
+                note = (f"модель на {retrain['trained_on']} диктовках"
+                        if retrain["trained_on"] else "ещё не обучалась")
+            modules.append({
+                "key": "retrain", "label": "Дообучение", "value": value,
+                "on": bool(retrain["running"]), "ok": True, "note": note,
+                "hint": "Enter — дообучить постпроцессор на свежих диктовках "
+                        "(~20 мин, GPU занят; журнал data/retrain.log)"})
 
         # Строка «Постпроцессор» появляется ТОЛЬКО когда модель собрана: иначе она
         # обещала бы то, чего нет (модель дообучается отдельно, tools/train_postproc.md).
@@ -979,6 +1078,9 @@ class MyFlowApp:
                 self._stop_server("asr")
             print("[myflow] авто-выбор ASR выключен")
             return True, "авто-выбор выключен (только GigaAM)"
+
+        if key == "retrain":
+            return self.start_retrain()
 
         if key == "postproc":
             # Полировка дообученной моделью (:8083). 4B при этом остаётся живым —
