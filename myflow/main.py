@@ -37,6 +37,7 @@ from myflow.fastpath import fast_path_allowed, looks_wellformed
 from myflow.asr_router import review as review_asr_quality
 from myflow.asr_judge import merge as judge_merge
 from myflow.lightclean import light_clean, strip_inner_fillers
+from myflow.postproc_prompt import POSTPROC_STYLE
 from myflow.pick_mic import fast_mic_list
 from myflow.voiceprint import VoiceGate
 from myflow.winfocus import (FocusHistory, WindowRef, current_window,
@@ -1310,6 +1311,10 @@ class MyFlowApp:
         ASR. Раньше исключение улетало в общий handler воркера: ни вставки,
         ни записи в историю (реальный лог: 4 потерянные фразы).
         """
+        # Дообученный постпроцессор зовётся своим стилем (его же промпт был
+        # при обучении): подменяем стиль, если он включён в настройках.
+        if getattr(self.polish.cfg, "postproc", False):
+            style = POSTPROC_STYLE
         if not self.polish.cfg.enabled:
             return PolishResult(text=text, latency_ms=0, skipped=True)
         # Быстрый отказ: если LLM заведомо лежит (или её только что не стало),

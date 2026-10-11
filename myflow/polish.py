@@ -15,6 +15,8 @@ from urllib3.util.retry import Retry
 
 from myflow.config import PolishConfig
 
+from myflow.postproc_prompt import POSTPROC_STYLE, POSTPROC_SYSTEM
+
 STYLE_PROMPTS: dict[str, str] = {
     "plain": (
         "Это пост-обработка распознанной речи. Задачи: "
@@ -253,8 +255,13 @@ class PolishClient:
         if not raw_text.strip():
             return PolishResult(text=raw_text, latency_ms=0)
 
-        system = (STYLE_PROMPTS.get(style, STYLE_PROMPTS["plain"])
-                  + NUMBERS_RULE + OMOPHON_RULES + DATA_GUARD)
+        if style == POSTPROC_STYLE:
+            # Дообученный постпроцессор: ЕГО системный промпт, без наших правил и
+            # примеров — иначе вход не совпадёт с тем, на чём модель обучалась.
+            system = POSTPROC_SYSTEM
+        else:
+            system = (STYLE_PROMPTS.get(style, STYLE_PROMPTS["plain"])
+                      + NUMBERS_RULE + OMOPHON_RULES + DATA_GUARD)
         if dictionary:
             def _clean(value: object) -> str:
                 # Переводы строк в словаре = инъекция в system-промпт.

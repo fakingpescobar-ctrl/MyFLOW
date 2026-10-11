@@ -124,6 +124,20 @@ def main() -> int:
         eval_strategy="steps", eval_steps=args.save_steps,
         bf16=(device == "cuda"), optim="adamw_torch", report_to=[],
         gradient_checkpointing=False, remove_unused_columns=False)
+    # Совместимость версий transformers: параметр переименовали
+    # (evaluation_strategy -> eval_strategy), и на старых сборках падает.
+    try:
+        training = TrainingArguments(
+            output_dir=str(args.out), num_train_epochs=args.epochs,
+            per_device_train_batch_size=args.batch,
+            gradient_accumulation_steps=args.accum,
+            learning_rate=args.lr, lr_scheduler_type="cosine", warmup_ratio=0.03,
+            logging_steps=25, save_steps=args.save_steps, save_total_limit=2,
+            evaluation_strategy="steps", eval_steps=args.save_steps,
+            bf16=(device == "cuda"), optim="adamw_torch", report_to=[],
+            remove_unused_columns=False)
+    except TypeError:
+        pass
     trainer = Trainer(model=model, args=training, train_dataset=train_ds,
                       eval_dataset=val_ds, data_collator=collator)
     trainer.train()

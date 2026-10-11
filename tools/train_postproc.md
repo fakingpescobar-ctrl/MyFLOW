@@ -67,6 +67,15 @@ py -3.13 -m venv .venv-train
 
 ## Этап 3 — замер против 4B
 
+Одной командой (поднимает кандидата на свободном порту, сравнивает с боевой
+моделью на тех же парах и гасит его):
+
+```powershell
+.venv\Scripts\python.exe -X utf8 tools\ab_postproc.py --model models\myflow-postproc-qwen3-06b-q8_0.gguf --also-all
+```
+
+Вручную:
+
 ```powershell
 # 1) слить адаптер с базой, собрать GGUF и поднять на отдельном порту
 .venv-train\Scripts\python.exe tools\merge_postproc_lora.py --adapter data/train/postproc_lora --out data/train/postproc_merged

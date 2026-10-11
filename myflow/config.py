@@ -183,6 +183,10 @@ class PolishConfig:
     # Fallback-имя модели, если /v1/models не ответил. Реальное имя клиент
     # спрашивает у сервера (polish.PolishClient._effective_model).
     model: str = "qwen3-4b-instruct-2507"
+    # Использовать небольшой ДООБУЧЕННЫЙ постпроцессор (myflow-postproc-*.gguf):
+    # он зовётся своим системным промптом (myflow/postproc_prompt.py) и
+    # отвечает за ~50 мс вместо ~150. Выключается, если модель не собрана.
+    postproc: bool = False
     enabled: bool = True            # фиче-флаг polish-provider
     max_tokens: int = 512           # верхняя граница ответа (реально — по бюджету)
     temperature: float = 0.2
