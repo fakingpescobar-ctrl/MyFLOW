@@ -29,8 +29,8 @@ sys.path.insert(0, str(ROOT))
 
 from myflow.config import SettingsStore                      # noqa: E402
 from myflow.fastpath import fast_path_allowed, looks_wellformed  # noqa: E402
-from myflow.lightclean import light_clean
-from myflow.postproc_prompt import POSTPROC_STYLE, strip_inner_fillers
+from myflow.lightclean import light_clean, strip_inner_fillers
+from myflow.postproc_prompt import POSTPROC_STYLE
 from myflow.asr_router import review as review_asr_quality                    # noqa: E402
 
 WISPR_DIR = ROOT / "data" / "eval_wispr"
@@ -117,12 +117,17 @@ def evaluate(rows: list[dict], use_polish: str = "auto", limit: int | None = Non
                 except Exception as exc:  # noqa: BLE001
                     route_note = f"second_failed:{type(exc).__name__}"
 
-        # Стиль задаётся снаружи: дообученному постпроцессору нужен ЕГО промпт.
-    # С чужим стилем он получит не тот вход, на котором обучался (замер: 0.618
-    # вместо 0.262), поэтому для :8083 стиль подставляется автоматически.
-    if url and "8083" in url and style == "plain":
-        style = POSTPROC_STYLE
-        fast_ok, reason = fast_path_allowed(getattr(asr, "backend_name", ""), style, our_asr)
+        # Стиль: дообученному постпроцессору (:8083) нужен ЕГО промпт — с чужим он
+        # получает не тот вход, на котором обучался (замер: 0.618 вместо 0.262).
+        row_style = (POSTPROC_STYLE
+                     if (url and "8083" in url and style == "plain") else style)
+        # Ворота быстрого пути смотрим по ПОЛЬЗОВАТЕЛЬСКОМУ стилю, как в бою
+        # (`main._process_recording` решает до подмены стиля модели). Иначе
+        # кандидат вообще не использует быстрый путь: 0 из 624 против 431 у 4B —
+        # и сравнение получается нечестным (0.143 против 0.091).
+        gate_style = "plain" if row_style == POSTPROC_STYLE else row_style
+        fast_ok, reason = fast_path_allowed(getattr(asr, "backend_name", ""),
+                                            gate_style, our_asr)
         rules: list[str] = []
         our_final = our_asr
         polish_ms = 0
@@ -135,7 +140,7 @@ def evaluate(rows: list[dict], use_polish: str = "auto", limit: int | None = Non
             else:
                 t1 = time.perf_counter()
                 try:
-                    polished = polish.polish(our_asr, style=style, dictionary=[])
+                    polished = polish.polish(our_asr, style=row_style, dictionary=[])
                     our_final = polished.text or our_asr
                     route = "llm"
                 except Exception as exc:  # noqa: BLE001

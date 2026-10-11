@@ -270,7 +270,7 @@ def word_error_pairs(min_len: int = 3) -> list[tuple[str, str]]:
     return out
 
 
-def clean_texts(exclude: set[str] | None = None) -> list[str]:
+def clean_texts(exclude: set[str] | None = None, include_wispr: bool = True) -> list[str]:
     """Чистые тексты для синтетики: итоги диктовок + эталоны Wispr.
 
     `exclude` — нормализованные тексты, которые НЕЛЬЗЯ использовать как источник
@@ -278,7 +278,10 @@ def clean_texts(exclude: set[str] | None = None) -> list[str]:
     """
     exclude = exclude or set()
     texts = [p["dst"] for p in real_pairs()]
-    if WISPR.exists():
+    # `include_wispr=False` нужен для ЧЕСТНОГО замера на 624 фразах Wispr: их
+    # эталоны иначе попадают в обучение как «чистые тексты», и кандидат получает
+    # преимущество перед 4B, который этих текстов не видел.
+    if include_wispr and WISPR.exists():
         for line in WISPR.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
@@ -329,7 +332,7 @@ def to_chat(src: str, dst: str) -> dict:
 
 def build(variants: int = 3, seed: int = 20261011, val_every: int = 7,
           identity_cap: int = 1200, limit: int | None = None,
-          out_dir: Path | None = None) -> dict:
+          out_dir: Path | None = None, include_wispr: bool = True) -> dict:
     """Собрать датасет.
 
     Разбиение — СТАБИЛЬНОЕ по id диктовки (`id % val_every == 0` идёт в валидацию):
@@ -357,7 +360,7 @@ def build(variants: int = 3, seed: int = 20261011, val_every: int = 7,
             continue
         train_real.append(to_chat(p["src"], p["dst"]))
 
-    texts = clean_texts(exclude=blocked)
+    texts = clean_texts(exclude=blocked, include_wispr=include_wispr)
 
     # Реальные пары дедуплицируем: одну фразу диктовали дважды.
     seen_pairs: set[tuple[str, str]] = set()
@@ -434,6 +437,8 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=20261011)
     ap.add_argument("--limit", type=int, default=None, help="ограничить реальные пары")
     ap.add_argument("--out", type=Path, default=None, help="каталог для датасета")
+    ap.add_argument("--no-wispr", dest="wispr", action="store_false",
+                    help="не брать эталоны Wispr в синтетику (для честного замера на них)")
     args = ap.parse_args()
     db = ROOT / "data" / "myflow.sqlite"
     raw_count = 0
@@ -446,7 +451,8 @@ def main() -> int:
             "OR TRIM(COALESCE(polished_text,'')) != '')").fetchone()[0]
         con.close()
     st = build(variants=args.variants, seed=args.seed,
-               val_every=args.val_every, limit=args.limit, out_dir=args.out)
+               val_every=args.val_every, limit=args.limit, out_dir=args.out,
+               include_wispr=args.wispr)
     if raw_count:
         dropped = raw_count - st["real_total"]
         print(f"  отсеяно мусорных пар: {dropped} из {raw_count} "

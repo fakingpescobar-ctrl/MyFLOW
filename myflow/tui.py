@@ -863,7 +863,11 @@ def default_specs(root: Path = ROOT) -> list[ServerSpec]:
         log=root / "data" / "llm.log", required=False,
     ))
     # Дообученный постпроцессор (этап 4): второй сервер, только если модель собрана.
-    postproc_models = sorted(models.glob("myflow-postproc-*.gguf"))
+    # Квантизаций может лежать несколько (Q8_0, Q6_K...). Берём самую тяжёлую:
+    # в этой серии она же и самая точная (проверено: Q6_K 472 МБ дал 0.113 против
+    # 0.098 у Q8_0 на одних и тех же парах). Алфавитный порядок брал Q6_K.
+    postproc_models = sorted(models.glob("myflow-postproc-*.gguf"),
+                             key=lambda path: path.stat().st_size, reverse=True)
     if postproc_models:
         specs.append(ServerSpec(
             key="postproc", title="Постпроцессор MyFLOW (0.6B)", port=8083,

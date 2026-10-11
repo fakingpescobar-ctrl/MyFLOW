@@ -38,6 +38,19 @@ class PostprocServerSpecTest(unittest.TestCase):
         self.assertIn("myflow-postproc", str(spec.model))
         self.assertTrue(str(spec.model).endswith(".gguf"))
 
+    def test_prefers_best_quality_quantization(self):
+        """Из нескольких квантизаций берём самую тяжёлую (она точнее).
+
+        Алфавитный порядок выбирал Q6_K (472 МБ) вместо Q8_0 (610 МБ), а замер
+        показал 0.113 против 0.098 — терять качество на ровном месте нельзя.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "myflow-postproc-qwen3-06b-q6_k.gguf").write_bytes(b"x" * 100)
+            (Path(tmp) / "myflow-postproc-qwen3-06b-q8_0.gguf").write_bytes(b"x" * 300)
+            with mock.patch("myflow.tui.models_dir", lambda: Path(tmp)):
+                specs = {s.key: s for s in default_specs()}
+        self.assertIn("q8_0", str(specs["postproc"].model))
+
     def test_both_servers_coexist(self):
         with tempfile.TemporaryDirectory() as tmp:
             (Path(tmp) / "myflow-postproc-x.gguf").write_bytes(b"GGUF")
