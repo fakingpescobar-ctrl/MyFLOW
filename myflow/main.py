@@ -1304,6 +1304,28 @@ class MyFlowApp:
             target=self._polish_watchdog_loop, daemon=True, name="polish-watchdog")
         self._polish_watchdog.start()
 
+    def _polish_client(self):
+        """Клиент полировки: дообученный постпроцессор (:8083) или основной 4B (:8082).
+
+        Держим ДВА сервера: маленькая модель оформляет текст (~50 мс), а 4B
+        остаётся для Oracle LLM, где нужна смекалка. Клиент для 0.6B создаётся
+        один раз и переиспользуется (своё соединение и свой кэш имени модели).
+        """
+        cfg = self.polish.cfg
+        if not getattr(cfg, "postproc", False):
+            return self.polish
+        cached = getattr(self, "_postproc_client", None)
+        if cached is None:
+            import copy as _copy
+            from myflow.polish import PolishClient
+            clone = _copy.copy(cfg)
+            clone.url = getattr(cfg, "url_postproc", "http://127.0.0.1:8083/v1")
+            # Главный тумблер полировки (polish.enabled) НЕ трогаем: если
+            # пользователь выключил полировку, постпроцессор тоже молчит.
+            cached = PolishClient(clone)
+            self._postproc_client = cached
+        return cached
+
     def _polish_safe(self, text: str, style: str, dic: list[dict]) -> PolishResult:
         """Полировка, которая НИКОГДА не теряет фразу.
 
@@ -1315,12 +1337,13 @@ class MyFlowApp:
         # при обучении): подменяем стиль, если он включён в настройках.
         if getattr(self.polish.cfg, "postproc", False):
             style = POSTPROC_STYLE
-        if not self.polish.cfg.enabled:
-            return PolishResult(text=text, latency_ms=0, skipped=True)
         # Быстрый отказ: если LLM заведомо лежит (или её только что не стало),
         # не тратим на неё секунды — сразу сырой ASR, автолечение в фоне и
         # очередь на дополировку.
-        if not _health_check_llm(self.polish):
+        client = self._polish_client()
+        if not client.cfg.enabled:
+            return PolishResult(text=text, latency_ms=0, skipped=True)
+        if not _health_check_llm(client):
             self._polish_fails += 1
             print("[myflow] ! LLM не отвечает — вставлю сырой ASR "
                   "(поднимаю сервер в фоне, фраза в очереди на дополировку)")
@@ -1334,7 +1357,7 @@ class MyFlowApp:
                 self._ensure_polish_watchdog()
             return PolishResult(text=text, latency_ms=0, skipped=True)
         try:
-            result = self.polish.polish(text, style=style, dictionary=dic)
+            result = client.polish(text, style=style, dictionary=dic)
             self._polish_fails = 0
             return result
         except Exception as exc:  # noqa: BLE001 — это защитный слой
@@ -1452,7 +1475,7 @@ class MyFlowApp:
                                             name="llm-revive")
         self._llm_revive.start()
 
-    def _wait_llm_ready(self, seconds: float) -> bool:
+    def _wait_llm_ready(self, seconds: float, client=None) -> bool:
         """Ждать живости LLM до seconds (шаг 0.25 с). True — дождались."""
         if seconds <= 0:
             return False
@@ -1460,7 +1483,7 @@ class MyFlowApp:
         while time.monotonic() < deadline:
             if self._stopping.is_set():
                 return False
-            if _health_check_llm(self.polish):
+            if _health_check_llm(client or self.polish):
                 return True
             time.sleep(0.25)
         return False

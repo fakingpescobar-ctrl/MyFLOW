@@ -235,6 +235,8 @@ def make_app(auto=False, busy=False, gen=0, polish_enabled=False, paster=None):
     app.db.app = app
     for name in ("_handle_press", "_handle_release", "_begin_recording", "_finish_recording",
                  "_enqueue", "_cancel_all", "_polish_safe", "_ensure_polish_watchdog",
+            # выбор клиента полировки (4B :8082 или дообученный :8083)
+            "_polish_client", "_watchdog_interval", "_prewarm_llm_work",
                  "_polish_watchdog_loop", "_worker_loop", "_process_recording",
                  "_dispatch_voice_command", "_run_command", "_resolve_style",
                  "_spawn_edit_watcher", "_process_preview", "_cycle_style",

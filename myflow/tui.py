@@ -862,6 +862,18 @@ def default_specs(root: Path = ROOT) -> list[ServerSpec]:
               "-ctk", "q8_0", "-ctv", "q8_0", "--jinja"],
         log=root / "data" / "llm.log", required=False,
     ))
+    # Дообученный постпроцессор (этап 4): второй сервер, только если модель собрана.
+    postproc_models = sorted(models.glob("myflow-postproc-*.gguf"))
+    if postproc_models:
+        specs.append(ServerSpec(
+            key="postproc", title="Постпроцессор MyFLOW (0.6B)", port=8083,
+            url="http://127.0.0.1:8083", health_path="/v1/models",
+            exe=llama_dir() / "llama-server.exe",
+            model=postproc_models[0],
+            args=["--host", "127.0.0.1", "--port", "8083", "-c", "4096", "-np", "1",
+                  "-kvu", "-ngl", "99", "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0",
+                  "--jinja"],
+            log=ROOT / "data" / "llm-postproc.log"))
     return specs
 
 

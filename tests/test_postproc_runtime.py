@@ -106,7 +106,10 @@ class PipelinePostprocTest(unittest.TestCase):
             seen["style"] = style
             return types.SimpleNamespace(text=text, latency_ms=1, skipped=False)
 
-        app.polish.polish = fake_polish
+        # клиент подменяем целиком: у него свой cfg (enabled) и свой polish
+        fake_client = types.SimpleNamespace(
+            cfg=types.SimpleNamespace(enabled=True, postproc=True), polish=fake_polish)
+        app._polish_client = lambda: fake_client
         with mock.patch.object(M, "_health_check_llm", lambda *a, **k: True):
             app._polish_safe("проверка связи ну", "plain", [])
         self.assertEqual(seen.get("style"), POSTPROC_STYLE,
@@ -126,7 +129,9 @@ class PipelinePostprocTest(unittest.TestCase):
             seen["style"] = style
             return types.SimpleNamespace(text=text, latency_ms=1, skipped=False)
 
-        app.polish.polish = fake_polish
+        fake_client = types.SimpleNamespace(
+            cfg=types.SimpleNamespace(enabled=True, postproc=False), polish=fake_polish)
+        app._polish_client = lambda: fake_client
         with mock.patch.object(M, "_health_check_llm", lambda *a, **k: True):
             app._polish_safe("проверка связи ну", "plain", [])
         self.assertEqual(seen.get("style"), "plain")
