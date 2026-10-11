@@ -480,11 +480,27 @@ class JudgeToggleTest(unittest.TestCase):
         self.assertIn("выключен", message)
 
     def test_enable_requires_llm(self):
+        """LLM лежит и поднять не удалось -> Oracle не включаем.
+
+        Серверы грузятся лениво (полировка идёт либо на 4B, либо на
+        постпроцессоре), поэтому при включении Oracle приложение СНАЧАЛА пытается
+        поднять LLM и только потом отказывает.
+        """
         self.app.polish.alive.return_value = False
+        self.app._ensure_server = lambda key: False
         ok, message = self.app.control_apply("module", "judge")
         self.assertFalse(ok)
         self.assertIn("LLM", message)
         self.assertFalse(self.app.settings.get().asr.judge)
+
+    def test_enable_starts_llm_lazily_when_needed(self):
+        """LLM не запущена (её не грузили при старте), но режим включают — поднимаем."""
+        self.app.polish.alive.return_value = False
+        started = []
+        self.app._ensure_server = lambda key: (started.append(key), True)[1]
+        ok, message = self.app.control_apply("module", "judge")
+        self.assertIn("llm", started, "Oracle должен поднять LLM лениво")
+        self.assertTrue(ok, message)
 
     def test_enable_requires_whisper_server(self):
         self.app._ensure_server = lambda key: False

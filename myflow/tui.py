@@ -815,6 +815,26 @@ def llama_dir() -> Path:
     return _llama_dir()
 
 
+def needed_servers(settings) -> set[str]:
+    """Какие серверы реально нужны при текущих настройках.
+
+    Полирует ЛИБО 4B, ЛИБО дообученный постпроцессор — не оба сразу, поэтому
+    вместе они в памяти не нужны. 4B дополнительно нужен режиму Oracle LLM
+    (склейка двух распознаваний). Если не включено ни то, ни другое, держать
+    4 ГБ модели в памяти незачем: сервер поднимется лениво, когда режим включат.
+    """
+    need = {"asr"}
+    polish = getattr(settings, "polish", None)
+    asr = getattr(settings, "asr", None)
+    postproc = bool(getattr(polish, "postproc", False))
+    if postproc:
+        need.add("postproc")
+    if (bool(getattr(asr, "judge", False))
+            or (bool(getattr(polish, "enabled", False)) and not postproc)):
+        need.add("llm")
+    return need
+
+
 def default_specs(root: Path = ROOT) -> list[ServerSpec]:
     """Флаги серверов. Тюнинг 10.10.2026 (замеры: полировка p50 205 мс вместо 260-330,
     ASR точнее на beam=5, VRAM 7.2/10 ГБ):
@@ -944,8 +964,12 @@ class Supervisor:
 
     def health_snapshot(self) -> dict:
         out = {}
+        skipped = getattr(self, "_skipped_servers", set())
         for spec in self.specs:
             state, note = self.status(spec)
+            if spec.key in skipped:
+                # Не запущен осознанно: режим, которому он нужен, выключен.
+                state, note = "down", "не нужен сейчас (режим выключен)"
             out[spec.key] = {"title": spec.title, "state": state, "note": note}
         return out
 
@@ -1602,6 +1626,9 @@ class TuiApp:
         self.console = Console()
         self.state = TuiState()
         self.supervisor = Supervisor(default_specs(), enabled=not no_servers)
+        # Серверы, которые не грузим: полировка идёт либо на 4B, либо на
+        # постпроцессоре, и незачем держать 4 ГБ «на всякий».
+        self._skipped_servers: set[str] = set()
         self.no_servers = no_servers
         self.app = None
         self._stop = threading.Event()
@@ -1706,9 +1733,18 @@ class TuiApp:
         specs = self.supervisor.specs
         spin = "|/-\\"
         i = 0
+        # Грузим только нужное: полировка идёт ЛИБО на 4B, ЛИБО на постпроцессоре,
+        # а 4B ещё нужен Oracle LLM. Незачем держать 4 ГБ в памяти «на всякий».
+        try:
+            needed = needed_servers(self.store.get())
+        except Exception:  # noqa: BLE001
+            needed = {spec.key for spec in specs}
         for spec in specs:
             if self._stop.is_set():
                 return
+            if spec.key not in needed:
+                self._skipped_servers.add(spec.key)
+                continue
             if self.supervisor.health(spec.url, spec.health_path):
                 continue
             missing = spec.missing()

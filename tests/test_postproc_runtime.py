@@ -137,8 +137,16 @@ class PipelinePostprocTest(unittest.TestCase):
         self.assertEqual(seen.get("style"), "plain")
 
     def test_config_default_is_off(self):
-        """По умолчанию режим выключен: дообученной модели может ещё не быть."""
-        self.assertFalse(SettingsStore().get().polish.postproc)
+        """По умолчанию режим выключен: дообученной модели может ещё не быть.
+
+        Настройки берём из ВРЕМЕННОГО файла: живые пользователь мог переключить
+        (и переключил — включил постпроцессор), тест не должен от этого зависеть.
+        """
+        import tempfile
+        from pathlib import Path as _Path
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SettingsStore(_Path(tmp) / "settings.json")
+        self.assertFalse(store.get().polish.postproc)
 
 
 if __name__ == "__main__":

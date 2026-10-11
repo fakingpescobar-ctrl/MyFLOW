@@ -523,8 +523,12 @@ class MyFlowApp:
             return
         if not getattr(self.polish.cfg, "auto_start_server", True):
             return
-        threading.Thread(target=self._prewarm_llm_work, daemon=True,
-                         name="llm-prewarm").start()
+        # Прогреваем ИМЕННО ту модель, которая будет полировать: либо 4B, либо
+        # дообученный постпроцессор. Иначе при включённом постпроцессоре мы бы
+        # зря поднимали 4 ГБ.
+        target = "postproc" if getattr(self.polish.cfg, "postproc", False) else "llm"
+        threading.Thread(target=self._ensure_server, args=(target,), daemon=True,
+                         name=f"prewarm-{target}").start()
 
     def _prewarm_llm_work(self) -> None:
         try:
@@ -1115,7 +1119,11 @@ class MyFlowApp:
                         return False, ("whisper-сервер не поднялся — Oracle LLM НЕ включён "
                                        "(проверь bin\\whisper и модель)")
                 if not getattr(self.polish, "alive", lambda: False)():
-                    return False, "LLM недоступна — судье нечем склеивать (проверь :8082)"
+                    # Сервер мог не подниматься при загрузке (грузим только нужное):
+                    # поднимаем его сейчас, режим-то включают осознанно.
+                    if not self._ensure_server("llm"):
+                        return False, ("LLM не поднялась — Oracle LLM нечем склеивать "
+                                       "(проверь :8082)")
                 # Защита: пока включён авто-выбор, Oracle LLM включить нельзя.
                 if bool(getattr(s.asr, "router", False)):
                     return False, ("сначала выключи «Авто-выбор» — режимы несовместимы "
