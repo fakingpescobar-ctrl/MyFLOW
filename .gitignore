@@ -20,3 +20,7 @@ data/
 
 # Мусор бенчей
 data/validation/
+
+# Учебное окружение (CUDA-torch + transformers/peft — только для дообучения)
+.venv-train/
+

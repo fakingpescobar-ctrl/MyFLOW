@@ -48,6 +48,26 @@ py -3.13 -m venv .venv-train
 .venv-train\Scripts\python.exe -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
 ```
 
+### Важно: pip в этом окружении зависает на скачивании
+
+Проверено дважды: `pip install` **замирает** на середине загрузки (процесс жив,
+CPU 0, соединений 0, файл не растёт) — и на 2.5 ГБ CUDA-колеса, и на 12 МБ
+transformers. Докачки у pip нет. Рабочая схема:
+
+```powershell
+# 1) torch — curl-ом (умеет докачку)
+curl.exe -L -C - --retry 40 --retry-delay 5 --retry-all-errors `
+  -o data\train\torch-2.6.0+cu124-cp313-cp313-win_amd64.whl `
+  "https://download.pytorch.org/whl/cu124/torch-2.6.0%2Bcu124-cp313-cp313-win_amd64.whl"
+
+# 2) мелкие пакеты — сборщик колёс (тоже curl-ом), затем офлайн-установка
+.venv\Scripts\python.exe -X utf8 tools\fetch_wheels.py transformers peft accelerate datasets gguf tokenizers safetensors huggingface-hub sentencepiece filelock numpy packaging pyyaml regex requests tqdm psutil
+.venv\Scripts\python.exe -X utf8 tools\fetch_wheels.py --install
+```
+
+Для Python 3.13 на индексе PyTorch доступно `torch 2.6.0+cu124` (2.5.x колёс под
+cp313 нет).
+
 ## Этап 2 — обучение
 
 ```powershell
