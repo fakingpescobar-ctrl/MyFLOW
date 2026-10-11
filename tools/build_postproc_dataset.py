@@ -52,6 +52,11 @@ NUM_WORDS = {"ноль": "0", "один": "1", "одна": "1", "два": "2", "
 _WORD = re.compile(r"[А-Яа-яЁёA-Za-z0-9]+")
 
 
+def _norm(text: str) -> str:
+    """Нормализованный вид текста (для дедупликации и проверки утечки)."""
+    return " ".join(w.replace("ё", "е") for w in _WORD.findall((text or "").lower()))
+
+
 def corrupt(text: str, rng: random.Random, dictionary: list[dict] | None = None) -> str:
     """Испортить чистый текст так, как это делает ASR (наш «шумовой профиль»)."""
     out = text.strip()
@@ -128,8 +133,14 @@ def real_pairs(limit: int | None = None) -> list[dict]:
     return pairs
 
 
-def clean_texts() -> list[str]:
-    """Чистые тексты для синтетики: итоги диктовок + эталоны Wispr."""
+def clean_texts(exclude: set[str] | None = None) -> list[str]:
+    """Чистые тексты для синтетики: итоги диктовок + эталоны Wispr.
+
+    `exclude` — нормализованные тексты, которые НЕЛЬЗЯ использовать как источник
+    (цели и входы валидационных пар): иначе модель увидит правильный ответ
+    валидации в обучении и оценка превратится в проверку памяти.
+    """
+    exclude = exclude or set()
     texts = [p["dst"] for p in real_pairs()]
     if WISPR.exists():
         for line in WISPR.read_text(encoding="utf-8").splitlines():
@@ -139,6 +150,7 @@ def clean_texts() -> list[str]:
             ref = (row.get("their_edited") or row.get("their_final") or "").strip()
             if ref:
                 texts.append(finalize_clean(ref))
+    texts = [t for t in texts if _norm(t) not in exclude]
     # уникализируем и отбрасываем слишком короткие/длинные
     seen, out = set(), []
     for t in texts:
@@ -167,6 +179,13 @@ def load_dictionary() -> list[dict]:
         return []
 
 
+def parts_key(row: dict) -> tuple[str, str]:
+    """Нормализованный ключ пары (вход, ответ) — для дедупликации."""
+    src = next(m["content"] for m in row["messages"] if m["role"] == "user")
+    dst = next(m["content"] for m in row["messages"] if m["role"] == "assistant")
+    return _norm(src), _norm(dst)
+
+
 def to_chat(src: str, dst: str) -> dict:
     return {"messages": [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -175,41 +194,88 @@ def to_chat(src: str, dst: str) -> dict:
     ]}
 
 
-def build(val_ratio: float = 0.15, variants: int = 8, seed: int = 20261011,
-          limit: int | None = None) -> dict:
-    rng = random.Random(seed)
-    real = real_pairs(limit=limit)
-    dictionary = load_dictionary()
-    texts = clean_texts()
+def build(variants: int = 4, seed: int = 20261011, val_every: int = 7,
+          identity_cap: int = 1200, limit: int | None = None,
+          out_dir: Path | None = None) -> dict:
+    """Собрать датасет.
 
-    # 1) синтетика из чистых текстов
-    synthetic = []
+    Разбиение — СТАБИЛЬНОЕ по id диктовки (`id % val_every == 0` идёт в валидацию):
+    при добавлении новых диктовок старая разбивка не «переезжает», иначе одна и та
+    же фраза могла оказаться и в обучении, и в проверке.
+    """
+    rng = random.Random(seed)
+    all_pairs = real_pairs(limit=limit)
+    dictionary = load_dictionary()
+
+    val_ids = {p["id"] for p in all_pairs if p["id"] % val_every == 0}
+    train_ids = {p["id"] for p in all_pairs} - val_ids
+    val_rows = [p for p in all_pairs if p["id"] in val_ids]
+
+    # Тексты валидации блокируем ПО СОДЕРЖИМОМУ, а не только по id: одну и ту же
+    # фразу пользователь диктовал несколько раз, и её копия с другим id иначе
+    # утечёт в обучение (первая версия так и делала: 4 утечки из 56).
+    blocked = {_norm(p["src"]) for p in val_rows} | {_norm(p["dst"]) for p in val_rows}
+
+    val = [to_chat(p["src"], p["dst"]) for p in val_rows]
+    train_real = []
+    for p in all_pairs:
+        if p["id"] not in train_ids:
+            continue
+        if _norm(p["dst"]) in blocked or _norm(p["src"]) in blocked:
+            continue                                  # дубль валидационной фразы
+        train_real.append(to_chat(p["src"], p["dst"]))
+
+    texts = clean_texts(exclude=blocked)
+
+    # Реальные пары тоже дедуплицируем: одну фразу пользователь диктовал дважды,
+    # и пара (вход, ответ) повторялась (поймано тестом: 182 дубля).
+    seen_pairs: set[tuple[str, str]] = set()
+    unique_real: list[dict] = []
+    for row in train_real:
+        key = parts_key(row)
+        if key in seen_pairs:
+            continue
+        seen_pairs.add(key)
+        unique_real.append(row)
+    train_real = unique_real
+
+    # 1) синтетика: не больше `variants` РАЗНЫХ порч на текст, без дублей пар
+    synthetic: list[dict] = []
+    identity: list[dict] = []
     for text in texts:
         dst = text
-        for _ in range(max(1, variants)):
+        made = 0
+        for _ in range(max(1, variants) * 3):          # попыток больше, чем нужно
+            if made >= variants:
+                break
             src = corrupt(text, rng, dictionary)
-            if src.strip().lower() == dst.strip().lower():
-                continue                     # порча ничего не изменила — пример бесполезен
+            key = (_norm(src), _norm(dst))
+            if not key[0] or key[0] == key[1] or key in seen_pairs:
+                continue                                # пусто/не изменилось/дубль
+            seen_pairs.add(key)
             synthetic.append(to_chat(src, dst))
-        # один «идентичный» пример: учим не трогать уже оформленный текст
-        synthetic.append(to_chat(dst, dst))
+            made += 1
+        identity_key = (_norm(dst), _norm(dst))
+        if identity_key not in seen_pairs:
+            seen_pairs.add(identity_key)
+            identity.append(to_chat(dst, dst))
 
-    # 2) реальные пары
-    real_examples = [to_chat(p["src"], p["dst"]) for p in real]
-
-    # 3) разбиение: валидация — только РЕАЛЬНЫЕ пары (честная проверка на своих)
-    rng.shuffle(real_examples)
-    n_val = max(20, int(len(real_examples) * val_ratio)) if real_examples else 0
-    val = real_examples[:n_val]
-    train_real = real_examples[n_val:]
+    rng.shuffle(identity)
+    synthetic += identity[:identity_cap]                # учим «не трогать» готовое
 
     rng.shuffle(synthetic)
-    train = train_real + synthetic
+    train = [row for row in train_real + synthetic
+             if len(next(m["content"] for m in row["messages"]
+                         if m["role"] == "assistant").strip()) >= 3]
     rng.shuffle(train)
+    # реальные пары валидации тоже проверим на дубли с обучением
+    train_keys = {parts_key(row) for row in train}
+    val = [row for row in val if parts_key(row) not in train_keys]
 
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    train_path = OUT_DIR / "postproc_train.jsonl"
-    val_path = OUT_DIR / "postproc_val.jsonl"
+    target_dir = Path(out_dir) if out_dir else OUT_DIR
+    target_dir.mkdir(parents=True, exist_ok=True)
+    train_path = target_dir / "postproc_train.jsonl"
+    val_path = target_dir / "postproc_val.jsonl"
     train_path.write_text("\n".join(json.dumps(x, ensure_ascii=False) for x in train),
                           encoding="utf-8")
     val_path.write_text("\n".join(json.dumps(x, ensure_ascii=False) for x in val),
@@ -217,9 +283,10 @@ def build(val_ratio: float = 0.15, variants: int = 8, seed: int = 20261011,
     return {
         "clean_texts": len(texts),
         "synthetic": len(synthetic),
-        "real_total": len(real_examples),
+        "real_total": len(all_pairs),
         "real_train": len(train_real),
         "real_val": len(val),
+        "val_ids_in_train": len(val_ids & train_ids),
         "train_total": len(train),
         "val_total": len(val),
         "train_path": str(train_path),
@@ -229,13 +296,15 @@ def build(val_ratio: float = 0.15, variants: int = 8, seed: int = 20261011,
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Датасет для постпроцессора MyFLOW")
-    ap.add_argument("--variants", type=int, default=8, help="порч на один чистый текст")
-    ap.add_argument("--val-ratio", type=float, default=0.15)
+    ap.add_argument("--variants", type=int, default=4, help="разных порч на чистый текст")
+    ap.add_argument("--val-every", type=int, default=7,
+                    help="каждая N-я диктовка идёт в валидацию (стабильно по id)")
     ap.add_argument("--seed", type=int, default=20261011)
     ap.add_argument("--limit", type=int, default=None, help="ограничить реальные пары")
+    ap.add_argument("--out", type=Path, default=None, help="каталог для датасета")
     args = ap.parse_args()
-    st = build(val_ratio=args.val_ratio, variants=args.variants,
-               seed=args.seed, limit=args.limit)
+    st = build(variants=args.variants, seed=args.seed,
+               val_every=args.val_every, limit=args.limit, out_dir=args.out)
     print("Датасет собран:")
     for key in ("clean_texts", "synthetic", "real_total", "real_train", "real_val",
                 "train_total", "val_total"):
@@ -243,8 +312,7 @@ def main() -> int:
     print(f"  train: {st['train_path']}")
     print(f"  val:   {st['val_path']}")
     print("\nПример (первая синтетическая пара, усечённо):")
-    first = json.loads((OUT_DIR / "postproc_train.jsonl").read_text(encoding="utf-8")
-                       .splitlines()[0])
+    first = json.loads(Path(st["train_path"]).read_text(encoding="utf-8").splitlines()[0])
     for msg in first["messages"]:
         if msg["role"] == "system":
             continue
