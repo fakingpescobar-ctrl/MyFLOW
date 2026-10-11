@@ -143,3 +143,55 @@ class PipelinePostprocTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InputFormatTest(unittest.TestCase):
+    """Формат входа постпроцессора: найденный баг ломал качество втрое.
+
+    Боевой путь оборачивал текст в <dictation>, а обучение шло на голом тексте.
+    Замер: 0.618 против 0.262 после снятия обёртки.
+    """
+
+    def _client(self, captured):
+        from myflow.config import SettingsStore
+        from myflow.polish import PolishClient
+
+        cfg = SettingsStore().get().polish
+        cfg.enabled = True
+        client = PolishClient(cfg)
+        import time as _time
+        client._model_cache = "m"
+        client._model_cache_t = _time.monotonic()
+
+        class _Resp:
+            status_code = 200
+            text = ""
+
+            @staticmethod
+            def json():
+                return {"choices": [{"message": {"content": "Привет."}}]}
+
+        def fake_post(url, json=None, timeout=None):
+            captured.update(json)
+            return _Resp()
+
+        client.session = mock.Mock()
+        client.session.post.side_effect = fake_post
+        return client
+
+    def test_postproc_style_sends_bare_text(self):
+        captured = {}
+        client = self._client(captured)
+        client.polish("привет ну как дела", style=POSTPROC_STYLE, dictionary=[])
+        user = next(m["content"] for m in captured["messages"] if m["role"] == "user")
+        self.assertEqual(user, "привет ну как дела",
+                         "постпроцессор обучался на голом тексте — обёртки быть не должно")
+        self.assertNotIn("<dictation>", user)
+
+    def test_plain_style_keeps_wrapper(self):
+        captured = {}
+        client = self._client(captured)
+        client.polish("привет ну как дела", style="plain", dictionary=[])
+        user = next(m["content"] for m in captured["messages"] if m["role"] == "user")
+        self.assertIn("<dictation>", user,
+                      "обычная полировка ждёт обёртку — её поведение менять нельзя")

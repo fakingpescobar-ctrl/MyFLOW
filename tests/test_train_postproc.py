@@ -28,7 +28,9 @@ class FakeTokenizer:
     pad_token_id = 0
     eos_token_id = 1
 
-    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False):
+    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False,
+                            **kwargs):
+        # kwargs: enable_thinking=False передаётся тренером (обучение как в бою)
         parts = [f"<{m['role']}>{m['content']}</{m['role']}>" for m in messages]
         if add_generation_prompt:
             parts.append("<assistant>")

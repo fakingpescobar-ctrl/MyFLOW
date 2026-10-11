@@ -286,7 +286,12 @@ class PolishClient:
                     "model": self._effective_model(),
                     "messages": [
                         {"role": "system", "content": system},
-                        {"role": "user", "content": f"<dictation>{raw_text}</dictation>"},
+                        {"role": "user",
+                         # Дообученный постпроцессор обучен на ГОЛОМ тексте, и обёртка
+                         # <dictation> ломала вход: замер 0.618 против 0.262 после
+                         # снятия. Для него шлём текст как есть.
+                         "content": (raw_text if style == POSTPROC_STYLE
+                                     else f"<dictation>{raw_text}</dictation>")},
                     ],
                     "temperature": self.cfg.temperature,
                     "top_p": self.cfg.top_p,
