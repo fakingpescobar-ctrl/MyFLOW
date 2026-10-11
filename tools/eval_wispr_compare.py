@@ -48,11 +48,12 @@ def wait_health(url: str, seconds: float = 120.0) -> bool:
     return False
 
 
-def run_eval(url: str, limit: int, tag: str) -> dict:
+def run_eval(url: str, limit: int, tag: str, style: str = "plain") -> dict:
     report = ROOT / "data" / "eval_wispr" / f"report_{tag}.md"
     results = ROOT / "data" / "eval_wispr" / f"results_{tag}.jsonl"
     cmd = [sys.executable, "-X", "utf8", str(ROOT / "tools" / "eval_vs_wispr.py"),
            "--limit", str(limit), "--polish", "on", "--url", url,
+           "--style", style,
            "--report", str(report), "--save", str(results)]
     print(f"\n  --- {tag}: {url} ---", flush=True)
     subprocess.run(cmd, cwd=str(ROOT))
@@ -73,6 +74,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="624 фразы: 4B против кандидата")
     ap.add_argument("--candidate", required=True)
     ap.add_argument("--limit", type=int, default=624)
+    ap.add_argument("--style", default="advanced",
+                    help="стиль кандидата: postproc для нашей модели, plain для чужой "
+                         "(например T-lite: он не обучен нашему промпту)")
     args = ap.parse_args()
 
     cand = Path(args.candidate)
@@ -110,7 +114,7 @@ def main() -> int:
         summary = {}
         summary["4B"] = run_eval(base_url, args.limit, "cmp_4b")
         summary["candidate"] = run_eval(f"http://127.0.0.1:{PORT_CANDIDATE}/v1",
-                                        args.limit, "cmp_cand")
+                                        args.limit, "cmp_cand", style=args.style)
 
         print("\n  === ИТОГ СРАВНЕНИЯ ===")
         for tag, data in summary.items():
