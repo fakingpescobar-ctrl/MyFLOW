@@ -815,22 +815,28 @@ def llama_dir() -> Path:
     return _llama_dir()
 
 
-def needed_servers(settings) -> set[str]:
+def needed_servers(settings, postproc_available: bool = True) -> set[str]:
     """Какие серверы реально нужны при текущих настройках.
 
-    Полирует ЛИБО 4B, ЛИБО дообученный постпроцессор — не оба сразу, поэтому
-    вместе они в памяти не нужны. 4B дополнительно нужен режиму Oracle LLM
-    (склейка двух распознаваний). Если не включено ни то, ни другое, держать
-    4 ГБ модели в памяти незачем: сервер поднимется лениво, когда режим включат.
+    Расклад по ролям (решение пользователя):
+      * полировка — ВСЕГДА своя дообученная модель (`myflow-postproc-*.gguf`,
+        :8083), если она есть; 4B в полировке не участвует;
+      * 4B (:8082) — ТОЛЬКО для Oracle LLM (склейка двух распознаваний);
+      * если своей модели ещё нет, полировка откатывается на 4B — тогда он нужен.
+
+    Поэтому вместе серверы держим лишь когда включён Oracle, а полирует 0.6B:
+    в этом случае 4B поднимается ради Oracle, а не ради полировки.
     """
     need = {"asr"}
     polish = getattr(settings, "polish", None)
     asr = getattr(settings, "asr", None)
+    enabled = bool(getattr(polish, "enabled", False))
     postproc = bool(getattr(polish, "postproc", False))
-    if postproc:
+    judge = bool(getattr(asr, "judge", False))
+
+    if enabled and postproc and postproc_available:
         need.add("postproc")
-    if (bool(getattr(asr, "judge", False))
-            or (bool(getattr(polish, "enabled", False)) and not postproc)):
+    if judge or (enabled and (not postproc or not postproc_available)):
         need.add("llm")
     return need
 
@@ -1736,7 +1742,9 @@ class TuiApp:
         # Грузим только нужное: полировка идёт ЛИБО на 4B, ЛИБО на постпроцессоре,
         # а 4B ещё нужен Oracle LLM. Незачем держать 4 ГБ в памяти «на всякий».
         try:
-            needed = needed_servers(self.store.get())
+            from myflow.config import models_dir as _models_dir
+            available = bool(list(_models_dir().glob("myflow-postproc-*.gguf")))
+            needed = needed_servers(self.store.get(), postproc_available=available)
         except Exception:  # noqa: BLE001
             needed = {spec.key for spec in specs}
         for spec in specs:
@@ -2506,7 +2514,7 @@ def _demo_snapshot() -> dict:
          "hint": "Enter — оба движка, LLM склеивает лучший текст"},
         {"key": "vad", "label": "VAD", "value": "Silero v6 · 0.30", "on": True, "ok": True,
          "note": "", "hint": "←→ порог, Enter — автостоп по паузе"},
-        {"key": "llm", "label": "Полировка", "value": "qwen3-4b · :8082", "on": True, "ok": True,
+        {"key": "llm", "label": "Post-Processor", "value": "qwen3-4b · :8082", "on": True, "ok": True,
          "note": "", "hint": "Enter — включить/выключить полировку"},
         {"key": "voice", "label": "Голос", "value": "31 фраз · auto · 0.25", "on": True,
          "ok": True, "note": "", "hint": "Enter вкл/выкл, ←→ режим (auto/always/off)"},

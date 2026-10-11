@@ -136,21 +136,17 @@ class PipelinePostprocTest(unittest.TestCase):
             app._polish_safe("проверка связи ну", "plain", [])
         self.assertEqual(seen.get("style"), "plain")
 
-    def test_config_default_is_off(self):
-        """По умолчанию режим выключен: дообученной модели может ещё не быть.
+    def test_config_default_prefers_own_model(self):
+        """По умолчанию полируем своей моделью (4B — только Oracle LLM).
 
-        Настройки берём из ВРЕМЕННОГО файла: живые пользователь мог переключить
-        (и переключил — включил постпроцессор), тест не должен от этого зависеть.
+        Если своей модели ещё нет, `_polish_client` откатывается на 4B — это
+        проверяется в test_postproc_server.
         """
         import tempfile
         from pathlib import Path as _Path
         with tempfile.TemporaryDirectory() as tmp:
             store = SettingsStore(_Path(tmp) / "settings.json")
-        self.assertFalse(store.get().polish.postproc)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        self.assertTrue(store.get().polish.postproc)
 
 
 class InputFormatTest(unittest.TestCase):

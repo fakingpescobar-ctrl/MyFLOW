@@ -237,6 +237,7 @@ def make_app(auto=False, busy=False, gen=0, polish_enabled=False, paster=None):
                  "_enqueue", "_cancel_all", "_polish_safe", "_ensure_polish_watchdog",
             # выбор клиента полировки (4B :8082 или дообученный :8083)
             "_polish_client", "_watchdog_interval", "_prewarm_llm_work",
+            "postproc_model_available",
                  "_polish_watchdog_loop", "_worker_loop", "_process_recording",
                  "_dispatch_voice_command", "_run_command", "_resolve_style",
                  "_spawn_edit_watcher", "_process_preview", "_cycle_style",
@@ -250,6 +251,10 @@ def make_app(auto=False, busy=False, gen=0, polish_enabled=False, paster=None):
                  "_revive_llm_and_retry", "_ensure_llm_async", "_wait_llm_ready",
                  "_ensure_repolish_worker", "_asr_fallback", "_ensure_server", "_stop_server"):
         setattr(app, name, types.MethodType(getattr(MyFlowApp, name), app))
+    # В заглушке своей модели полировки «нет»: иначе настоящий _polish_client
+    # ушёл бы на сервер :8083, которого в тестах не существует. Тесты, которым
+    # нужен путь постпроцессора, переопределяют это явно.
+    app.postproc_model_available = lambda: False
     # Автолечение LLM: по умолчанию сервер не поднимаем (в тестах его нет).
     app._server_guard = None
     app._llm_revive = None

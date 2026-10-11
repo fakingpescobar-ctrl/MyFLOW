@@ -526,7 +526,9 @@ class MyFlowApp:
         # Прогреваем ИМЕННО ту модель, которая будет полировать: либо 4B, либо
         # дообученный постпроцессор. Иначе при включённом постпроцессоре мы бы
         # зря поднимали 4 ГБ.
-        target = "postproc" if getattr(self.polish.cfg, "postproc", False) else "llm"
+        target = ("postproc"
+                  if getattr(self.polish.cfg, "postproc", False)
+                  and self.postproc_model_available() else "llm")
         threading.Thread(target=self._ensure_server, args=(target,), daemon=True,
                          name=f"prewarm-{target}").start()
 
@@ -799,13 +801,15 @@ class MyFlowApp:
             {"key": "vad", "label": "VAD", "value": f"Silero v6 · {vad_threshold:.2f}",
              "on": bool(s.auto_stop_by_silence), "ok": True, "note": "детектор речи",
              "hint": "←→ порог, Enter — автостоп по паузе"},
-            {"key": "llm", "label": "Полировка",
-             "value": "включена" if s.polish.enabled else "выключена",
+            {"key": "llm", "label": "Post-Processor",
+             "value": "включён" if s.polish.enabled else "выключен",
              "on": bool(s.polish.enabled), "ok": llm_ok,
-             "note": "проверка…" if health_stale else "вкл/выкл",
-             # Строки легко перепутать: эта — ТУМБЛЕР, а «Модель полировки» ниже — ВЫБОР.
-             "hint": "Enter — включить/выключить полировку; какой моделью — строка "
-                     "«Модель полировки»"},
+             # Модель показываем всегда (живость — зелёным индикатором `ok`),
+             # иначе в первые секунды после старта вместо неё было «проверка…».
+             "note": ("своя 0.6B · :8083" if self.postproc_model_available()
+                      else "Qwen3-4B · :8082 (своей ещё нет)"),
+             "hint": "Enter — включить/выключить пост-обработку текста (постпроцессор "
+                     "— своя Qwen3-0.6B). 4B держим только для Oracle LLM"},
                 {"key": "voice", "label": "Голос",
              "value": f"{voice_profile} фраз · {s.voiceprint.mode} · {s.voiceprint.threshold:.2f}",
              "on": voice_on, "ok": voice_profile > 0, "note": "проверка владельца",
@@ -890,19 +894,6 @@ class MyFlowApp:
 
         # Строка «Постпроцессор» появляется ТОЛЬКО когда модель собрана: иначе она
         # обещала бы то, чего нет (модель дообучается отдельно, tools/train_postproc.md).
-        if list(models_dir().glob("myflow-postproc-*.gguf")):
-            modules.append({
-                "key": "postproc", "label": "Модель полировки",
-                "value": ("своя Qwen3-0.6B · 424 МБ"
-                          if getattr(s.polish, "postproc", False)
-                          else "Qwen3-4B · 4 ГБ"),
-                "on": bool(getattr(s.polish, "postproc", False)), "ok": True,
-                "note": "~50 мс" if getattr(s.polish, "postproc", False) else "~150 мс",
-                # Это ВЫБОР модели, а не второй тумблер: одна и та же фраза идёт либо
-                # через 4B, либо через 0.6B — одновременно они не работают.
-                "hint": "Enter — полировать своей Qwen3-0.6B вместо 4B "
-                        "(по замерам не хуже, втрое быстрее); 4B нужен только Oracle LLM"})
-
         try:
             self._deferred_polish_count = self.db.count_deferred_polish()
         except Exception:  # noqa: BLE001
@@ -1090,31 +1081,6 @@ class MyFlowApp:
         if key == "retrain":
             return self.start_retrain()
 
-        if key == "postproc":
-            # Полировка дообученной моделью (:8083). 4B при этом остаётся живым —
-            # он нужен Oracle LLM, где требуется смекалка, а не форматирование.
-            cfg = s.polish
-            if not bool(getattr(cfg, "postproc", False)):
-                if not list(models_dir().glob("myflow-postproc-*.gguf")):
-                    return False, ("модель постпроцессора не собрана "
-                                   "(models/myflow-postproc-*.gguf)")
-                if not self._ensure_server("postproc"):
-                    return False, ("сервер постпроцессора не поднялся (:8083) — "
-                                   "проверь data/llm-postproc.log")
-                if not bool(getattr(cfg, "enabled", True)):
-                    return False, ("полировка выключена — сначала включи строку «LLM», "
-                                   "иначе постпроцессору нечего оформлять")
-                cfg.postproc = True
-                self.settings.save()
-                print("[myflow] постпроцессор включён: полировка на своей модели (:8083)")
-                return True, "постпроцессор включён (Qwen3-0.6B, ~50 мс)"
-            cfg.postproc = False
-            self.settings.save()
-            self._postproc_client = None          # свой клиент больше не нужен
-            self._stop_server("postproc")         # освобождаем VRAM
-            print("[myflow] постпроцессор выключен: полировка снова на Qwen3-4B")
-            return True, "постпроцессор выключен (полировка на Qwen3-4B)"
-
         if key == "judge":
             # Oracle LLM: оба движка + склейка. Требует живой whisper-сервер.
             if not bool(getattr(s.asr, "judge", False)):
@@ -1219,8 +1185,10 @@ class MyFlowApp:
                 self._ensure_llm_async()
             else:
                 self._stop_llm_server()
-            print(f"[myflow] полировка: {'вкл' if s.polish.enabled else 'выкл'}")
-            return True, f"полировка: {'вкл' if s.polish.enabled else 'выкл'}"
+            print(f"[myflow] Post-Processor: "
+                  f"{'включён' if s.polish.enabled else 'выключен'}")
+            return True, (f"Post-Processor: "
+                          f"{'включён' if s.polish.enabled else 'выключен'}")
 
         if key == "voice":
             s.voiceprint.enabled = not s.voiceprint.enabled
@@ -1457,6 +1425,13 @@ class MyFlowApp:
             target=self._polish_watchdog_loop, daemon=True, name="polish-watchdog")
         self._polish_watchdog.start()
 
+    def postproc_model_available(self) -> bool:
+        """Собрана ли своя модель полировки (models/myflow-postproc-*.gguf)."""
+        try:
+            return bool(list(models_dir().glob("myflow-postproc-*.gguf")))
+        except Exception:  # noqa: BLE001
+            return False
+
     def _polish_client(self):
         """Клиент полировки: дообученный постпроцессор (:8083) или основной 4B (:8082).
 
@@ -1466,6 +1441,10 @@ class MyFlowApp:
         """
         cfg = self.polish.cfg
         if not getattr(cfg, "postproc", False):
+            return self.polish
+        if not self.postproc_model_available():
+            # Своей модели ещё нет (не обучена) — полируем 4B, чтобы функция
+            # работала «из коробки». 4B при этом нужен и для Oracle LLM.
             return self.polish
         cached = getattr(self, "_postproc_client", None)
         if cached is None:
@@ -1646,11 +1625,17 @@ class MyFlowApp:
         cfg = self.polish.cfg
         if not getattr(cfg, "auto_start_server", True):
             return False
-        # Сервер мог просто перезапускаться — короткое ожидание без запуска.
-        if _health_check_llm(self.polish):
+        # Ждём и поднимаем ИМЕННО ту модель, которой полируем: иначе при полировке
+        # на своей 0.6B повтор проверял бы 4B и «оживлял» не тот сервер.
+        client = self._polish_client()
+        if _health_check_llm(client):
             return True
-        self._ensure_llm_async()
-        waited = self._wait_llm_ready(float(getattr(cfg, "wait_on_fail_seconds", 2.5)))
+        if client is not self.polish:
+            self._ensure_server("postproc")
+        else:
+            self._ensure_llm_async()
+        waited = self._wait_llm_ready(float(getattr(cfg, "wait_on_fail_seconds", 2.5)),
+                                      client=client)
         if waited:
             print(f"[myflow]   LLM поднялась — повторяю полировку "
                   f"(ждали до {getattr(cfg, 'wait_on_fail_seconds', 2.5):.1f} с)")

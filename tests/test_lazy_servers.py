@@ -25,26 +25,36 @@ def settings(polish_enabled: bool, postproc: bool, judge: bool):
 
 
 class NeededServersTest(unittest.TestCase):
+    """Решение пользователя: полирует всегда своя 0.6B, 4B — только для Oracle."""
+
     def test_nothing_enabled_keeps_only_asr(self):
-        self.assertEqual(needed_servers(settings(False, False, False)), {"asr"})
+        self.assertEqual(needed_servers(settings(False, True, False)), {"asr"})
 
-    def test_postproc_polish_does_not_load_4b(self):
-        need = needed_servers(settings(True, True, False))
+    def test_own_model_polish_does_not_load_4b(self):
+        need = needed_servers(settings(True, True, False), postproc_available=True)
         self.assertEqual(need, {"asr", "postproc"})
-        self.assertNotIn("llm", need, "полирует 0.6B — 4B незачем грузить")
+        self.assertNotIn("llm", need, "4B в полировке не участвует")
 
-    def test_4b_polish_loads_llm(self):
-        self.assertEqual(needed_servers(settings(True, False, False)), {"asr", "llm"})
+    def test_fallback_to_4b_when_own_model_missing(self):
+        need = needed_servers(settings(True, True, False), postproc_available=False)
+        self.assertEqual(need, {"asr", "llm"},
+                         "своей модели нет — полируем 4B")
 
-    def test_oracle_loads_llm(self):
-        self.assertEqual(needed_servers(settings(False, False, True)), {"asr", "llm"})
+    def test_oracle_loads_4b_even_with_own_model(self):
+        need = needed_servers(settings(True, True, True), postproc_available=True)
+        self.assertEqual(need, {"asr", "llm", "postproc"},
+                         "4B нужен Oracle LLM")
 
-    def test_oracle_plus_postproc_need_both(self):
-        self.assertEqual(needed_servers(settings(True, True, True)),
-                         {"asr", "llm", "postproc"})
+    def test_oracle_loads_4b_without_polish(self):
+        self.assertEqual(needed_servers(settings(False, True, True)),
+                         {"asr", "llm"})
+
+    def test_legacy_flag_off_uses_4b_for_polish(self):
+        """Старые настройки (postproc=False) — полируем 4B, как раньше."""
+        need = needed_servers(settings(True, False, False))
+        self.assertEqual(need, {"asr", "llm"})
 
     def test_survives_settings_without_attributes(self):
-        """Старые конфиги (без postproc) не должны ломать расчёт."""
         old = types.SimpleNamespace(polish=types.SimpleNamespace(enabled=True),
                                     asr=types.SimpleNamespace())
         self.assertEqual(needed_servers(old), {"asr", "llm"})
@@ -72,6 +82,7 @@ class PrewarmTargetTest(unittest.TestCase):
         app._prewarm_llm = types.MethodType(M.MyFlowApp._prewarm_llm, app)
         app.polish.cfg.enabled = True
         app.polish.cfg.postproc = postproc
+        app.postproc_model_available = lambda: True      # своя модель собрана
         app.polish.cfg.auto_start_server = True
         started = []
         app._ensure_server = lambda key: (started.append(key), True)[1]

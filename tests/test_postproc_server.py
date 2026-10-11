@@ -62,14 +62,22 @@ class PostprocServerSpecTest(unittest.TestCase):
 
 
 class PolishClientSelectionTest(unittest.TestCase):
-    def _app(self):
+    def _app(self, model_available: bool = True):
         import types
-        from test_main_flow import make_app
         import myflow.main as M
+        from test_main_flow import make_app
         app = make_app()
         # make_app() — заглушка: привязываем к ней НАСТОЯЩИЕ методы
         app._polish_client = types.MethodType(M.MyFlowApp._polish_client, app)
+        app.postproc_model_available = lambda: model_available
         return app
+
+    def test_falls_back_to_4b_when_model_missing(self):
+        """Своей модели ещё нет — полируем 4B, чтобы функция работала из коробки."""
+        app = self._app(model_available=False)
+        app.polish.cfg.postproc = True
+        self.assertIs(app._polish_client(), app.polish,
+                      "без своей модели клиент должен остаться на 4B")
 
     def test_default_uses_main_client(self):
         app = self._app()
@@ -129,6 +137,7 @@ class MasterSwitchTest(unittest.TestCase):
         app = make_app()
         app._polish_client = types.MethodType(M.MyFlowApp._polish_client, app)
         app._polish_safe = types.MethodType(M.MyFlowApp._polish_safe, app)
+        app.postproc_model_available = lambda: True
         app.polish.cfg.enabled = False
         app.polish.cfg.postproc = True
         app.polish.cfg.url_postproc = "http://127.0.0.1:8083/v1"
@@ -137,83 +146,47 @@ class MasterSwitchTest(unittest.TestCase):
                         "при выключенной полировке постпроцессор не должен зваться")
 
 
-class PostprocPanelRowTest(unittest.TestCase):
-    """Строка «Постпроцессор» в панели: появляется с моделью, переключает режим."""
+class PolishRowShowsModelTest(unittest.TestCase):
+    """Строка «Полировка» показывает, чем полируем; выбора модели больше нет.
+
+    Решение пользователя: 4B держим ТОЛЬКО для Oracle LLM, полирует всегда своя
+    0.6B (а если её ещё нет — откат на 4B).
+    """
 
     def setUp(self):
-        # Настоящее приложение с временными настройками (как в тестах панели):
-        # нужны control_snapshot/control_apply, а не заглушка.
         from test_panel import _app
         self.app = _app()
         self.app.overlay = mock.Mock()
-        self.app._stop_server = mock.Mock()
-        self.app._ensure_server = mock.Mock(return_value=True)
         self.app.settings.get().polish.enabled = True
-        self.app.settings.get().polish.postproc = False
 
     def tearDown(self):
         try:
             self.app.ax.stop()
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
         self.app._stopping.set()
         try:
             self.app.db.close()
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
         self.app._tmp.cleanup()
 
-    def _rows(self):
-        return {m["key"]: m for m in self.app.control_snapshot()["modules"]}
+    def _rows(self, available: bool):
+        with mock.patch("myflow.main.models_dir", lambda: Path("/nonexistent")), \
+             mock.patch.object(self.app, "postproc_model_available",
+                               lambda: available):
+            return {m["key"]: m for m in self.app.control_snapshot()["modules"]}
 
-    def test_no_row_without_model(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            with mock.patch("myflow.main.models_dir", lambda: Path(tmp)):
-                rows = self._rows()
-        self.assertNotIn("postproc", rows, "без модели строка не должна показываться")
+    def test_no_model_choice_row(self):
+        rows = self._rows(available=True)
+        self.assertNotIn("postproc", rows,
+                         "выбора модели нет: полирует своя, 4B — только Oracle")
 
-    def test_row_appears_with_model(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            (Path(tmp) / "myflow-postproc-qwen3-06b-q8_0.gguf").write_bytes(b"GGUF")
-            with mock.patch("myflow.main.models_dir", lambda: Path(tmp)):
-                rows = self._rows()
-        self.assertIn("postproc", rows)
-        self.assertFalse(rows["postproc"]["on"])
-        self.assertIn("Qwen3-4B", rows["postproc"]["value"])
+    def test_polish_row_names_own_model(self):
+        rows = self._rows(available=True)
+        self.assertIn("своя 0.6B", rows["llm"]["note"])
 
-    def test_toggle_on_ensures_server_and_saves(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            (Path(tmp) / "myflow-postproc-x.gguf").write_bytes(b"GGUF")
-            with mock.patch("myflow.main.models_dir", lambda: Path(tmp)):
-                ok, message = self.app.control_apply("module", "postproc")
-        self.assertTrue(ok, message)
-        self.assertTrue(self.app.settings.get().polish.postproc)
-        self.app._ensure_server.assert_called_once_with("postproc")
-        self.assertIn("включён", message)
-
-    def test_toggle_on_without_model_is_refused(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            with mock.patch("myflow.main.models_dir", lambda: Path(tmp)):
-                ok, message = self.app.control_apply("module", "postproc")
-        self.assertFalse(ok)
-        self.assertIn("не собрана", message)
-        self.assertFalse(self.app.settings.get().polish.postproc)
-
-    def test_toggle_on_refused_when_polish_disabled(self):
-        self.app.settings.get().polish.enabled = False
-        with tempfile.TemporaryDirectory() as tmp:
-            (Path(tmp) / "myflow-postproc-x.gguf").write_bytes(b"GGUF")
-            with mock.patch("myflow.main.models_dir", lambda: Path(tmp)):
-                ok, message = self.app.control_apply("module", "postproc")
-        self.assertFalse(ok)
-        self.assertIn("полировка выключена", message)
-
-    def test_toggle_off_stops_server_and_drops_client(self):
-        self.app.settings.get().polish.postproc = True
-        self.app._postproc_client = object()
-        ok, message = self.app.control_apply("module", "postproc")
-        self.assertTrue(ok, message)
-        self.assertFalse(self.app.settings.get().polish.postproc)
-        self.assertIsNone(self.app._postproc_client)
-        self.app._stop_server.assert_called_once_with("postproc")
-        self.assertIn("Qwen3-4B", message)
+    def test_polish_row_admits_fallback_to_4b(self):
+        rows = self._rows(available=False)
+        self.assertIn("Qwen3-4B", rows["llm"]["note"])
+        self.assertIn("своей ещё нет", rows["llm"]["note"])

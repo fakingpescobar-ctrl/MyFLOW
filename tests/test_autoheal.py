@@ -66,6 +66,9 @@ class DeferredPolishDbTest(unittest.TestCase):
 class AutoHealTest(unittest.TestCase):
     def setUp(self):
         self.app = _app()
+        # Тесты про автолечение, а не про выбор модели: считаем, что своей модели
+        # полировки нет, поэтому полируем «клиентом по умолчанию» (его и мокают).
+        self.app.postproc_model_available = lambda: False
 
     def tearDown(self):
         self.app._stopping.set()
