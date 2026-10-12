@@ -64,6 +64,50 @@ class BridgeDetectionTest(unittest.TestCase):
         self.assertTrue((dsh_bridge.plugin_dir() / "cordis.patch.yml").exists())
 
 
+class GuiProfilesTest(unittest.TestCase):
+    """Цели определяются по оболочке: web, desktop — а не жёстко «web».
+
+    Приложение пользователя грузит профиль `desktop`; мост, поставленный только
+    в `web`, не загружался — на этом мы споткнулись.
+    """
+
+    def _home(self, profiles: dict) -> tempfile.TemporaryDirectory:
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        for name, bundles in profiles.items():
+            d = Path(tmp.name) / "profiles" / name
+            d.mkdir(parents=True)
+            (d / "package.json").write_text(json.dumps(
+                {"name": f"dsh-profile-{name}",
+                 "dsh": {"profile": {"bundles": bundles}},
+                 "dependencies": {}}), encoding="utf-8")
+        return tmp
+
+    def test_detects_both_windowed_profiles(self):
+        tmp = self._home({
+            "desktop": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"],
+            "web": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"],
+            "headless": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-headless"],
+        })
+        with mock.patch.dict(os.environ, {"DSH_HOME": tmp.name}):
+            self.assertEqual(dsh_bridge.gui_profiles(), ["desktop", "web"])
+        tmp.cleanup()
+
+    def test_bridge_requires_every_windowed_profile(self):
+        tmp = self._home({
+            "desktop": ["@deepseek-ai/dsh-web-app"],
+            "web": ["@deepseek-ai/dsh-web-app"],
+        })
+        with mock.patch.dict(os.environ, {"DSH_HOME": tmp.name}):
+            self.assertFalse(dsh_bridge.bridge_installed(), "нигде нет — не установлен")
+            # поставили только в web -> всё ещё не готово (desktop без моста)
+            manifest = Path(tmp.name) / "profiles" / "web" / "package.json"
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+            data["dependencies"] = {"dsh-plugin-myflow": "link:..."}
+            manifest.write_text(json.dumps(data), encoding="utf-8")
+            self.assertFalse(dsh_bridge.bridge_installed())
+        tmp.cleanup()
+
+
 class InstallTest(unittest.TestCase):
     def test_reports_already_installed(self):
         tmp = make_home(with_bridge=True)

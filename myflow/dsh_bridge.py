@@ -64,42 +64,97 @@ def find_dsh_cli() -> str | None:
     return None
 
 
-def bridge_installed(profile: str = DEFAULT_PROFILE) -> bool:
-    """Стоит ли наш плагин в профиле DSH (по манифесту профиля)."""
+def _manifest(profile: str) -> dict | None:
     manifest = profile_dir(profile) / "package.json"
     if not manifest.exists():
-        return False
+        return None
     try:
-        data = json.loads(manifest.read_text(encoding="utf-8"))
+        return json.loads(manifest.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
+        return None
+
+
+def gui_profiles() -> list[str]:
+    """Профили с оконной оболочкой (web, desktop, ...).
+
+    Приложение может грузить НЕ `web`: у пользователя запускается профиль
+    `desktop` (бандл desktop-оболочки), и мост, поставленный только в `web`,
+    не загрузится — на этом мы уже спотыкались. Поэтому определяем цели по
+    наличию бандла `dsh-web-app`.
+    """
+    root = dsh_home() / "profiles"
+    found: list[str] = []
+    try:
+        for entry in sorted(root.iterdir()):
+            if not entry.is_dir():
+                continue
+            data = _manifest(entry.name)
+            if not data:
+                continue
+            bundles = ((data.get("dsh") or {}).get("profile") or {}).get("bundles") or []
+            if any("dsh-web-app" in str(b) for b in bundles):
+                found.append(entry.name)
+    except Exception:  # noqa: BLE001
+        pass
+    return found
+
+
+def target_profiles(profile: str | None = None) -> list[str]:
+    """Куда ставить мост: явно указанный профиль или все оконные."""
+    if profile:
+        return [profile]
+    return gui_profiles() or [DEFAULT_PROFILE]
+
+
+def bridge_installed(profile: str | None = None) -> bool:
+    """Стоит ли наш плагин во всех нужных профилях (по манифестам)."""
+    targets = target_profiles(profile)
+    if not targets:
         return False
-    deps = data.get("dependencies") or {}
-    return PACKAGE_NAME in deps
+    for name in targets:
+        data = _manifest(name)
+        if not data:
+            return False
+        if PACKAGE_NAME not in (data.get("dependencies") or {}):
+            return False
+    return True
 
 
-def install_bridge(profile: str = DEFAULT_PROFILE) -> tuple[bool, str]:
-    """Поставить мост в профиль DSH. Возвращает (получилось, сообщение)."""
+def install_bridge(profile: str | None = None) -> tuple[bool, str]:
+    """Поставить мост в нужные профили DSH. Возвращает (получилось, сообщение)."""
     plugin = plugin_dir()
     if not (plugin / "index.js").exists():
         return False, f"нет плагина в поставке: {plugin}"
-    if bridge_installed(profile):
-        return True, "мост уже установлен"
+
+    targets = target_profiles(profile)
+    pending = [name for name in targets if not bridge_installed(name)]
 
     cli = find_dsh_cli()
     if cli is None:
         return False, ("не нашёл команду dsh — поставь мост вручную: "
-                       f"dsh plugin --profile {profile} add \"{plugin}\"")
-    try:
-        result = subprocess.run(
-            [cli, "plugin", "--profile", profile, "add", str(plugin)],
-            stdin=subprocess.DEVNULL, capture_output=True, text=True,
-            timeout=180, creationflags=CREATE_NO_WINDOW,
-        )
-    except Exception as exc:  # noqa: BLE001
-        return False, f"не смог запустить dsh: {exc!r}"
+                       f"dsh plugin --profile {targets[0]} add \"{plugin}\"")
 
-    if bridge_installed(profile):
-        return True, ("мост установлен — перезапусти DeepSeek Harness, "
-                      "чтобы плагин загрузился")
-    tail = (result.stderr or result.stdout or "").strip().splitlines()[-1:] or [""]
-    return False, f"dsh не поставил мост: {tail[0][:120]}"
+    done: list[str] = []
+    for name in pending:
+        try:
+            subprocess.run(
+                [cli, "plugin", "--profile", name, "add", str(plugin)],
+                stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                timeout=180, creationflags=CREATE_NO_WINDOW,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return False, f"не смог запустить dsh для профиля {name}: {exc!r}"
+        if bridge_installed(name):
+            done.append(name)
+
+    if not pending:
+        return True, f"мост уже установлен ({', '.join(targets)})"
+    if not done:
+        return False, ("dsh не поставил мост ни в один профиль "
+                       f"({', '.join(pending)})")
+    missing = [name for name in targets if name not in done]
+    if missing:
+        return True, (f"мост установлен в {', '.join(done)}, но не в "
+                      f"{', '.join(missing)} — перезапусти DeepSeek Harness")
+    return True, ("мост установлен — перезапусти DeepSeek Harness, "
+                  "чтобы плагин загрузился")
