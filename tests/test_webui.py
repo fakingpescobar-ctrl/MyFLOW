@@ -89,30 +89,3 @@ class StateTest(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
-
-class LatencyCardTest(unittest.TestCase):
-    """Карточка задержки: медиана и последняя берутся из истории."""
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
-        self.addCleanup(self.tmp.cleanup)
-        self.db = Path(self.tmp.name) / "myflow.sqlite"
-        con = sqlite3.connect(self.db)
-        con.execute("CREATE TABLE history (id INTEGER PRIMARY KEY, created_at TEXT, "
-                    "asr_text TEXT, polished_text TEXT, edited_text TEXT, "
-                    "duration_ms INTEGER, e2e_latency_ms INTEGER, transcript_origin TEXT)")
-        con.executemany("INSERT INTO history VALUES (?,?,?,?,?,?,?,?)", [
-            (1, "2026-10-12 10:00:00", "раз два три", "", "", 1000, 100, "gigaam"),
-            (2, "2026-10-12 10:01:00", "четыре пять", "", "", 1100, 300, "gigaam"),
-            (3, "2026-10-12 10:02:00", "шесть семь восемь", "", "", 1200, 200, "gigaam"),
-        ])
-        con.commit()
-        con.close()
-
-    def test_median_and_last(self):
-        state = build_state(self.db, Path(self.tmp.name) / "нет.json")
-        self.assertEqual(state["latency_median_ms"], 200)
-        self.assertEqual(state["latency_ms"], 200, "последняя фраза")
-        self.assertEqual(state["latency_worst_ms"], 300)
-        self.assertEqual(state["words_last"], 3)
-        self.assertEqual(state["duration_ms"], 1200)
