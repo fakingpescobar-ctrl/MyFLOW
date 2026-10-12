@@ -40,6 +40,19 @@ def should_install(new_mean: float, current_mean: float,
     return new_mean <= current_mean * (1.0 + tolerance)
 
 
+def free_port() -> int:
+    """Свободный локальный порт для замеров.
+
+    Жёсткие номера (были 8085/8086) занимают чужие программы: 12.10.2026 порт 8085
+    держала сторонняя ScpTrayApp, сравнение моделей упало, и хранитель поставил
+    непроверенную модель. Пусть порт выбирает система.
+    """
+    import socket
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
 def wait_health(url: str, seconds: float = 120.0) -> bool:
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
@@ -104,6 +117,6 @@ def compare(current: Path, new: Path, pairs: list[dict],
             log: Path | None = None) -> dict:
     """Сравнить две модели на одних парах. Возвращает средние расстояния."""
     log = log or (ROOT / "data" / "train" / "compare_models.log")
-    new_mean = gated_mean(new, 8085, pairs, log)
-    current_mean = gated_mean(current, 8086, pairs, log)
+    new_mean = gated_mean(new, free_port(), pairs, log)
+    current_mean = gated_mean(current, free_port(), pairs, log)
     return {"new": new_mean, "current": current_mean}
