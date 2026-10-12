@@ -312,8 +312,6 @@ class MyFlowApp:
             # После обновления MyFLOW копия плагина в DSH остаётся старой, а грузится
             # именно она — поэтому сверяем с поставкой и обновляем сами.
             self._sync_dsh_bridge()
-            # Окно-интерфейс с тем же пультом управления, что у TUI.
-            self._start_webui()
         elif cfg.insert_method == "none":
             # Начитка вслух: ничего не вставляем, но история ведётся как обычно.
             self.paster = HistoryOnlyPaste()
@@ -761,7 +759,23 @@ class MyFlowApp:
               "(data/retrain.log)")
         return True, "дообучение запущено (~20 мин, GPU занят)"
 
+    def _ensure_webui(self) -> None:
+        """Поднять окно-интерфейс при первом обращении к пульту (один раз).
+
+        Раньше вызов стоял внутри ветки режима DeepSeek Harness, поэтому в других
+        режимах сервер интерфейса не поднимался вообще. Теперь он поднимается при
+        первом снимке панели - то есть всегда, независимо от режима вставки.
+        """
+        if getattr(self, "_webui_started", False):
+            return
+        self._webui_started = True
+        try:
+            self._start_webui()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[myflow] интерфейс не поднялся: {exc!r}")
+
     def control_snapshot(self) -> dict:
+        self._ensure_webui()
         """Живое состояние всех узлов для панели управления.
 
         Возвращает {"modules": [...], "values": {...}, "counters": {...}}:

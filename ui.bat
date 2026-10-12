@@ -1,7 +1,7 @@
 @echo off
 rem ============================================================
 rem  MyFLOW v rezhime OKNA: prilozhenie bez paneli + otdelnoe okno.
-rem  (Rezhim TUI - eto otdelnyy batnik start-myflow.bat)
+rem  (Rezhim TUI - eto otdelnyy batnik start-myflow.bat: tam panel v konsoli)
 rem
 rem  Ispolzuem rezhim prilozheniya u Chromium (Edge/Chrome):
 rem  --app=... daet okno bez vkladok i adresnoy stroki, so svoey
@@ -27,10 +27,12 @@ netstat -ano | findstr /C:":%PORT% " | findstr /C:"LISTENING" >nul 2>nul
 if not errorlevel 1 goto open_window
 
 echo [ui] zapuskayu server interfeysa na portu %PORT%...
-rem --- prilozhenie BEZ paneli: ono dyorzhyot mikrofon, istoriyu i server
-rem     interfeysa; tak MyFLOW rabotaet v rezhime okna, bez konsolnoy paneli
+rem --- prilozhenie v svernutom okne: ono dyorzhyot mikrofon, istoriyu i server
+rem     interfeysa, a vidno tolko okno UI. Otdelnogo "bez paneli" rezhima
+rem     poka net - myflow.main server ne podnimaet (provereno), poetomu
+rem     zapuskaem obychnoe prilozhenie, no svernutym.
 set "MYFLOW_WEBUI=1"
-start "MyFLOW (okno)" /min "%~dp0.venv\Scripts\python.exe" -X utf8 -m myflow.main
+start "MyFLOW" /min "%~dp0.venv\Scripts\python.exe" -X utf8 -m myflow.tui
 rem --- daem serveru podnyatsya ---
 powershell -NoProfile -Command "Start-Sleep -Milliseconds 1200" >nul 2>nul
 
