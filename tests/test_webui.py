@@ -27,12 +27,14 @@ class StateTest(unittest.TestCase):
     def make_db(self, rows: list[tuple]) -> Path:
         path = Path(self.tmp.name) / "myflow.sqlite"
         con = sqlite3.connect(path)
+        # Схема как в реальной базе: приложение читает e2e_latency_ms, и без колонки
+        # карточка задержки падала на тестовой базе.
         con.execute("CREATE TABLE history (id INTEGER PRIMARY KEY, created_at TEXT, "
                     "asr_text TEXT, polished_text TEXT, edited_text TEXT, "
-                    "duration_ms INTEGER, transcript_origin TEXT)")
+                    "duration_ms INTEGER, e2e_latency_ms INTEGER, transcript_origin TEXT)")
         con.execute("CREATE TABLE dictionary (id INTEGER PRIMARY KEY, source_word TEXT)")
         con.execute("CREATE TABLE snippets (id INTEGER PRIMARY KEY, phrase TEXT)")
-        con.executemany("INSERT INTO history VALUES (?,?,?,?,?,?,?)", rows)
+        con.executemany("INSERT INTO history VALUES (?,?,?,?,?,?,?,?)", rows)
         con.commit()
         con.close()
         return path
@@ -50,8 +52,8 @@ class StateTest(unittest.TestCase):
 
     def test_reads_history_and_counts(self):
         db = self.make_db([
-            (1, "2026-10-12 10:00:00", "первая фраза тут", "", "", 1200, "gigaam"),
-            (2, "2026-10-12 10:01:00", "вторая фраза здесь", "", "", 900, "fast_path"),
+            (1, "2026-10-12 10:00:00", "первая фраза тут", "", "", 1200, 200, "gigaam"),
+            (2, "2026-10-12 10:01:00", "вторая фраза здесь", "", "", 900, 150, "fast_path"),
         ])
         state = build_state(db, Path(self.tmp.name) / "нет.json", limit=5)
         self.assertTrue(state["ready"])
@@ -62,7 +64,7 @@ class StateTest(unittest.TestCase):
 
     def test_prefers_edited_text_then_polished(self):
         db = self.make_db([
-            (1, "2026-10-12 10:00:00", "сырое", "полированное", "правка", 1000, "gigaam"),
+            (1, "2026-10-12 10:00:00", "сырое", "полированное", "правка", 1000, 300, "gigaam"),
         ])
         state = build_state(db, Path(self.tmp.name) / "нет.json")
         self.assertEqual(state["history"][0]["text"], "правка")
@@ -86,3 +88,31 @@ class StateTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LatencyCardTest(unittest.TestCase):
+    """Карточка задержки: медиана и последняя берутся из истории."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self.tmp.cleanup)
+        self.db = Path(self.tmp.name) / "myflow.sqlite"
+        con = sqlite3.connect(self.db)
+        con.execute("CREATE TABLE history (id INTEGER PRIMARY KEY, created_at TEXT, "
+                    "asr_text TEXT, polished_text TEXT, edited_text TEXT, "
+                    "duration_ms INTEGER, e2e_latency_ms INTEGER, transcript_origin TEXT)")
+        con.executemany("INSERT INTO history VALUES (?,?,?,?,?,?,?,?)", [
+            (1, "2026-10-12 10:00:00", "раз два три", "", "", 1000, 100, "gigaam"),
+            (2, "2026-10-12 10:01:00", "четыре пять", "", "", 1100, 300, "gigaam"),
+            (3, "2026-10-12 10:02:00", "шесть семь восемь", "", "", 1200, 200, "gigaam"),
+        ])
+        con.commit()
+        con.close()
+
+    def test_median_and_last(self):
+        state = build_state(self.db, Path(self.tmp.name) / "нет.json")
+        self.assertEqual(state["latency_median_ms"], 200)
+        self.assertEqual(state["latency_ms"], 200, "последняя фраза")
+        self.assertEqual(state["latency_worst_ms"], 300)
+        self.assertEqual(state["words_last"], 3)
+        self.assertEqual(state["duration_ms"], 1200)
