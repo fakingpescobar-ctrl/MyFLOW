@@ -204,6 +204,12 @@ def _word_distance(ref: str, hyp: str) -> float:
     return prev[-1] / len(r)
 
 
+# Фильтр коротких диктовок на уровне МОДУЛЯ: его выставляет main() из --min-words,
+# а real_pairs() берёт, если явный аргумент не задан. Так фильтр действует на все
+# пути сборки и его нельзя потерять, добавив новый вызов real_pairs().
+MIN_WORDS = 0
+
+
 def target_text(pair: dict) -> str:
     """Исправленный человеком текст пары (ключ называется по-разному)."""
     for key in ("dst", "target", "edited", "clean", "corrected", "after", "final"):
@@ -214,7 +220,7 @@ def target_text(pair: dict) -> str:
 
 
 def real_pairs(limit: int | None = None, max_edit: float = 0.5,
-               min_words: int = 0) -> list[dict]:
+               min_words: int | None = None) -> list[dict]:
     """Пары из истории диктовок: сырой ASR -> итоговый текст.
 
     `max_edit` отсекает «склеенные» пары: в истории 25 % строк, где «итог»
@@ -224,6 +230,8 @@ def real_pairs(limit: int | None = None, max_edit: float = 0.5,
     прямо вредят: учат модель переписывать фразу целиком и портят замер всем
     подходам сразу.
     """
+    if min_words is None:
+        min_words = MIN_WORDS
 
     db = ROOT / "data" / "myflow.sqlite"
     if not db.exists():
@@ -488,6 +496,11 @@ def main() -> int:
     ap.add_argument("--no-wispr", dest="wispr", action="store_false",
                     help="не брать эталоны Wispr в синтетику (для честного замера на них)")
     args = ap.parse_args()
+    global MIN_WORDS
+    MIN_WORDS = max(0, int(args.min_words))
+    print(f"  настройки сборки: min_words={MIN_WORDS} "
+          f"identity_share={args.identity_share} variants={args.variants} "
+          f"holdout_last={args.holdout_last}")
     db = ROOT / "data" / "myflow.sqlite"
     raw_count = 0
     if db.exists():
