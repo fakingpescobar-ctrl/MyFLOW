@@ -142,6 +142,7 @@ class InstallTest(unittest.TestCase):
 
         with mock.patch.dict(os.environ, {"DSH_HOME": tmp.name}), \
              mock.patch.object(dsh_bridge, "find_dsh_cli", lambda: "dsh.cmd"), \
+             mock.patch.object(dsh_bridge, "dsh_app_running", lambda: True), \
              mock.patch("subprocess.run", fake_run):
             ok, message = dsh_bridge.install_bridge()
         self.assertTrue(ok, message)
@@ -186,3 +187,51 @@ class FallbackTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AppDiscoveryTest(unittest.TestCase):
+    """Поиск установки DSH: без него новый пользователь не поставит мост.
+
+    `dsh` в PATH есть не у всех, а переменную DSH_APP никто не задаёт. Поэтому
+    основной источник — путь запущенного приложения (`DeepSeek Harness.exe`),
+    плюс обычные места установки как запасной вариант.
+    """
+
+    def test_finds_app_from_running_process(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            with mock.patch.object(dsh_bridge, "_app_paths_from_processes",
+                                   lambda: [Path(tmp)]):
+                self.assertEqual(dsh_bridge.find_dsh_app(), Path(tmp))
+                self.assertTrue(dsh_bridge.dsh_app_running())
+
+    def test_falls_back_to_localappdata(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            app = Path(tmp) / "Programs" / "DeepSeek Harness"
+            app.mkdir(parents=True)
+            (app / "DeepSeek Harness.exe").write_bytes(b"")
+            with mock.patch.object(dsh_bridge, "_app_paths_from_processes", lambda: []), \
+                 mock.patch.dict(os.environ, {"LOCALAPPDATA": tmp}, clear=False):
+                os.environ.pop("DSH_APP", None)
+                self.assertEqual(dsh_bridge.find_dsh_app(), app)
+
+    def test_cli_found_next_to_app_without_path(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            app = Path(tmp) / "DeepSeek Harness"
+            cli = app / "resources" / "runtime" / "cli" / "bin" / "dsh.cmd"
+            cli.parent.mkdir(parents=True)
+            cli.write_bytes(b"")
+            with mock.patch.object(dsh_bridge, "_app_paths_from_processes",
+                                   lambda: [app]), \
+                 mock.patch("shutil.which", lambda name: None), \
+                 mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("DSH_APP", None)
+                self.assertEqual(Path(dsh_bridge.find_dsh_cli()), cli)
+
+    def test_nothing_found_returns_none(self):
+        with mock.patch.object(dsh_bridge, "_app_paths_from_processes", lambda: []), \
+             mock.patch("shutil.which", lambda name: None), \
+             mock.patch.dict(os.environ, {}, clear=False):
+            for var in ("DSH_APP", "LOCALAPPDATA", "PROGRAMFILES"):
+                os.environ.pop(var, None)
+            self.assertIsNone(dsh_bridge.find_dsh_app())
+            self.assertIsNone(dsh_bridge.find_dsh_cli())

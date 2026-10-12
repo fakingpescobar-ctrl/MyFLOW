@@ -45,18 +45,75 @@ def profile_dir(profile: str = DEFAULT_PROFILE) -> Path:
     return dsh_home() / "profiles" / profile
 
 
+def find_dsh_app() -> Path | None:
+    """Где установлено приложение DeepSeek Harness.
+
+    Порядок поиска — от самого надёжного к догадкам:
+      1. запущенный процесс `DeepSeek Harness.exe` (у работающего приложения путь
+         всегда настоящий — это лучший источник);
+      2. переменная DSH_APP (если пользователь её задал);
+      3. обычные места установки на этой машине.
+    """
+    for path in _app_paths_from_processes():
+        if path.exists():
+            return path
+
+    env = os.environ.get("DSH_APP")
+    if env and Path(env).exists():
+        return Path(env)
+
+    local = os.environ.get("LOCALAPPDATA")
+    progfiles = os.environ.get("PROGRAMFILES")
+    candidates = []
+    if local:
+        candidates += [Path(local) / "Programs" / "DeepSeek Harness",
+                        Path(local) / "DeepSeek Harness"]
+    if progfiles:
+        candidates.append(Path(progfiles) / "DeepSeek Harness")
+    for cand in candidates:
+        if (cand / "DeepSeek Harness.exe").exists() or cand.is_dir():
+            return cand
+    return None
+
+
+def _app_paths_from_processes() -> list[Path]:
+    """Пути к запущенным приложениям DSH (через WMI, как в opencode-инжекторе)."""
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-CimInstance Win32_Process -Filter \"Name = 'DeepSeek Harness.exe'\" "
+             "| Select-Object -ExpandProperty ExecutablePath"],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15,
+            creationflags=CREATE_NO_WINDOW,
+        )
+        if result.returncode == 0:
+            return [Path(line.strip()).parent for line in result.stdout.splitlines()
+                    if line.strip()]
+    except Exception:  # noqa: BLE001
+        pass
+    return []
+
+
+def dsh_app_running() -> bool:
+    """Запущено ли приложение DSH (важно для подсказки про перезапуск)."""
+    return bool(_app_paths_from_processes())
+
+
 def find_dsh_cli() -> str | None:
-    """Где `dsh`: сначала PATH, потом рядом с установленным приложением."""
+    """Где `dsh`: PATH, затем рядом с приложением, затем DSH_APP."""
     for name in ("dsh", "dsh.cmd", "dsh.ps1", "dsh.exe"):
         found = shutil.which(name)
         if found:
             return found
-    app = os.environ.get("DSH_APP")
-    bases = [Path(app)] if app else []
-    bases.append(Path(os.environ.get("LOCALAPPDATA", "")) / "Programs")
+
+    bases: list[Path] = []
+    app = find_dsh_app()
+    if app:
+        bases.append(app)
+    env = os.environ.get("DSH_APP")
+    if env:
+        bases.append(Path(env))
     for base in bases:
-        if not base:
-            continue
         for cand in (base / "resources" / "runtime" / "cli" / "bin" / "dsh.cmd",
                      base / "resources" / "runtime" / "cli" / "bin" / "dsh"):
             if cand.exists():
@@ -156,5 +213,7 @@ def install_bridge(profile: str | None = None) -> tuple[bool, str]:
     if missing:
         return True, (f"мост установлен в {', '.join(done)}, но не в "
                       f"{', '.join(missing)} — перезапусти DeepSeek Harness")
-    return True, ("мост установлен — перезапусти DeepSeek Harness, "
-                  "чтобы плагин загрузился")
+    if dsh_app_running():
+        return True, ("мост установлен — перезапусти DeepSeek Harness, "
+                      "чтобы плагин загрузился")
+    return True, "мост установлен — запусти DeepSeek Harness"
