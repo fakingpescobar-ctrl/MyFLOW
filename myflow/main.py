@@ -308,6 +308,9 @@ class MyFlowApp:
             # Со страховкой: если мост (плагин) не установлен, вставим обычным
             # способом, чтобы надиктованное не потерялось.
             self.paster = DshInjector(fallback=ClipboardPaste())
+            # После обновления MyFLOW копия плагина в DSH остаётся старой, а грузится
+            # именно она — поэтому сверяем с поставкой и обновляем сами.
+            self._sync_dsh_bridge()
         elif cfg.insert_method == "clipboard":
             self.paster = ClipboardPaste()
         else:
@@ -1474,6 +1477,24 @@ class MyFlowApp:
         self._polish_watchdog = threading.Thread(
             target=self._polish_watchdog_loop, daemon=True, name="polish-watchdog")
         self._polish_watchdog.start()
+
+    def _sync_dsh_bridge(self) -> None:
+        """Сверить копию плагина в DSH с поставкой и обновить, если разошлась.
+
+        Тихая операция: при совпадении ничего не пишет, при расхождении обновляет
+        копию и сообщает, что нужен перезапуск DSH. Ошибки не должны мешать запуску.
+        """
+        try:
+            from myflow.dsh_bridge import bridge_installed, sync_bridge
+            if not bridge_installed():
+                return                      # моста нет — поставит пользователь по Enter
+            ok, message = sync_bridge()
+            if ok and "обновил" in message:
+                print(f"[myflow] мост в DSH: {message}")
+            elif not ok:
+                print(f"[myflow] мост в DSH: {message}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[myflow] мост в DSH: не смог синхронизировать ({exc!r})")
 
     def postproc_model_available(self) -> bool:
         """Собрана ли своя модель полировки (models/myflow-postproc-*.gguf)."""

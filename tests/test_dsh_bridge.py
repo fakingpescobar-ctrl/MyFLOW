@@ -347,3 +347,69 @@ class DisabledToggleTest(unittest.TestCase):
             with mock.patch.dict(os.environ, {"DSH_HOME": tmp}):
                 self.assertTrue(dsh_bridge.bridge_installed(),
                                 "чужой выключенный плагин нас не касается")
+
+
+class SyncTest(unittest.TestCase):
+    """После обновления MyFLOW копию плагина в DSH надо обновлять самим.
+
+    Плагин грузится из копии в профиле DSH, поэтому свежие исправления MyFLOW
+    иначе до пользователя не доходили бы.
+    """
+
+    def _installed(self, tmp: str) -> Path:
+        d = Path(tmp) / "profiles" / "web"
+        (d / "node_modules" / dsh_bridge.PACKAGE_NAME).mkdir(parents=True)
+        (d / "package.json").write_text(json.dumps({
+            "name": "dsh-profile-web",
+            "dsh": {"profile": {"bundles": ["@deepseek-ai/dsh-web-app",
+                                            dsh_bridge.PACKAGE_NAME]}},
+            "dependencies": {dsh_bridge.PACKAGE_NAME:
+                             f"file:./node_modules/{dsh_bridge.PACKAGE_NAME}"},
+        }, ensure_ascii=False), encoding="utf-8")
+        with mock.patch.dict(os.environ, {"DSH_HOME": tmp}):
+            dsh_bridge.install_bridge()
+        return d
+
+    def test_fresh_copy_is_not_stale(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            self._installed(tmp)
+            with mock.patch.dict(os.environ, {"DSH_HOME": tmp}):
+                self.assertEqual(dsh_bridge.stale_profiles(), [])
+                ok, message = dsh_bridge.sync_bridge()
+        self.assertTrue(ok)
+        self.assertIn("совпадает", message)
+
+    def test_modified_copy_is_detected_and_updated(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            d = self._installed(tmp)
+            copy = d / "node_modules" / dsh_bridge.PACKAGE_NAME / "index.js"
+            copy.write_text("// старая версия плагина\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"DSH_HOME": tmp}):
+                self.assertEqual(dsh_bridge.stale_profiles(), ["web"])
+                ok, message = dsh_bridge.sync_bridge()
+                self.assertTrue(ok, message)
+                self.assertIn("обновил", message)
+                self.assertEqual(dsh_bridge.stale_profiles(), [], "после синхронизации")
+                # содержимое копии снова равно поставке
+                self.assertEqual(copy.read_text(encoding="utf-8"),
+                                 (dsh_bridge.plugin_dir() / "index.js")
+                                 .read_text(encoding="utf-8"))
+
+    def test_fingerprint_changes_with_content(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            root = Path(tmp) / "plugin"
+            root.mkdir()
+            (root / "index.js").write_text("версия 1", encoding="utf-8")
+            first = dsh_bridge.plugin_fingerprint(root)
+            (root / "index.js").write_text("версия 2", encoding="utf-8")
+            self.assertNotEqual(first, dsh_bridge.plugin_fingerprint(root))
+
+    def test_no_copy_means_nothing_to_sync(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            profile = Path(tmp) / "profiles" / "web"
+            profile.mkdir(parents=True)
+            (profile / "package.json").write_text(json.dumps(
+                {"dsh": {"profile": {"bundles": ["@deepseek-ai/dsh-web-app"]}}}),
+                encoding="utf-8")
+            with mock.patch.dict(os.environ, {"DSH_HOME": tmp}):
+                self.assertEqual(dsh_bridge.stale_profiles(), [])

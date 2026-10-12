@@ -232,6 +232,51 @@ def bridge_health(profile: str | None = None) -> dict:
             "profiles": targets}
 
 
+def plugin_fingerprint(source: Path | None = None) -> str:
+    """Отпечаток плагина (содержимое файлов) — чтобы видеть расхождение копии."""
+    import hashlib
+
+    root = Path(source) if source else plugin_dir()
+    digest = hashlib.sha256()
+    if not root.exists():
+        return ""
+    for path in sorted(root.rglob("*")):
+        if path.is_file() and "__pycache__" not in path.parts:
+            digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+            digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def stale_profiles(profile: str | None = None) -> list[str]:
+    """Где копия плагина отличается от поставки (например, после обновления MyFLOW)."""
+    wanted = plugin_fingerprint()
+    result: list[str] = []
+    for name in target_profiles(profile):
+        copy = profile_dir(name) / "node_modules" / PACKAGE_NAME
+        if not copy.exists():
+            continue
+        if not wanted or plugin_fingerprint(copy) != wanted:
+            result.append(name)
+    return result
+
+
+def sync_bridge(profile: str | None = None) -> tuple[bool, str]:
+    """Обновить копии плагина, если они разошлись с поставкой.
+
+    Нужно после обновления MyFLOW: у людей копия в профиле DSH остаётся старой, а
+    плагин грузится именно из неё. Вызывается на старте MyFLOW (только когда выбран
+    режим DeepSeek Harness) и, конечно, при обычной установке.
+    """
+    stale = stale_profiles(profile)
+    if not stale:
+        return True, "плагин в DSH совпадает с поставкой"
+    ok, message = install_bridge(profile)
+    if not ok:
+        return False, message
+    return True, (f"обновил плагин в {', '.join(stale)} — перезапусти "
+                  f"DeepSeek Harness, чтобы применилось")
+
+
 def bridge_installed(profile: str | None = None) -> bool:
     """Стоит ли мост и не сломаны ли ссылки (для панели и инжектора)."""
     return bool(bridge_health(profile)["ok"])
@@ -365,6 +410,9 @@ def _cli() -> int:
         print(f"  мост: {'готов' if health['ok'] else 'не готов'}")
         if health["broken"]:
             print(f"  битые/пустые: {', '.join(health['broken'])}")
+        stale = stale_profiles(args.profile)
+        if stale:
+            print(f"  устаревшая копия: {', '.join(stale)}")
         return 0
 
     action = {"install": install_bridge, "repair": repair_bridge,
