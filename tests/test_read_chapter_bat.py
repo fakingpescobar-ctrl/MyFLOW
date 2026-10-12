@@ -19,7 +19,7 @@ class ReadChapterBatTest(unittest.TestCase):
         self.text = BAT.read_text(encoding="utf-8", errors="replace")
 
     def test_launches_teleprompter(self):
-        self.assertIn("myflow.teleprompter", self.text)
+        self.assertIn("myflow.readwindow", self.text)
 
     def test_uses_project_venv(self):
         self.assertIn(".venv\\Scripts\\python.exe", self.text)
@@ -45,6 +45,11 @@ class ReadChapterBatTest(unittest.TestCase):
 
     def test_mentions_active_window_mode(self):
         self.assertIn("aktivnoe okno", self.text)
+
+    def test_mentions_controls(self):
+        """В окне есть функции, а не только текст."""
+        for marker in ("Zanova", "Otchet", "Propustit", "Stop"):
+            self.assertIn(marker, self.text)
 
 
 if __name__ == "__main__":

@@ -2,10 +2,11 @@
 rem ============================================================
 rem  MyFLOW: okno dlya CHTENIYA GLAVY vsluh - teleprompter.
 rem
-rem  Otkryvaet tekst krupno i krasit slova po mere chteniya:
+rem  Otkryvaet tekst krupno, krasit slova po mere chteniya i daet knopki:
 rem    seryy   - prochitano
 rem    krasnyy - GigaAM uslyshal ne to, zhivoy WER
 rem    zheltyy - tekushchee slovo
+rem  Knopki: Zanova R | Otchet W | Propustit S | Stop Esc
 rem
 rem  V MyFLOW vstavka dolzhna byt "aktivnoe okno Ctrl+V",
 rem  chitat po predlozheniyu s pauzoy. Zakryt - Esc.
@@ -58,7 +59,7 @@ exit /b 1
 echo [chtenie] tekst: %TEXT%
 if not defined MODE echo [chtenie] v MyFLOW: vstavka "aktivnoe okno Ctrl+V", chitat po predlozheniyu, zakryt - Esc
 echo.
-"%~dp0.venv\Scripts\python.exe" -X utf8 -m myflow.teleprompter --text "%TEXT%" --font 24 %MODE%
+"%~dp0.venv\Scripts\python.exe" -X utf8 -m myflow.readwindow --text "%TEXT%" --font 24 %MODE%
 if errorlevel 1 goto failed
 exit /b 0
 
