@@ -40,10 +40,6 @@ rem  "Razmer okna" v panele.
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\apply-window-size.ps1" >nul 2>&1
 
 rem --- 4. TUI (servery podnimaet sam, otdel'nyh okon bolshe net) ---
-rem --- odin klik: chestrez neskolko sekund otkryvaem okno interfeysa sami ---
-rem     server interfeysa podnimaet prilozhenie (MYFLOW_WEBUI=1), a ui.bat tolko
-rem     otkryvaet okno - otdelnyy zapusk polzovatelyu ne nuzhen
-start "" /min powershell -NoProfile -Command "Start-Sleep -Seconds 5; & '%~dp0ui.bat'"
 "%~dp0.venv\Scripts\python.exe" -X utf8 -m myflow.tui
 set "RC=%ERRORLEVEL%"
 
