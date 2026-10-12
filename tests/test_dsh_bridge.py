@@ -26,7 +26,9 @@ def make_home(with_bridge: bool) -> tempfile.TemporaryDirectory:
     tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
     profile = Path(tmp.name) / "profiles" / "web"
     profile.mkdir(parents=True)
-    deps = {"dsh-plugin-myflow": "link:.../dsh-plugin-myflow"} if with_bridge else {}
+    # новая схема установки — КОПИЯ внутри профиля (file:), не ссылка
+    deps = ({"dsh-plugin-myflow": "file:./node_modules/dsh-plugin-myflow"}
+            if with_bridge else {})
     (profile / "package.json").write_text(
         json.dumps({"name": "dsh-profile-web", "dependencies": deps}), encoding="utf-8")
     return tmp
@@ -40,9 +42,19 @@ class BridgeDetectionTest(unittest.TestCase):
         tmp.cleanup()
 
     def test_detected_when_profile_has_plugin(self):
+        """Мост считается готовым, когда есть и зависимость, и КОПИЯ плагина."""
         tmp = make_home(with_bridge=True)
+        copied = Path(tmp.name) / "profiles" / "web" / "node_modules" / \
+            dsh_bridge.PACKAGE_NAME
+        copied.mkdir(parents=True)
+        (copied / "index.js").write_text("", encoding="utf-8")
         with mock.patch.dict(os.environ, {"DSH_HOME": tmp.name}):
             self.assertTrue(dsh_bridge.bridge_installed())
+        # зависимость без копии — не готов (битая/неполная установка)
+        import shutil as _sh
+        _sh.rmtree(copied)
+        with mock.patch.dict(os.environ, {"DSH_HOME": tmp.name}):
+            self.assertFalse(dsh_bridge.bridge_installed())
         tmp.cleanup()
 
     def test_missing_profile_is_not_an_error(self):
@@ -109,46 +121,93 @@ class GuiProfilesTest(unittest.TestCase):
 
 
 class InstallTest(unittest.TestCase):
-    def test_reports_already_installed(self):
-        tmp = make_home(with_bridge=True)
-        with mock.patch.dict(os.environ, {"DSH_HOME": tmp.name}):
-            ok, message = dsh_bridge.install_bridge()
+    """Мост ставится КОПИЕЙ внутрь профиля — MyFLOW можно переносить и удалять.
+
+    Со ссылкой (`link:`) удаление MyFLOW ломало бы профиль DSH, а DSH на
+    неразрешимом бандле падает при запуске.
+    """
+
+    def _profile(self, tmp: str, name: str = "web") -> Path:
+        d = Path(tmp) / "profiles" / name
+        d.mkdir(parents=True)
+        (d / "package.json").write_text(json.dumps({
+            "name": f"dsh-profile-{name}",
+            "dsh": {"profile": {"bundles": ["@deepseek-ai/dsh-web-app"]}},
+            "dependencies": {},
+        }, ensure_ascii=False), encoding="utf-8")
+        return d
+
+    def test_installs_copy_and_wires_profile(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            self._profile(tmp)
+            with mock.patch.dict(os.environ, {"DSH_HOME": tmp}), \
+                 mock.patch.object(dsh_bridge, "dsh_app_running", lambda: True):
+                ok, message = dsh_bridge.install_bridge()
+                self.assertTrue(ok, message)
+                self.assertIn("перезапусти", message)
+                # копия плагина внутри профиля (не ссылка на MyFLOW)
+                copied = Path(tmp) / "profiles" / "web" / "node_modules" / \
+                    dsh_bridge.PACKAGE_NAME
+                self.assertTrue((copied / "index.js").exists())
+                data = json.loads((Path(tmp) / "profiles" / "web" /
+                                   "package.json").read_text(encoding="utf-8"))
+                self.assertTrue(str(data["dependencies"][dsh_bridge.PACKAGE_NAME])
+                                .startswith("file:"))
+                self.assertIn(dsh_bridge.PACKAGE_NAME,
+                              data["dsh"]["profile"]["bundles"])
+                self.assertTrue(dsh_bridge.bridge_installed())
+
+    def test_reports_ready_after_install(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            self._profile(tmp)
+            with mock.patch.dict(os.environ, {"DSH_HOME": tmp}):
+                dsh_bridge.install_bridge()
+                ok, message = dsh_bridge.install_bridge()
         self.assertTrue(ok)
-        self.assertIn("уже установлен", message)
-        tmp.cleanup()
+        self.assertIn("уже был", message)
 
-    def test_refuses_without_dsh_command(self):
-        tmp = make_home(with_bridge=False)
-        with mock.patch.dict(os.environ, {"DSH_HOME": tmp.name}), \
-             mock.patch.object(dsh_bridge, "find_dsh_cli", lambda: None):
-            ok, message = dsh_bridge.install_bridge()
-        self.assertFalse(ok)
-        self.assertIn("вручную", message)
-        tmp.cleanup()
+    def test_broken_link_is_detected_and_repaired(self):
+        """MyFLOW перенесли/удалили -> ссылка битая -> мост «не готов» -> починка."""
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            profile = self._profile(tmp)
+            (profile / "package.json").write_text(json.dumps({
+                "dsh": {"profile": {"bundles": ["@deepseek-ai/dsh-web-app",
+                                                dsh_bridge.PACKAGE_NAME]}},
+                "dependencies": {dsh_bridge.PACKAGE_NAME:
+                                 "link:C:/нет/такой/папки/dsh-plugin-myflow"},
+            }, ensure_ascii=False), encoding="utf-8")
+            with mock.patch.dict(os.environ, {"DSH_HOME": tmp}):
+                health = dsh_bridge.bridge_health()
+                self.assertFalse(health["ok"])
+                self.assertIn("web", health["broken"])
+                self.assertFalse(dsh_bridge.bridge_installed())
+                ok, message = dsh_bridge.repair_bridge()
+                self.assertTrue(ok, message)
+                self.assertTrue(dsh_bridge.bridge_installed(),
+                                "после починки ссылка заменяется копией")
 
-    def test_runs_dsh_plugin_add(self):
-        tmp = make_home(with_bridge=False)
-        calls = {}
+    def test_uninstall_removes_everything(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            self._profile(tmp)
+            with mock.patch.dict(os.environ, {"DSH_HOME": tmp}):
+                dsh_bridge.install_bridge()
+                self.assertTrue(dsh_bridge.bridge_installed())
+                ok, message = dsh_bridge.uninstall_bridge()
+                self.assertTrue(ok, message)
+                self.assertFalse(dsh_bridge.bridge_installed())
+                data = json.loads((Path(tmp) / "profiles" / "web" /
+                                   "package.json").read_text(encoding="utf-8"))
+                self.assertNotIn(dsh_bridge.PACKAGE_NAME, data["dependencies"])
+                self.assertNotIn(dsh_bridge.PACKAGE_NAME,
+                                 data["dsh"]["profile"]["bundles"])
 
-        def fake_run(cmd, **kwargs):
-            calls["cmd"] = cmd
-            # как настоящий dsh: прописывает зависимость в профиль
-            profile = Path(tmp.name) / "profiles" / "web" / "package.json"
-            profile.write_text(json.dumps({
-                "name": "dsh-profile-web",
-                "dependencies": {"dsh-plugin-myflow": "link:.../dsh-plugin-myflow"},
-            }), encoding="utf-8")
-            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
-
-        with mock.patch.dict(os.environ, {"DSH_HOME": tmp.name}), \
-             mock.patch.object(dsh_bridge, "find_dsh_cli", lambda: "dsh.cmd"), \
-             mock.patch.object(dsh_bridge, "dsh_app_running", lambda: True), \
-             mock.patch("subprocess.run", fake_run):
-            ok, message = dsh_bridge.install_bridge()
-        self.assertTrue(ok, message)
-        self.assertIn("перезапусти", message)
-        self.assertEqual(calls["cmd"][:4], ["dsh.cmd", "plugin", "--profile", "web"])
-        tmp.cleanup()
+    def test_uninstall_when_not_installed(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            self._profile(tmp)
+            with mock.patch.dict(os.environ, {"DSH_HOME": tmp}):
+                ok, message = dsh_bridge.uninstall_bridge()
+        self.assertTrue(ok)
+        self.assertIn("и не был", message)
 
 
 class FallbackTest(unittest.TestCase):

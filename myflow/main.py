@@ -892,15 +892,20 @@ class MyFlowApp:
         # Harness, а плагина в профиле DSH ещё нет (новый пользователь).
         if s.insert_method == "dsh":
             try:
-                from myflow.dsh_bridge import bridge_installed, find_dsh_cli
-                if not bridge_installed():
+                from myflow.dsh_bridge import bridge_health, dsh_app_running
+                health = bridge_health()
+                if not health["ok"]:
+                    broken = bool(health["broken"])
                     modules.append({
                         "key": "dshbridge", "label": "Мост в DSH",
-                        "value": ("Enter — поставить (перезапусти DSH)"
-                                  if find_dsh_cli() else "нет команды dsh"),
-                        "on": False, "ok": False, "note": "плагин",
-                        "hint": "Enter — поставить плагин MyFLOW в профиль "
-                                "DeepSeek Harness (потом перезапустить DSH)"})
+                        "value": ("Enter — починить (ссылка битая)" if broken
+                                  else "Enter — поставить"),
+                        "on": False, "ok": False,
+                        "note": "переезд MyFLOW" if broken else "плагин",
+                        "hint": "Enter — " + ("починить" if broken else "поставить")
+                                + " плагин MyFLOW в профиль DeepSeek Harness; "
+                                + ("потом перезапустить DSH"
+                                   if dsh_app_running() else "потом запустить DSH")})
             except Exception:  # noqa: BLE001
                 pass
 
@@ -1121,8 +1126,8 @@ class MyFlowApp:
             return self.start_retrain()
 
         if key == "dshbridge":
-            from myflow.dsh_bridge import install_bridge
-            ok, message = install_bridge()
+            from myflow.dsh_bridge import repair_bridge
+            ok, message = repair_bridge()
             print(f"[myflow] мост в DSH: {message}")
             return ok, message
 
