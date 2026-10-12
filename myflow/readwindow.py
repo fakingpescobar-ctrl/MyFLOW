@@ -34,7 +34,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from myflow.teleprompter import Teleprompter, load_history  # noqa: E402
+from myflow.teleprompter import (Teleprompter, load_history,  # noqa: E402
+                                  latest_record_id)
 
 REPORTS = ROOT / "data" / "bench" / "reports"
 
@@ -192,10 +193,9 @@ class ReadingWindow:  # pragma: no cover - нужен экран
         self._render_text()
         self._bind_keys()
 
-        self.last_id = 0
-        rows = load_history(0, 1)
-        if rows:
-            self.last_id = max(0, rows[0][0] - 1)
+        # Следим только за НОВЫМИ фразами: иначе окно переигрывает всю историю
+        # диктовок и уезжает в конец главы (симптом «всё время листает вниз»).
+        self.last_id = latest_record_id()
 
         self.redraw()
         self.poll()

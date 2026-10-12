@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT))
 
 from myflow.readwindow import (ReadingSession, needs_scroll,   # noqa: E402
                               scroll_target)
+from myflow.teleprompter import latest_record_id, load_history  # noqa: E402
 
 TEXT = ("Он вошёл в тёмный зал и остановился у окна. "
         "Клинок лежал на столе и тускло блестел в свете свечи. "
@@ -118,3 +119,43 @@ class ScrollTest(unittest.TestCase):
     def test_short_text_never_scrolls(self):
         self.assertEqual(scroll_target(1, 1), 0.0)
         self.assertEqual(scroll_target(5, 1), 0.0)
+
+
+class StartPointTest(unittest.TestCase):
+    """Окно обязано следить только за НОВЫМИ фразами.
+
+    Ошибка, которую здесь ловим (случилась 12.10.2026): окно брало точку старта из
+    load_history(0, 1), а та отдаёт САМУЮ СТАРУЮ запись. Окно переигрывало всю
+    историю диктовок: 503 фразы разом красили текст «прочитанным», позиция уезжала
+    в конец главы, и казалось, что окно само листает вниз.
+    """
+
+    def _db(self, rows: list[tuple[int, str]]) -> Path:
+        import sqlite3
+        import tempfile
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        db = Path(tmp.name) / "myflow.sqlite"
+        con = sqlite3.connect(db)
+        con.execute("CREATE TABLE history (id INTEGER PRIMARY KEY, asr_text TEXT)")
+        con.executemany("INSERT INTO history VALUES (?, ?)", rows)
+        con.commit()
+        con.close()
+        return db
+
+    def test_latest_id_is_the_newest_not_the_oldest(self):
+        db = self._db([(1, "старая"), (2, "средняя"), (3, "новая")])
+        self.assertEqual(latest_record_id(db), 3, "нужна САМАЯ СВЕЖАЯ запись, не первая")
+
+    def test_no_new_phrases_at_start(self):
+        db = self._db([(1, "старая"), (2, "средняя"), (3, "новая")])
+        self.assertEqual(load_history(latest_record_id(db), db=db), [],
+                         "старые диктовки не должны попадать в подсветку")
+
+    def test_empty_history_is_safe(self):
+        db = self._db([])
+        self.assertEqual(latest_record_id(db), 0)
+        self.assertEqual(load_history(0, db=db), [])
+
+    def test_missing_db_is_safe(self):
+        self.assertEqual(latest_record_id(Path("нет-такой-базы.sqlite")), 0)

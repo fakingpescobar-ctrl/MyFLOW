@@ -142,11 +142,31 @@ class Teleprompter:
         return self.index / len(self.words) if self.words else 0.0
 
 
-def load_history(start_id: int = 0, limit: int = 200) -> list[tuple[int, str]]:
-    """Новые записи истории: [(id, распознанный текст)]."""
-    if not DB.exists():
+def latest_record_id(db: Path | None = None) -> int:
+    """id самой свежей записи истории (0, если истории нет).
+
+    Окну чтения это нужно, чтобы следить ТОЛЬКО за новыми фразами. Иначе оно
+    переигрывает всю историю диктовок: весь текст красится прочитанным, а позиция
+    уезжает в конец главы (именно это и случилось 12.10.2026).
+    """
+    path = Path(db) if db is not None else DB
+    if not path.exists():
+        return 0
+    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        row = con.execute("select max(id) from history").fetchone()
+    finally:
+        con.close()
+    return int(row[0] or 0) if row else 0
+
+
+def load_history(start_id: int = 0, limit: int = 200,
+                 db: Path | None = None) -> list[tuple[int, str]]:
+    """Новые записи истории: [(id, распознанный текст)] по возрастанию id."""
+    path = Path(db) if db is not None else DB
+    if not path.exists():
         return []
-    con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
         rows = list(con.execute(
             "select id, coalesce(asr_text, '') from history "
