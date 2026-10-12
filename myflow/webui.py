@@ -46,6 +46,15 @@ def read_settings(path: Path | None = None) -> dict:
         return {}
 
 
+def _model_name(pattern: str) -> str:
+    """Имя рабочей модели из папки models (для честной подписи в интерфейсе)."""
+    folder = ROOT / "models"
+    if not folder.exists():
+        return ""
+    found = sorted(folder.glob(pattern))
+    return found[0].name if found else ""
+
+
 def build_state(db: Path | None = None, settings: Path | None = None,
                 limit: int = 12) -> dict:
     """Состояние из базы (режим витрины): только чтение, ничего не меняет."""
@@ -54,6 +63,8 @@ def build_state(db: Path | None = None, settings: Path | None = None,
     state = {
         "ready": path.exists(),
         "asr": "GigaAM v3 e2e (CPU)",
+        "postproc_model": _model_name("myflow-postproc-*.gguf"),
+        "oracle_model": (cfg.get("polish") or {}).get("model", "qwen3-4b-instruct-2507"),
         "polish": bool((cfg.get("polish") or {}).get("enabled", True)),
         "postproc": bool((cfg.get("polish") or {}).get("postproc", True)),
         "insert_mode": (cfg.get("insert_method") or "clipboard"),
@@ -130,35 +141,55 @@ PAGE = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
   :root{
-    --bg:#0b0d12; --bg2:#12151d; --card:#161a24; --line:#232838;
-    --text:#eef1f7; --dim:#8f97ac; --accent:#6366f1; --accent2:#22d3ee;
-    --ok:#34d399; --warn:#fbbf24; --bad:#f87171;
+    --bg:#06070b; --bg2:#0c0e14; --card:#101219; --line:#1d2230;
+    --text:#f2f4f8; --dim:#8b93a7;
+    --orange:#ff8a1f; --orange2:#ffb347; --neon:#22d3ee; --magenta:#e879f9;
+    --ok:#3ddc97; --warn:#fbbf24; --bad:#fb7185;
+    --glow:0 0 22px rgba(255,138,31,.28);
   }
   *{box-sizing:border-box}
-  body{margin:0;background:radial-gradient(1200px 600px at 20% -10%,#1b2136 0%,var(--bg) 55%);
-       color:var(--text);font:15px/1.55 "Segoe UI",system-ui,sans-serif;padding:26px 30px 40px}
+  body{margin:0;color:var(--text);font:15px/1.55 "Segoe UI",system-ui,sans-serif;
+       padding:26px 30px 44px;background:
+         radial-gradient(900px 480px at 12% -12%, rgba(255,138,31,.14) 0%, transparent 60%),
+         radial-gradient(800px 420px at 92% 0%, rgba(34,211,238,.10) 0%, transparent 55%),
+         linear-gradient(180deg,#0a0c12 0%,var(--bg) 60%);
+       background-attachment:fixed}
+  body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:0;opacity:.5;
+       background-image:linear-gradient(rgba(255,255,255,.028) 1px,transparent 1px),
+                        linear-gradient(90deg,rgba(255,255,255,.028) 1px,transparent 1px);
+       background-size:44px 44px;mask-image:linear-gradient(180deg,#000 0%,transparent 78%)}
+  body>*{position:relative;z-index:1}
   header{display:flex;align-items:center;gap:14px;margin-bottom:22px}
-  .logo{width:38px;height:38px;border-radius:11px;
-        background:linear-gradient(135deg,var(--accent),var(--accent2));
-        display:flex;align-items:center;justify-content:center;font-weight:700;font-size:17px;
-        color:#0b0d12;box-shadow:0 6px 20px rgba(99,102,241,.35)}
+  .logo{width:40px;height:40px;border-radius:12px;letter-spacing:.5px;
+        background:linear-gradient(135deg,var(--orange),var(--orange2));
+        display:flex;align-items:center;justify-content:center;font-weight:800;font-size:16px;
+        color:#120a02;box-shadow:var(--glow)}
   h1{font-size:20px;margin:0;letter-spacing:.2px}
   .sub{color:var(--dim);font-size:13px}
-  .badge{margin-left:auto;font-size:12px;padding:5px 12px;border-radius:999px;
-         border:1px solid var(--line);color:var(--dim)}
-  .badge.live{border-color:rgba(52,211,153,.4);color:var(--ok)}
+  .badge{margin-left:auto;font-size:11.5px;letter-spacing:.08em;text-transform:uppercase;
+         padding:6px 14px;border-radius:999px;border:1px solid var(--line);color:var(--dim)}
+  .badge.live{border-color:rgba(255,138,31,.55);color:var(--orange2);
+              box-shadow:0 0 16px rgba(255,138,31,.22)}
   .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:13px;
         margin-bottom:24px}
   .card{background:linear-gradient(180deg,var(--card),var(--bg2));border:1px solid var(--line);
-        border-radius:15px;padding:15px 17px;transition:border-color .15s}
-  .card:hover{border-color:#2f3852}
-  .card .label{color:var(--dim);font-size:11.5px;text-transform:uppercase;
-               letter-spacing:.09em;margin-bottom:7px}
+        border-radius:15px;padding:15px 17px;transition:border-color .15s,box-shadow .15s;
+        position:relative;overflow:hidden}
+  .card::after{content:"";position:absolute;left:0;top:0;height:2px;width:100%;opacity:.55;
+        background:linear-gradient(90deg,transparent,var(--orange),transparent)}
+  .card:hover{border-color:rgba(255,138,31,.35);box-shadow:0 0 20px rgba(255,138,31,.10)}
+  .card .label{color:var(--dim);font-size:11px;text-transform:uppercase;
+               letter-spacing:.14em;margin-bottom:7px}
+  .card .mono{font-family:Consolas,"Cascadia Mono",monospace;font-size:13px;
+              color:var(--orange2);word-break:break-all;line-height:1.35}
   .card .value{font-size:16px;font-weight:600}
   .card .hint{color:var(--dim);font-size:12px;margin-top:5px}
-  .on .value{color:var(--ok)} .off .value{color:var(--dim)}
-  h2{font-size:13px;text-transform:uppercase;letter-spacing:.1em;color:var(--dim);
-     margin:26px 0 12px}
+  .on .value{color:var(--ok);text-shadow:0 0 12px rgba(61,220,151,.35)}
+  .off .value{color:var(--dim)}
+  h2{font-size:12px;text-transform:uppercase;letter-spacing:.18em;color:var(--orange);
+     margin:28px 0 12px;display:flex;align-items:center;gap:10px}
+  h2::after{content:"";flex:1;height:1px;
+     background:linear-gradient(90deg,rgba(255,138,31,.45),transparent)}
   .row{display:flex;align-items:center;gap:14px;background:var(--card);
        border:1px solid var(--line);border-radius:13px;padding:12px 16px;margin-bottom:9px}
   .row .name{flex:1;min-width:0}
@@ -168,13 +199,15 @@ PAGE = """<!doctype html>
       background:#0e1119;position:relative;cursor:pointer;flex:none;transition:.15s}
   .sw i{position:absolute;top:3px;left:3px;width:20px;height:20px;border-radius:50%;
         background:#4b5468;transition:.15s}
-  .sw.on{background:linear-gradient(135deg,var(--accent),var(--accent2));border-color:transparent}
+  .sw.on{background:linear-gradient(135deg,var(--orange),var(--orange2));
+         border-color:transparent;box-shadow:0 0 16px rgba(255,138,31,.45)}
   .sw.on i{left:27px;background:#fff}
   .sw.na{opacity:.35;cursor:not-allowed}
   .stepper{display:flex;align-items:center;gap:8px;flex:none}
-  button.ctl{background:#1b2030;color:var(--text);border:1px solid var(--line);
-             border-radius:10px;padding:7px 12px;font-size:14px;cursor:pointer}
-  button.ctl:hover{border-color:var(--accent)}
+  button.ctl{background:#151824;color:var(--orange2);border:1px solid var(--line);
+             border-radius:10px;padding:7px 13px;font-size:14px;cursor:pointer;
+             transition:.12s}
+  button.ctl:hover{border-color:var(--orange);color:#fff;box-shadow:0 0 14px rgba(255,138,31,.35)}
   .last{background:linear-gradient(180deg,var(--card),var(--bg2));border:1px solid var(--line);
         border-radius:15px;padding:18px;margin-bottom:22px}
   .last .t{font-size:16px;white-space:pre-wrap}
@@ -185,11 +218,13 @@ PAGE = """<!doctype html>
   th{color:var(--dim);font-weight:500;font-size:11.5px;text-transform:uppercase;letter-spacing:.08em}
   tr:last-child td{border-bottom:none}
   .time{color:var(--dim);white-space:nowrap;font-variant-numeric:tabular-nums}
-  .pill{font-size:11.5px;color:var(--accent2);border:1px solid rgba(34,211,238,.25);
-        border-radius:999px;padding:2px 10px}
+  .pill{font-size:11px;letter-spacing:.04em;color:var(--neon);
+        border:1px solid rgba(34,211,238,.3);border-radius:999px;padding:2px 10px;
+        font-family:Consolas,monospace}
   footer{color:var(--dim);font-size:12px;margin-top:18px}
   .toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);
-         background:#1b2030;border:1px solid var(--line);color:var(--text);
+         background:#12141d;border:1px solid rgba(255,138,31,.4);
+         box-shadow:0 0 24px rgba(255,138,31,.22);color:var(--text);
          padding:10px 18px;border-radius:12px;font-size:14px;opacity:0;transition:.2s;
          pointer-events:none}
   .toast.show{opacity:1}
@@ -287,8 +322,11 @@ async function tick(){
     badge.textContent = attached ? "управление активно" : "витрина (без управления)";
     badge.className = "badge" + (attached ? " live" : "");
     document.getElementById("asr").textContent = s.asr || "—";
-    document.getElementById("postproc").textContent = s.polish
-      ? (s.postproc ? "своя 0.6B ✓" : "выключен") : "выключен";
+    document.getElementById("postproc").textContent =
+      s.postproc_model || "модель не найдена";
+    document.getElementById("postproc-state").textContent = s.polish
+      ? (s.postproc ? "включён · :8083" : "выключен в настройках")
+      : "полировка выключена";
     document.getElementById("c-postproc").className =
       "card " + (s.polish && s.postproc ? "on" : "off");
     document.getElementById("insert").textContent = MODES[s.insert_mode] || s.insert_mode || "—";
