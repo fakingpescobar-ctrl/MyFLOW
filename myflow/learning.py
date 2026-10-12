@@ -90,6 +90,36 @@ def extract_corrections(asr_text: str, edited_text: str) -> list[tuple[str, str]
     return pairs
 
 
+# Служебные слова: если целью замены стало такое слово, правило почти наверняка
+# ложное (сломанная атрибуция правки). Настоящая правка значащего слова в предлог не
+# превращает, а наблюдатель — постоянно. Так в словаре появлялись «она -> и» и
+# «елай -> ну», которые потом портили живой текст.
+FUNCTION_WORDS = {
+    "и", "а", "но", "да", "же", "ли", "бы", "не", "ни", "в", "во", "на", "с", "со",
+    "к", "ко", "по", "о", "об", "от", "до", "из", "за", "над", "под", "при", "про",
+    "для", "без", "у", "через", "между", "или", "либо", "то", "как", "что", "чем",
+    "это", "этот", "эта", "эти", "тот", "та", "те", "он", "она", "оно", "они",
+    "я", "ты", "мы", "вы", "ну", "вот", "там", "тут", "здесь", "уже", "ещё", "еще",
+    "был", "была", "было", "были", "есть", "будет", "быть", "идёт", "идет",
+}
+
+
+def learnable(pair) -> bool:
+    """Стоит ли учить такую замену в словарь (защита от ложных правил)."""
+    source = (pair[0] or "").strip()
+    target_raw = (pair[1] or "").strip()
+    if not source or not target_raw:
+        return True                     # вставка/удаление — это не замена слов
+    if any(ch.isdigit() for ch in source + target_raw):
+        return True                     # номера портов и прочее учим
+    target = target_raw.lower().strip(".,!?;:")
+    if target in FUNCTION_WORDS:
+        return False
+    if source.lower() not in FUNCTION_WORDS and len(source) <= 5 and len(target) <= 3:
+        return False                    # обрубок слова («елай» из «делай»)
+    return True
+
+
 def record_edit_and_learn(db: Database, history_id: int, polished_text: str,
                           edited_text: str, observation_end_reason: str | None = None,
                           validator: Callable[[str, str], bool] | None = None) -> dict:
@@ -114,6 +144,9 @@ def record_edit_and_learn(db: Database, history_id: int, polished_text: str,
     sm = SequenceMatcher(None, _tokens(polished_text), _tokens(edited_text), autojunk=False)
     edit_distance = sum(1 for tag, *_ in sm.get_opcodes() if tag != "equal")
     pairs = extract_corrections(polished_text, edited_text)
+    # Ложные пары (цель — служебное слово, обрубки) не учим:
+    # словарь уходит в подсказку полировщику и портит живой текст.
+    pairs = [pair for pair in pairs if learnable(pair)]
     app = db.get_app_window(history_id)
     # «unknown»/пустой заголовок — окно не определить: учим глобально.
     if app and app.strip().lower() not in ("unknown", ""):
