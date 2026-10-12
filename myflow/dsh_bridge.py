@@ -162,6 +162,30 @@ def target_profiles(profile: str | None = None) -> list[str]:
 
 # ── состояние моста ─────────────────────────────────────────────────────────
 
+PLUGIN_ID = "myflow-bridge"
+
+
+def _plugin_disabled(profile: str) -> bool:
+    """Выключен ли наш плагин тумблером в настройках DSH.
+
+    Тумблер в списке плагинов записывается как `disabled: true` для строки с нашим
+    id в слое патчей профиля (или в домашнем слое). Тогда мост формально стоит, но
+    НЕ работает — MyFLOW должен честно сказать и откатиться на буфер обмена.
+    """
+    for patch in (profile_dir(profile) / "cordis.patch.yml",
+                  dsh_home() / "cordis.patch.yml"):
+        if not patch.exists():
+            continue
+        try:
+            text = patch.read_text(encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            continue
+        for chunk in text.split("- id:"):
+            if PLUGIN_ID in chunk and "disabled: true" in chunk.replace('"', ""):
+                return True
+    return False
+
+
 def bridge_health(profile: str | None = None) -> dict:
     """Состояние моста: стоит ли и не битые ли ссылки.
 
@@ -180,6 +204,9 @@ def bridge_health(profile: str | None = None) -> dict:
         value = (data.get("dependencies") or {}).get(PACKAGE_NAME)
         if not value:
             installed = False
+            continue
+        if _plugin_disabled(name):
+            broken.append(name)          # тумблер выключен — работать не будет
             continue
         text = str(value)
         if text.startswith("link:"):
@@ -200,7 +227,9 @@ def bridge_health(profile: str | None = None) -> dict:
             # поэтому считаем такую установку неполной и предлагаем починку.
             broken.append(name)
     return {"ok": installed and not broken, "installed": installed,
-            "broken": broken, "profiles": targets}
+            "broken": broken,
+            "disabled": [name for name in targets if _plugin_disabled(name)],
+            "profiles": targets}
 
 
 def bridge_installed(profile: str | None = None) -> bool:

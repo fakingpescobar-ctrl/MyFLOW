@@ -37,15 +37,48 @@ function dshHome() {
   return process.env.DSH_HOME || join(homedir(), '.dsh');
 }
 
-/** Сессия, в которую вкладываем: текущая, иначе самая свежая из известных. */
+/** Запомненная сессия: после первой удачной вставки держимся её. */
+let lastAgent = undefined;
+
+/** Время последней активности агента (поле называется по-разному — пробуем всё). */
+function activityStamp(agent) {
+  try {
+    const session = agent?.session ?? {};
+    const values = [session.updatedAt, session.lastActivityAt, session.lastEventAt,
+                    session.time, session.createdAt, agent?.updatedAt];
+    for (const value of values) {
+      const num = typeof value === 'number' ? value : Date.parse(value);
+      if (Number.isFinite(num) && num > 0) return num;
+    }
+  } catch {
+    /* нет доступа — считаем неизвестным */
+  }
+  return 0;
+}
+
+/**
+ * Куда вкладывать: самая АКТИВНАЯ сессия, а не просто последняя в списке.
+ *
+ * Раньше брали «текущего инициатора, иначе последнего в списке» — при нескольких
+ * открытых чатах диктовка уходила не в тот чат. Теперь по порядку:
+ *   1) сессия, куда уже успешно вкладывали (держимся её);
+ *   2) агент, инициирующий текущий ход;
+ *   3) агент с самой поздней активностью;
+ *   4) запасной вариант — последний в списке.
+ */
 function targetAgent(ctx) {
   try {
+    const list = [...(ctx.agents.list?.() ?? []), ...(ctx.agents.roots?.() ?? [])];
+    if (lastAgent && list.includes(lastAgent)) return lastAgent;
+
     const current = ctx.agents.currentInitiator?.();
     if (current) return current;
-    const list = ctx.agents.list?.() ?? [];
-    if (list.length) return list[list.length - 1];
-    const roots = ctx.agents.roots?.() ?? [];
-    if (roots.length) return roots[roots.length - 1];
+
+    if (list.length) {
+      const byActivity = list.slice().sort((a, b) => activityStamp(b) - activityStamp(a));
+      if (activityStamp(byActivity[0]) > 0) return byActivity[0];
+      return list[list.length - 1];
+    }
   } catch {
     /* нет службы или она не готова — попробуем в следующий раз */
   }
@@ -70,6 +103,7 @@ function deliver(ctx, text) {
   try {
     if (typeof agent.followup === 'function') {
       agent.followup(message);
+      lastAgent = agent;      // дальше держимся этого чата
       return true;
     }
     if (typeof agent.send === 'function') {

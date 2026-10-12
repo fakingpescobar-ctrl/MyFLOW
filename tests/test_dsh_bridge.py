@@ -294,3 +294,56 @@ class AppDiscoveryTest(unittest.TestCase):
                 os.environ.pop(var, None)
             self.assertIsNone(dsh_bridge.find_dsh_app())
             self.assertIsNone(dsh_bridge.find_dsh_cli())
+
+
+class DisabledToggleTest(unittest.TestCase):
+    """Тумблер плагина в настройках DSH выключает мост — MyFLOW должен это видеть.
+
+    Без этого MyFLOW считал бы мост рабочим, писал в инбокс, и диктовка молча
+    пропадала бы.
+    """
+
+    def _installed_profile(self, tmp: str) -> Path:
+        d = Path(tmp) / "profiles" / "web"
+        (d / "node_modules" / dsh_bridge.PACKAGE_NAME).mkdir(parents=True)
+        (d / "node_modules" / dsh_bridge.PACKAGE_NAME / "index.js").write_text("")
+        (d / "package.json").write_text(json.dumps({
+            "name": "dsh-profile-web",
+            "dsh": {"profile": {"bundles": ["@deepseek-ai/dsh-web-app",
+                                            dsh_bridge.PACKAGE_NAME]}},
+            "dependencies": {dsh_bridge.PACKAGE_NAME:
+                             f"file:./node_modules/{dsh_bridge.PACKAGE_NAME}"},
+        }, ensure_ascii=False), encoding="utf-8")
+        return d
+
+    def test_toggle_off_is_detected(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            d = self._installed_profile(tmp)
+            with mock.patch.dict(os.environ, {"DSH_HOME": tmp}):
+                self.assertTrue(dsh_bridge.bridge_installed(), "пока тумблер включён")
+                # пользователь выключил плагин в настройках DSH
+                (d / "cordis.patch.yml").write_text(
+                    "- id: myflow-bridge\n  disabled: true\n", encoding="utf-8")
+                health = dsh_bridge.bridge_health()
+                self.assertFalse(health["ok"])
+                self.assertIn("web", health["disabled"])
+                self.assertFalse(dsh_bridge.bridge_installed())
+
+    def test_toggle_off_in_home_layer_is_detected(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            self._installed_profile(tmp)
+            (Path(tmp) / "cordis.patch.yml").write_text(
+                '- id: myflow-bridge\n  disabled: true   # выключено в UI\n',
+                encoding="utf-8")
+            with mock.patch.dict(os.environ, {"DSH_HOME": tmp}):
+                health = dsh_bridge.bridge_health()
+                self.assertIn("web", health["disabled"])
+
+    def test_other_plugin_disabled_does_not_affect_us(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            d = self._installed_profile(tmp)
+            (d / "cordis.patch.yml").write_text(
+                "- id: orange-assistant\n  disabled: true\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"DSH_HOME": tmp}):
+                self.assertTrue(dsh_bridge.bridge_installed(),
+                                "чужой выключенный плагин нас не касается")
