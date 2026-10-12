@@ -52,3 +52,29 @@ class InstallBatTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FetchModelsBatTest(unittest.TestCase):
+    """Батник скачивания моделей: первый шаг чужого человека после установки."""
+
+    def setUp(self):
+        self.bat = ROOT / "fetch-models.bat"
+        self.assertTrue(self.bat.exists(), "fetch-models.bat должен лежать в корне")
+        self.text = self.bat.read_text(encoding="utf-8", errors="replace")
+
+    def test_runs_fetch_models(self):
+        self.assertIn("fetch_models.py", self.text)
+
+    def test_requires_venv_first(self):
+        self.assertIn("install-myflow.bat", self.text)
+
+    def test_no_absolute_drive_paths(self):
+        self.assertEqual(re.findall(r"[A-Za-z]:\\\\", self.text), [])
+
+    def test_no_parentheses_inside_if_blocks(self):
+        for block in re.findall(r"if\s+[^\n]*\(\n(.*?)\n\)", self.text, re.S):
+            for line in block.splitlines():
+                stripped = line.strip().lower()
+                if not stripped or stripped.startswith(("echo", "rem")):
+                    continue
+                self.assertNotIn("(", line, f"скобка внутри if-блока: {line!r}")
