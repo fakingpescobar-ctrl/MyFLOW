@@ -113,11 +113,10 @@ def learnable(pair) -> bool:
     if any(ch.isdigit() for ch in source + target_raw):
         return True                     # номера портов и прочее учим
     target = target_raw.lower().strip(".,!?;:")
-    if target in FUNCTION_WORDS:
-        return False
-    if source.lower() not in FUNCTION_WORDS and len(source) <= 5 and len(target) <= 3:
-        return False                    # обрубок слова («елай» из «делай»)
-    return True
+    # Единственное правило: цель — служебное слово. Оно отсекает все наблюдённые
+    # ложные пары («она -> и», «идёт -> с», «там -> идет», «елай -> ну»), но не мешает
+    # настоящим коротким правкам терминов («туи -> TUI»).
+    return target not in FUNCTION_WORDS
 
 
 def record_edit_and_learn(db: Database, history_id: int, polished_text: str,
