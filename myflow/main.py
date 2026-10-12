@@ -44,16 +44,17 @@ from myflow.pick_mic import fast_mic_list
 from myflow.voiceprint import VoiceGate
 from myflow.winfocus import (FocusHistory, WindowRef, current_window,
                              focus_window, idle_seconds, window_exists)
-from myflow.insertion import ClipboardPaste
+from myflow.insertion import ClipboardPaste, HistoryOnlyPaste
 from myflow.opencode_inject import OpenCodeInjector
 from myflow.dsh_inject import DshInjector
 
 # Способы вставки и их подписи для панели (порядок задаёт цикл по ←→).
-INSERT_METHODS = ("clipboard", "opencode", "dsh")
+INSERT_METHODS = ("clipboard", "opencode", "dsh", "none")
 INSERT_METHOD_LABELS = {
     "clipboard": "активное окно (Ctrl+V)",
     "opencode": "чат OpenCode (без фокуса)",
     "dsh": "DeepSeek Harness (без фокуса)",
+    "none": "никуда (только история)",
 }
 from myflow.learning import record_edit_and_learn, watch_pasted_edit
 from myflow.overlay import StatusOverlay
@@ -311,12 +312,15 @@ class MyFlowApp:
             # После обновления MyFLOW копия плагина в DSH остаётся старой, а грузится
             # именно она — поэтому сверяем с поставкой и обновляем сами.
             self._sync_dsh_bridge()
+        elif cfg.insert_method == "none":
+            # Начитка вслух: ничего не вставляем, но история ведётся как обычно.
+            self.paster = HistoryOnlyPaste()
         elif cfg.insert_method == "clipboard":
             self.paster = ClipboardPaste()
         else:
             raise ValueError(
                 f"неизвестный insert_method: {cfg.insert_method!r} "
-                "(допустимо: 'clipboard' | 'opencode' | 'dsh')"
+                "(допустимо: 'clipboard' | 'opencode' | 'dsh' | 'none')"
             )
         self.overlay = overlay if overlay is not None else StatusOverlay()
         # Аудио последних фраз: позволяет перераспознать упавшую фразу (retry).
@@ -1048,6 +1052,8 @@ class MyFlowApp:
                     self.paster = OpenCodeInjector(s.opencode_auto_enter)
                 elif method == "dsh":
                     self.paster = DshInjector()
+                elif method == "none":
+                    self.paster = HistoryOnlyPaste()
                 else:
                     self.paster = ClipboardPaste()
                 return True, f"вставка: {INSERT_METHOD_LABELS.get(method, method)}"

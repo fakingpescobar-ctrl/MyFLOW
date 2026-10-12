@@ -215,3 +215,20 @@ class ClipboardPaste:
         sent = ctypes.windll.user32.SendInput(len(events), arr, ctypes.sizeof(_INPUT))
         if sent != len(events):
             raise RuntimeError(f"SendInput вставил {sent}/{len(events)} событий")
+
+class HistoryOnlyPaste:
+    """Ничего не вставляет: текст живёт только в истории MyFLOW.
+
+    Для начитки вслух и замеров: читаешь в микрофон, ничего не засоряется, а каждая
+    фраза ложится в историю — оттуда её и разбираем против эталонного текста.
+    """
+
+    can_read = False
+
+    def read(self) -> str:
+        return ""
+
+    def paste(self, text: str) -> bool:
+        # Успех возвращаем намеренно: конвейер (история, статистика) должен идти
+        # штатно, просто без вставки в чужое окно.
+        return bool(text and text.strip())

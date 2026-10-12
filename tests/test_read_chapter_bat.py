@@ -19,7 +19,12 @@ class ReadChapterBatTest(unittest.TestCase):
         self.text = BAT.read_text(encoding="utf-8", errors="replace")
 
     def test_launches_teleprompter(self):
-        self.assertIn("myflow.readwindow", self.text)
+        self.assertIn("myflow.readwindow", self.text, "окно с подсветкой остаётся")
+
+    def test_opens_text_in_notepad_by_default(self):
+        """Простая начитка: текст открывается в Блокноте, ничего вставлять не надо."""
+        self.assertIn("notepad.exe", self.text)
+        self.assertIn("--window", self.text, "подсветка доступна по флагу")
 
     def test_uses_project_venv(self):
         self.assertIn(".venv\\Scripts\\python.exe", self.text)

@@ -27,14 +27,19 @@ if not exist "%~dp0.venv\Scripts\python.exe" goto no_venv
 
 set "MODE="
 set "TEXT="
+set "WINDOW="
 if /i "%~1"=="--check" set "MODE=--check"
+if /i "%~1"=="--window" set "WINDOW=1"
 if defined MODE goto resolve
+if defined WINDOW goto resolve
 set "TEXT=%~1"
 if defined TEXT goto resolve
 
 :resolve
 if defined TEXT if exist "%TEXT%" goto run
-for %%F in ("%~dp0data\bench\private\*.txt") do if not defined FOUND set "FOUND=%%F"
+rem --- snachala imenno glava, potom lyuboy drugoy tekst (krom kopiy .orig) ---
+if exist "%~dp0data\bench\private\klinok-ch1.txt" set "FOUND=%~dp0data\bench\private\klinok-ch1.txt"
+for %%F in ("%~dp0data\bench\private\*.txt") do if not defined FOUND if not "%%~xF"==".orig" set "FOUND=%%F"
 if defined FOUND set "TEXT=%FOUND%"
 if not defined TEXT goto no_text
 if not exist "%TEXT%" goto no_text
@@ -57,8 +62,14 @@ exit /b 1
 
 :run
 echo [chtenie] tekst: %TEXT%
-if not defined MODE echo [chtenie] v MyFLOW: vstavka "aktivnoe okno Ctrl+V", chitat po predlozheniyu, zakryt - Esc
-echo.
+if defined MODE goto run_python
+if defined WINDOW goto run_python
+echo [chtenie] otkryvayu tekst v Blokmote. V MyFLOW postav vstavku "nikuda (tolko istoriya)"
+echo [chtenie] i chitay vsluh - kazhdaya fraza popadet v istoriyu dlya razbora.
+start "" notepad.exe "%TEXT%"
+exit /b 0
+
+:run_python
 "%~dp0.venv\Scripts\python.exe" -X utf8 -m myflow.readwindow --text "%TEXT%" --font 24 %MODE%
 if errorlevel 1 goto failed
 exit /b 0
