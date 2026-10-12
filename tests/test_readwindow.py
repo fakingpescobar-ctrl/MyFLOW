@@ -12,7 +12,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from myflow.readwindow import ReadingSession  # noqa: E402
+from myflow.readwindow import (ReadingSession, needs_scroll,   # noqa: E402
+                              scroll_target)
 
 TEXT = ("Он вошёл в тёмный зал и остановился у окна. "
         "Клинок лежал на столе и тускло блестел в свете свечи. "
@@ -90,3 +91,30 @@ class SessionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ScrollTest(unittest.TestCase):
+    """Прокрутка: чтение идёт сверху вниз, и текст не прыгает сам по себе.
+
+    Ошибка, которую здесь ловим: на старте текущее слово первое, а see() в tkinter
+    прокручивал так, что строка вставала ВНИЗУ экрана — окно «листало вниз» каждые
+    полсекунды, и читать было невозможно.
+    """
+
+    def test_start_of_text_stays_at_top(self):
+        self.assertTrue(needs_scroll(1, 1, 25), "первое слово вне удобной зоны -> к верху")
+        self.assertEqual(scroll_target(1, 400), 0.0, "доля 0.0 — это самый верх")
+
+    def test_middle_of_screen_is_left_alone(self):
+        self.assertFalse(needs_scroll(12, 1, 25), "слово в удобной зоне — не трогаем")
+
+    def test_near_bottom_scrolls_a_little(self):
+        self.assertTrue(needs_scroll(23, 1, 25))
+        self.assertLess(scroll_target(23, 400), 0.1, "прокрутка небольшая, на пятую строку")
+
+    def test_near_top_scrolls_back(self):
+        self.assertTrue(needs_scroll(11, 10, 34), "слово под самым верхом -> подтянуть")
+
+    def test_short_text_never_scrolls(self):
+        self.assertEqual(scroll_target(1, 1), 0.0)
+        self.assertEqual(scroll_target(5, 1), 0.0)

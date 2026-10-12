@@ -39,6 +39,22 @@ from myflow.teleprompter import Teleprompter, load_history  # noqa: E402
 REPORTS = ROOT / "data" / "bench" / "reports"
 
 
+def needs_scroll(line: int, first_visible: int, last_visible: int,
+                 margin: int = 4) -> bool:
+    """Нужно ли прокрутить текст, чтобы текущее слово было в удобной зоне."""
+    comfort_top = first_visible + margin
+    comfort_bottom = max(last_visible - margin, comfort_top)
+    return not (comfort_top <= line <= comfort_bottom)
+
+
+def scroll_target(line: int, total_lines: int, keep_from_top: int = 5) -> float:
+    """Куда прокрутить: доля от начала текста (0.0 — самый верх)."""
+    if total_lines <= 1:
+        return 0.0
+    target = max(0, min(line - keep_from_top, total_lines - 1))
+    return target / total_lines
+
+
 def paragraph_breaks(text: str) -> set[int]:
     """Индексы слов, после которых в тексте начинается новая строка-абзац.
 
@@ -166,7 +182,6 @@ class ReadingWindow:  # pragma: no cover - нужен экран
         self.session = ReadingSession(text, model=model)
         self.font_size = font_size
         self.word_positions: list[tuple[int, int]] = []
-        self.current_first_line = 0
 
         self.root = tk.Tk()
         self.root.title("MyFLOW — чтение вслух")
@@ -269,19 +284,28 @@ class ReadingWindow:  # pragma: no cover - нужен экран
         self.text.tag_remove("wrong", "1.0", "end")
         self.text.tag_remove("current", "1.0", "end")
 
+        follow = None
         for index, (start, end) in enumerate(self.word_positions):
             if index < session.index:
                 tag = "wrong" if index in session.prompter.mismatches else "read"
                 self.text.tag_add(tag, start, end)
             elif index == session.index:
                 self.text.tag_add("current", start, end)
-                line = int(self.text.index(start).split(".")[0])
-                # держим текущее слово в средней трети, чтобы не дёргалось
-                if line < self.current_first_line + 4 or \
-                        line > self.current_first_line + 14:
-                    self.text.see(start)
-                    self.current_first_line = line
+                follow = int(self.text.index(start).split(".")[0])
+
+        if follow is not None:
+            self._follow(follow)
         self.status.config(text=session.status())
+
+    def _follow(self, line: int) -> None:
+        """Держать текущее слово в удобной зоне, не дёргая текст каждый тик."""
+        total = int(self.text.index("end-1c").split(".")[0])
+        first_visible = int(self.text.index("@0,0").split(".")[0])
+        last_visible = int(self.text.index(
+            f"@0,{max(self.text.winfo_height(), 1)}").split(".")[0])
+        if not needs_scroll(line, first_visible, last_visible):
+            return
+        self.text.yview_moveto(scroll_target(line, total))
 
     def poll(self) -> None:
         for record_id, heard in load_history(self.last_id):
