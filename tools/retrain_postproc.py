@@ -74,6 +74,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Дообучение постпроцессора на свежих диктовках")
     ap.add_argument("--epochs", type=float, default=4.0)
     ap.add_argument("--variants", type=int, default=4, help="порч на чистый текст")
+    ap.add_argument("--corpus", type=Path, default=None,
+                    help="чистый текст для синтетики (напр. corpus/conversational.txt)")
+    ap.add_argument("--corpus-share", type=float, default=1.0)
     ap.add_argument("--min-words", type=int, default=0,
                     help="не учить на диктовках короче N слов (короткие учат бездействию)")
     ap.add_argument("--identity-share", type=float, default=0.45,

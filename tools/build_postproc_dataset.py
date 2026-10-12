@@ -209,6 +209,12 @@ def _word_distance(ref: str, hyp: str) -> float:
 # пути сборки и его нельзя потерять, добавив новый вызов real_pairs().
 MIN_WORDS = 0
 
+# Корпусные тексты для синтетики (--corpus). Список уровня модуля: его выставляет
+# main(), а clean_texts() добавляет к своим текстам — так корпус действует на всех
+# путях сборки и его нельзя потерять, добавив новый вызов.
+CORPUS_TEXTS: list[str] = []
+CORPUS_SHARE = 1.0          # корпусных текстов не больше, чем своих
+
 
 def target_text(pair: dict) -> str:
     """Исправленный человеком текст пары (ключ называется по-разному)."""
@@ -322,6 +328,18 @@ def clean_texts(exclude: set[str] | None = None, include_wispr: bool = True) -> 
             continue
         seen.add(key)
         out.append(t)
+
+    # Разнообразие формулировок из разговорного корпуса (--corpus): только чистый
+    # текст, порчу накладываем свою. Доля корпуса ограничена, чтобы стиль книги
+    # не перетянул поведение модели на себя.
+    if CORPUS_TEXTS:
+        limit_corpus = int(len(out) * CORPUS_SHARE)
+        for line in (CORPUS_TEXTS[:limit_corpus] if limit_corpus else CORPUS_TEXTS):
+            key = line.lower()
+            if key in seen or len(_words(line)) < 2:
+                continue
+            seen.add(key)
+            out.append(line)
     return out
 
 
@@ -488,6 +506,10 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=None, help="ограничить реальные пары")
     ap.add_argument("--min-words", type=int, default=0,
                     help="не брать в обучение диктовки короче N слов")
+    ap.add_argument("--corpus", type=Path, default=None,
+                    help="файл с чистым текстом для синтетики (по фразе в строке)")
+    ap.add_argument("--corpus-share", type=float, default=1.0,
+                    help="доля корпусных текстов относительно своих (<=1.0)")
     ap.add_argument("--out", type=Path, default=None, help="каталог для датасета")
     ap.add_argument("--identity-share", type=float, default=0.0,
                     help="доля примеров «ничего не менять» (0.45 = 45%%)")
@@ -496,9 +518,27 @@ def main() -> int:
     ap.add_argument("--no-wispr", dest="wispr", action="store_false",
                     help="не брать эталоны Wispr в синтетику (для честного замера на них)")
     args = ap.parse_args()
-    global MIN_WORDS
+    global MIN_WORDS, CORPUS_TEXTS, CORPUS_SHARE
     MIN_WORDS = max(0, int(args.min_words))
-    print(f"  настройки сборки: min_words={MIN_WORDS} "
+    CORPUS_SHARE = max(0.0, min(1.0, float(args.corpus_share)))
+    if args.corpus:
+        if args.corpus.exists():
+            lines = [line.strip() for line in
+                     args.corpus.read_text(encoding="utf-8").splitlines()]
+            seen: set[str] = set()
+            for line in lines:
+                if not line or len(line.split()) < max(3, MIN_WORDS):
+                    continue
+                key = line.lower()
+                if key in seen:
+                    continue
+                seen.add(key)
+                CORPUS_TEXTS.append(line)
+            print(f"  корпус: {len(CORPUS_TEXTS)} фраз из {args.corpus.name} "
+                  f"(доля <= {CORPUS_SHARE:g} от своих)")
+        else:
+            print(f"  ВНИМАНИЕ: нет файла корпуса {args.corpus}", file=sys.stderr)
+    print(f"  настройки сборки: corpus={len(CORPUS_TEXTS)} min_words={MIN_WORDS} "
           f"identity_share={args.identity_share} variants={args.variants} "
           f"holdout_last={args.holdout_last}")
     db = ROOT / "data" / "myflow.sqlite"
