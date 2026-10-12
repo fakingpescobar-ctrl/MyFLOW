@@ -304,6 +304,10 @@ PAGE = """<!doctype html>
 const MODES = { clipboard:"активное окно", opencode:"OpenCode (без фокуса)",
                 dsh:"DeepSeek Harness (без фокуса)", none:"никуда (только история)" };
 const esc = s => (s||"").replace(/[<>&]/g, c => ({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]));
+// Доступ к элементу, который не бросает исключение: окно не должно ломаться целиком
+// из-за одного отсутствующего id (именно так раздел «Управление» оставался «Загрузка…»).
+const el = id => document.getElementById(id) || {style:{}, classList:{add(){},remove(){}}};
+const setText = (id, value) => { el(id).textContent = value; };
 const shortTime = t => (t||"").slice(11,19) || "—";
 let attached = false;
 
@@ -357,56 +361,55 @@ async function tick(){
     const r = await fetch("/api/snapshot", {cache:"no-store"});
     const s = await r.json();
     attached = !!s.control;
-    const badge = document.getElementById("mode");
+    const badge = el("mode");
     badge.textContent = attached ? "управление активно" : "витрина (без управления)";
     badge.className = "badge" + (attached ? " live" : "");
-    document.getElementById("asr").textContent = s.asr || "—";
-    document.getElementById("postproc").textContent =
-      s.postproc_model || "модель не найдена";
-    document.getElementById("postproc-state").textContent = s.polish
+    setText("asr", s.asr || "—");
+    setText("postproc", s.postproc_model || "модель не найдена");
+    setText("postproc-state", s.polish
       ? (s.postproc ? "включён · :8083" : "выключен в настройках")
-      : "полировка выключена";
-    document.getElementById("c-postproc").className =
-      "card " + (s.polish && s.postproc ? "on" : "off");
-    document.getElementById("insert").textContent = MODES[s.insert_mode] || s.insert_mode || "—";
+      : "полировка выключена");
+    el("c-postproc").className = "card " + (s.polish && s.postproc ? "on" : "off");
+    setText("insert", MODES[s.insert_mode] || s.insert_mode || "—");
     const live = s.live || {};
-    const micCard = document.getElementById("c-mic");
+    const micCard = el("c-mic");
     if (live.listening !== undefined || live.level !== undefined) {
       const lvl = Math.round((live.level || 0) * 100);
-      document.getElementById("mic-state").textContent = live.listening
-        ? (live.state || "слушаю") : (live.state || "пауза");
+      setText("mic-state", live.listening
+        ? (live.state || "слушаю") : (live.state || "пауза"));
       micCard.className = "card " + (live.listening ? "on" : "off");
-      document.getElementById("mic-level").style.width = lvl + "%";
+      el("mic-level").style.width = lvl + "%";
     } else {
-      document.getElementById("mic-state").textContent = s.control
-        ? "нет данных от приложения" : "нужен запуск MyFLOW";
+      setText("mic-state", s.control
+        ? "нет данных от приложения" : "нужен запуск MyFLOW");
       micCard.className = "card off";
-      document.getElementById("mic-level").style.width = "0%";
+      el("mic-level").style.width = "0%";
     }
     const lat = s.latency_median_ms;
-    document.getElementById("latency").textContent =
-      lat ? `${Math.round(lat)} мс` : (s.latency_ms ? `${Math.round(s.latency_ms)} мс` : "—");
-    document.getElementById("latency-last").textContent = s.latency_ms
+    setText("latency", lat ? `${Math.round(lat)} мс`
+      : (s.latency_ms ? `${Math.round(s.latency_ms)} мс` : "—"));
+    setText("latency-last", s.latency_ms
       ? `последняя ${Math.round(s.latency_ms)} мс · худшая ${Math.round(s.latency_worst_ms||0)} мс`
-      : "надиктуй фразу — покажу";
-    document.getElementById("words").textContent = s.words_last
-      ? `${s.words_last} слов` : "—";
-    document.getElementById("duration").textContent = s.duration_ms
-      ? `звучала ${(s.duration_ms/1000).toFixed(1)} с` : "";
+      : "надиктуй фразу — покажу");
+    setText("words", s.words_last ? `${s.words_last} слов` : "—");
+    setText("duration", s.duration_ms
+      ? `звучала ${(s.duration_ms/1000).toFixed(1)} с` : "");
     const need = (s.counts.threshold||100) - (s.counts.since_training||0);
-    document.getElementById("retrain").textContent =
-      need > 0 ? `через ${need} диктовок` : "пора дообучить";
-    if(s.last) document.getElementById("last").textContent = s.last.text || "—";
-    document.getElementById("rows").innerHTML = (s.history||[]).map(h =>
+    setText("retrain", need > 0 ? `через ${need} диктовок` : "пора дообучить");
+    if(s.last) setText("last", s.last.text || "—");
+    el("rows").innerHTML = (s.history||[]).map(h =>
       `<tr><td class="time">${shortTime(h.created_at)}</td><td>${esc(h.text)}</td>` +
       `<td><span class="pill">${esc(h.transcript_origin||"—")}</span></td></tr>`).join("")
       || `<tr><td colspan="3" class="time">история пуста</td></tr>`;
-    document.getElementById("counts").textContent =
+    setText("counts",
       `диктовок ${s.counts.dictations} · с текстом ${s.counts.with_text} · ` +
-      `словарь ${s.counts.dictionary} · сниппетов ${s.counts.snippets}`;
-    if(s.control) renderControls(s);
-    else if(!window._painted){ window._painted = 1; renderControls(s); }
-  }catch(e){ document.getElementById("mode").className = "badge"; }
+      `словарь ${s.counts.dictionary} · сниппетов ${s.counts.snippets}`);
+    if(s.control || !window._painted){ window._painted = 1; renderControls(s); }
+  }catch(e){
+    // Даже при сбое в разметке окно остаётся живым и повторяет попытку.
+    el("mode").className = "badge";
+    console.error(e);
+  }
 }
 tick(); setInterval(tick, 1200);
 </script></body></html>
