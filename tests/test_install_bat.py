@@ -78,3 +78,35 @@ class FetchModelsBatTest(unittest.TestCase):
                 if not stripped or stripped.startswith(("echo", "rem")):
                     continue
                 self.assertNotIn("(", line, f"скобка внутри if-блока: {line!r}")
+
+
+class UiBatTest(unittest.TestCase):
+    """Интерфейс должен открываться ОТДЕЛЬНЫМ окном, а не вкладкой браузера."""
+
+    def setUp(self):
+        self.bat = ROOT / "ui.bat"
+        self.assertTrue(self.bat.exists(), "ui.bat должен лежать в корне")
+        self.text = self.bat.read_text(encoding="utf-8", errors="replace")
+
+    def test_uses_app_window_mode(self):
+        self.assertIn("--app=", self.text,
+                      "режим приложения даёт окно без вкладок и адресной строки")
+
+    def test_tries_edge_then_chrome(self):
+        self.assertIn("msedge", self.text)
+        self.assertIn("chrome", self.text)
+
+    def test_does_not_start_second_server(self):
+        """Если сервер уже поднят, окно открывается без второго запуска."""
+        self.assertIn("LISTENING", self.text)
+
+    def test_no_absolute_drive_paths(self):
+        self.assertEqual(re.findall(r"[A-Za-z]:\\\\", self.text), [])
+
+    def test_no_parentheses_inside_if_blocks(self):
+        for block in re.findall(r"if\s+[^\n]*\(\n(.*?)\n\)", self.text, re.S):
+            for line in block.splitlines():
+                stripped = line.strip().lower()
+                if not stripped or stripped.startswith(("echo", "rem")):
+                    continue
+                self.assertNotIn("(", line, f"скобка внутри if-блока: {line!r}")
