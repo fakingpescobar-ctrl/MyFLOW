@@ -8,7 +8,7 @@
 import sqlite3
 from pathlib import Path
 
-DB = Path(r"data\myflow.sqlite")
+DB = Path(__file__).resolve().parent.parent / "data" / "myflow.sqlite"
 con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
 con.row_factory = sqlite3.Row
 
