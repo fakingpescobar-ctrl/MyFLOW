@@ -120,7 +120,10 @@ class WindowSizeLaunchTest(unittest.TestCase):
         self.assertIn("apply-window-size.ps1", bat,
                       "start-myflow.bat должен применять размер из настроек")
         # вызов обязан идти ДО запуска TUI
-        self.assertLess(bat.index("apply-window-size.ps1"), bat.index("myflow.tui"),
+        # Ищем именно строку ЗАПУСКА приложения: подстрока "myflow.tui" встречается
+        # ещё и в проверке «уже запущен», и тест ловил комментарий вместо запуска.
+        self.assertLess(bat.index("apply-window-size.ps1"),
+                        bat.index("-m myflow.tui"),
                         "размер ставим до старта TUI")
 
     def test_size_script_exists_and_reads_settings(self):
