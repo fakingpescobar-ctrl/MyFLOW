@@ -9,6 +9,9 @@ title MyFLOW
 setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 
+rem --- okno-interfeys s upravleniem (sm. ui.bat) ---
+set "MYFLOW_WEBUI=1"
+
 rem --- 0. esli MyFLOW uzhe zapushchen (inache dva PTT na odnu knopku) ---
 powershell -NoProfile -Command "$p=Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where-Object { $_.CommandLine -like '*myflow*' }; if ($p) { exit 2 } else { exit 0 }" >nul 2>&1
 if errorlevel 2 (

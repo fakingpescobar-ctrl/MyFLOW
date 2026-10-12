@@ -312,6 +312,8 @@ class MyFlowApp:
             # После обновления MyFLOW копия плагина в DSH остаётся старой, а грузится
             # именно она — поэтому сверяем с поставкой и обновляем сами.
             self._sync_dsh_bridge()
+            # Окно-интерфейс с тем же пультом управления, что у TUI.
+            self._start_webui()
         elif cfg.insert_method == "none":
             # Начитка вслух: ничего не вставляем, но история ведётся как обычно.
             self.paster = HistoryOnlyPaste()
@@ -1007,6 +1009,29 @@ class MyFlowApp:
         self._mic_thread = threading.Thread(target=worker, daemon=True,
                                             name="mic-scan")
         self._mic_thread.start()
+
+    def _start_webui(self, port: int = 8790) -> None:
+        """Поднять окно-интерфейс с полным управлением.
+
+        Управление идёт через тот же пульт, что у TUI (control_snapshot и
+        control_apply), поэтому кнопки в окне равны клавишам в панели, и функции не
+        расходятся. Порт занят -> интерфейс уже запущен, это не ошибка.
+        """
+        import os
+        if os.environ.get("MYFLOW_WEBUI") != "1":
+            # По умолчанию молчим: иначе сервер поднимался бы в каждом тесте и в любом
+            # вспомогательном запуске. Включает start-myflow.bat и ui.bat.
+            return
+        try:
+            from myflow.webui import serve
+            server, url = serve(port, control=self.control_snapshot,
+                                apply=self.control_apply, quiet=True)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            print(f"[myflow] интерфейс: {url} (управление активно)")
+        except OSError:
+            print(f"[myflow] интерфейс уже работает на порту {port}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"[myflow] интерфейс не поднялся: {exc!r}")
 
     def control_apply(self, action: str, value=None) -> tuple[bool, str]:
         """Применить изменение с панели управления на лету. (ok, сообщение)."""
