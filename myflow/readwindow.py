@@ -303,6 +303,10 @@ class ReadingWindow:  # pragma: no cover - нужен экран
             self.hint.config(text=f"отчёт сохранён: {path}")
 
     def redraw(self) -> None:
+        if not self.highlight:
+            # Простой режим: подсветки нет, перекрашивать нечего, и строки
+            # состояния тоже нет — обращение к ней падало с AttributeError.
+            return
         session = self.session
         self.text.tag_remove("read", "1.0", "end")
         self.text.tag_remove("wrong", "1.0", "end")

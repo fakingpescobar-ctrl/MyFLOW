@@ -159,3 +159,38 @@ class StartPointTest(unittest.TestCase):
 
     def test_missing_db_is_safe(self):
         self.assertEqual(latest_record_id(Path("нет-такой-базы.sqlite")), 0)
+
+
+class WindowSmokeTest(unittest.TestCase):
+    """Окно должно ОТКРЫВАТЬСЯ в простом режиме — иначе пользователь ловит падение.
+
+    Такой сбой уже был: в режиме без подсветки redraw() обращался к строке
+    состояния, которой в этом режиме нет (AttributeError: 'status'), и батник
+    закрывался с ошибкой.
+    """
+
+    def test_plain_window_opens_and_closes(self):
+        try:
+            import tkinter  # noqa: F401
+            tkinter.Tk().destroy()
+        except Exception as exc:  # noqa: BLE001
+            self.skipTest(f"нет графического окружения: {exc}")
+
+        from myflow.readwindow import ReadingWindow
+
+        window = ReadingWindow(TEXT, 12, 800, 500, "GigaAM", highlight=False)
+        window.root.after(300, window.root.destroy)
+        window.run()          # не должно бросать исключений
+
+    def test_highlight_window_opens_and_closes(self):
+        try:
+            import tkinter  # noqa: F401
+            tkinter.Tk().destroy()
+        except Exception as exc:  # noqa: BLE001
+            self.skipTest(f"нет графического окружения: {exc}")
+
+        from myflow.readwindow import ReadingWindow
+
+        window = ReadingWindow(TEXT, 12, 800, 500, "GigaAM", highlight=True)
+        window.root.after(300, window.root.destroy)
+        window.run()
