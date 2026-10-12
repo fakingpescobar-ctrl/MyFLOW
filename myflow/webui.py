@@ -97,9 +97,14 @@ def build_state(db: Path | None = None, settings: Path | None = None,
         state["history"] = rows
         state["last"] = rows[0] if rows else None
         # Живые цифры, которые можно взять из истории: задержка и объём фразы.
-        recent = [r["e2e_latency_ms"] for r in con.execute(
-            "select e2e_latency_ms from history where e2e_latency_ms is not null "
-            "order by id desc limit 20")]
+        try:
+            recent = [row[0] for row in con.execute(
+                "select e2e_latency_ms from history where e2e_latency_ms is not null "
+                "order by id desc limit 20")]
+        except Exception:  # noqa: BLE001
+            # Старая или чужая база без этой колонки: карточка задержки просто пустая,
+            # а окно продолжает работать.
+            recent = []
         if state["last"]:
             state["latency_ms"] = state["last"].get("e2e_latency_ms")
             state["duration_ms"] = state["last"].get("duration_ms")
