@@ -22,10 +22,17 @@ class ReadChapterBatTest(unittest.TestCase):
         self.assertIn("myflow.readwindow", self.text, "окно с подсветкой остаётся")
 
     def test_window_is_the_default_reader(self):
-        """По умолчанию открывается белое окно чтения: крупно и по абзацам."""
+        """По умолчанию открывается окно с красивым текстом (без подсветки)."""
         window = self.text.index("myflow.readwindow")
         notepad = self.text.index("notepad.exe")
         self.assertLess(window, notepad, "окно запускается раньше Блокнота")
+
+    def test_highlight_is_opt_in(self):
+        """Подсветка сбивает при начитке — значит только по флагу."""
+        self.assertIn("--highlight", self.text, "режим подсветки доступен явно")
+        first_use = self.text.index("%HILITE%")
+        made_optional = self.text.index('--highlight" set "HILITE=--highlight')
+        self.assertLess(made_optional, first_use, "без флага подсветка не включается")
 
     def test_notepad_is_optional(self):
         self.assertIn("--notepad", self.text, "простой Блокнот остаётся по флагу")

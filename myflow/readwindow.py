@@ -176,10 +176,12 @@ class ReadingWindow:  # pragma: no cover - нужен экран
     POLL_MS = 500
 
     def __init__(self, text: str, font_size: int, width: int, height: int,
-                 model: str) -> None:
+                 model: str, highlight: bool = False) -> None:
         import tkinter as tk
 
         self.tk = tk
+        # Подсветка по умолчанию ВЫКЛЮЧЕНА: при начитке она сбивает с толку.
+        self.highlight = highlight
         self.session = ReadingSession(text, model=model)
         self.font_size = font_size
         self.word_positions: list[tuple[int, int]] = []
@@ -202,6 +204,26 @@ class ReadingWindow:  # pragma: no cover - нужен экран
 
     def _build_widgets(self) -> None:
         tk = self.tk
+        if not self.highlight:
+            # Простой режим: только текст и подсказка про прокрутку.
+            body = tk.Frame(self.root)
+            body.pack(fill="both", expand=True, padx=16, pady=(14, 6))
+            scroll = tk.Scrollbar(body)
+            scroll.pack(side="right", fill="y")
+            self.text = tk.Text(body, wrap="word",
+                                font=("Georgia", self.font_size),
+                                padx=28, pady=20, yscrollcommand=scroll.set,
+                                highlightthickness=0, spacing1=6, spacing3=6,
+                                relief="flat", borderwidth=0)
+            self.text.pack(side="left", fill="both", expand=True)
+            scroll.config(command=self.text.yview)
+            hint = tk.Label(self.root, anchor="w", font=("Segoe UI", 10),
+                            fg="#6b7280",
+                            text="Прокрутка — колесо мыши или Page Down · "
+                                 "закрыть — Esc")
+            hint.pack(fill="x", padx=18, pady=(0, 10))
+            return
+
         top = tk.Frame(self.root)
         top.pack(fill="x", padx=10, pady=(8, 2))
 
@@ -255,6 +277,8 @@ class ReadingWindow:  # pragma: no cover - нужен экран
 
     def _bind_keys(self) -> None:
         self.root.bind("<Escape>", lambda _e: self.command("quit"))
+        if not self.highlight:
+            return
         self.root.bind("r", lambda _e: self.command("reset"))
         self.root.bind("R", lambda _e: self.command("reset"))
         self.root.bind("w", lambda _e: self.command("report"))
@@ -328,6 +352,8 @@ def main() -> int:
     ap.add_argument("--height", type=int, default=640)
     ap.add_argument("--model", default="GigaAM", help="какой маршрут ASR сейчас работает")
     ap.add_argument("--check", action="store_true", help="только проверить текст")
+    ap.add_argument("--highlight", action="store_true",
+                    help="режим с подсветкой прочитанного (по умолчанию выключен)")
     args = ap.parse_args()
 
     path = Path(args.text)
@@ -342,7 +368,8 @@ def main() -> int:
         print(f"  первые слова: {' '.join(session.words[:8])}")
         return 0
 
-    return ReadingWindow(text, args.font, args.width, args.height, args.model).run()
+    return ReadingWindow(text, args.font, args.width, args.height, args.model,
+                         highlight=args.highlight).run()
 
 
 if __name__ == "__main__":

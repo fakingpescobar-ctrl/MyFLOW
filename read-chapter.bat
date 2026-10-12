@@ -28,8 +28,10 @@ if not exist "%~dp0.venv\Scripts\python.exe" goto no_venv
 set "MODE="
 set "TEXT="
 set "PLAIN="
+set "HILITE="
 if /i "%~1"=="--check" set "MODE=--check"
 if /i "%~1"=="--notepad" set "PLAIN=1"
+if /i "%~1"=="--highlight" set "HILITE=--highlight"
 if defined MODE goto resolve
 if defined PLAIN goto resolve
 set "TEXT=%~1"
@@ -63,9 +65,9 @@ exit /b 1
 :run
 echo [chtenie] tekst: %TEXT%
 if defined PLAIN goto run_notepad
-echo [chtenie] otkryvayu okno chteniya. V MyFLOW vstavka "nikuda (tolko istoriya)".
-echo [chtenie] chitay po predlozheniyu, zakryt - Esc.
-"%~dp0.venv\Scripts\python.exe" -X utf8 -m myflow.readwindow --text "%TEXT%" --font 24 %MODE%
+echo [chtenie] otkryvayu tekst dlya naCHITKI (bez podsvetki).
+echo [chtenie] v MyFLOW vstavka "nikuda (tolko istoriya)"; zakryt - Esc.
+"%~dp0.venv\Scripts\python.exe" -X utf8 -m myflow.readwindow --text "%TEXT%" --font 24 %MODE% %HILITE%
 if errorlevel 1 goto failed
 exit /b 0
 
