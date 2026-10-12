@@ -74,6 +74,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Дообучение постпроцессора на свежих диктовках")
     ap.add_argument("--epochs", type=float, default=4.0)
     ap.add_argument("--variants", type=int, default=4, help="порч на чистый текст")
+    ap.add_argument("--min-words", type=int, default=0,
+                    help="не учить на диктовках короче N слов (короткие учат бездействию)")
     ap.add_argument("--identity-share", type=float, default=0.45,
                     help="доля примеров «ничего не менять»")
     ap.add_argument("--quant", default="Q5_K_M")
@@ -99,6 +101,7 @@ def main() -> int:
     if not run([str(RUNTIME_PY), "-X", "utf8", "tools/build_postproc_dataset.py",
                 "--out", str(WORK), "--variants", str(args.variants),
                 "--identity-share", str(args.identity_share),
+        "--min-words", str(args.min_words),
                 "--holdout-last", str(args.holdout)],
                "собираю датасет из текущей истории"):
         return 1

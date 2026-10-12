@@ -204,7 +204,17 @@ def _word_distance(ref: str, hyp: str) -> float:
     return prev[-1] / len(r)
 
 
-def real_pairs(limit: int | None = None, max_edit: float = 0.5) -> list[dict]:
+def target_text(pair: dict) -> str:
+    """Исправленный человеком текст пары (ключ называется по-разному)."""
+    for key in ("dst", "target", "edited", "clean", "corrected", "after", "final"):
+        value = pair.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
+
+
+def real_pairs(limit: int | None = None, max_edit: float = 0.5,
+               min_words: int = 0) -> list[dict]:
     """Пары из истории диктовок: сырой ASR -> итоговый текст.
 
     `max_edit` отсекает «склеенные» пары: в истории 25 % строк, где «итог»
@@ -214,6 +224,7 @@ def real_pairs(limit: int | None = None, max_edit: float = 0.5) -> list[dict]:
     прямо вредят: учат модель переписывать фразу целиком и портят замер всем
     подходам сразу.
     """
+
     db = ROOT / "data" / "myflow.sqlite"
     if not db.exists():
         return []
@@ -233,6 +244,12 @@ def real_pairs(limit: int | None = None, max_edit: float = 0.5) -> list[dict]:
         if max_edit is not None and _word_distance(asr, clean) > max_edit:
             continue                      # склейка разных диктовок / голосовая команда
         pairs.append({"src": asr, "dst": clean, "kind": "real", "id": int(r["id"])})
+    if min_words:
+        # Короткие «уже чистые» диктовки учат модель бездействию: работы для
+        # постпроцессора на них почти нет, зато они перетягивают поведение в
+        # «не трогать вообще». Замер 12.10.2026: дообучение на свежих коротких
+        # диктовках дало 0.0521 против 0.0325 у проверенной модели.
+        pairs = [pair for pair in pairs if len(pair["dst"].split()) >= min_words]
     if limit:
         pairs = pairs[:limit]
     return pairs
@@ -461,6 +478,8 @@ def main() -> int:
                     help="каждая N-я диктовка идёт в валидацию (стабильно по id)")
     ap.add_argument("--seed", type=int, default=20261011)
     ap.add_argument("--limit", type=int, default=None, help="ограничить реальные пары")
+    ap.add_argument("--min-words", type=int, default=0,
+                    help="не брать в обучение диктовки короче N слов")
     ap.add_argument("--out", type=Path, default=None, help="каталог для датасета")
     ap.add_argument("--identity-share", type=float, default=0.0,
                     help="доля примеров «ничего не менять» (0.45 = 45%%)")
