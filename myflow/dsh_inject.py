@@ -56,8 +56,23 @@ class DshInjector:
     # невозможно (и main его не запускает) — как и у opencode-инжектора.
     can_read = False
 
-    def __init__(self, inbox: Path | None = None) -> None:
+    def __init__(self, inbox: Path | None = None, fallback=None) -> None:
         self.inbox = Path(inbox) if inbox is not None else inbox_path()
+        # `fallback` — обычная вставка через буфер обмена: если мост в DSH не
+        # установлен, текст всё равно попадёт в активное окно (с фокусом),
+        # а не потеряется молча.
+        self.fallback = fallback
+        self._bridge_ok: bool | None = None
+
+    def bridge_ready(self) -> bool:
+        """Установлен ли мост (плагин) в профиле DSH. Ответ кэшируется."""
+        if self._bridge_ok is None:
+            try:
+                from myflow.dsh_bridge import bridge_installed
+                self._bridge_ok = bool(bridge_installed())
+            except Exception:  # noqa: BLE001
+                self._bridge_ok = False
+        return self._bridge_ok
 
     def read(self) -> str:
         return ""
@@ -65,6 +80,13 @@ class DshInjector:
     def paste(self, text: str) -> bool:
         """Дописать реплику в инбокс DSH. True — записано, False — не вышло."""
         if not text or not text.strip():
+            return False
+        if not self.bridge_ready():
+            if self.fallback is not None:
+                _log_warn("мост в DeepSeek Harness не установлен — вставлю "
+                          "обычным способом (через буфер обмена)")
+                return self.fallback.paste(text)
+            _log_warn("мост в DeepSeek Harness не установлен")
             return False
         try:
             self.inbox.parent.mkdir(parents=True, exist_ok=True)

@@ -305,7 +305,9 @@ class MyFlowApp:
         if cfg.insert_method == "opencode":
             self.paster = OpenCodeInjector(auto_enter=cfg.opencode_auto_enter)
         elif cfg.insert_method == "dsh":
-            self.paster = DshInjector()
+            # Со страховкой: если мост (плагин) не установлен, вставим обычным
+            # способом, чтобы надиктованное не потерялось.
+            self.paster = DshInjector(fallback=ClipboardPaste())
         elif cfg.insert_method == "clipboard":
             self.paster = ClipboardPaste()
         else:
@@ -886,6 +888,22 @@ class MyFlowApp:
              "hint": "Enter — закрепить/снять окно (F6)"},
         ]
 
+        # Строка «Мост в DSH»: появляется, только если выбран режим DeepSeek
+        # Harness, а плагина в профиле DSH ещё нет (новый пользователь).
+        if s.insert_method == "dsh":
+            try:
+                from myflow.dsh_bridge import bridge_installed, find_dsh_cli
+                if not bridge_installed():
+                    modules.append({
+                        "key": "dshbridge", "label": "Мост в DSH",
+                        "value": ("Enter — поставить (перезапусти DSH)"
+                                  if find_dsh_cli() else "нет команды dsh"),
+                        "on": False, "ok": False, "note": "плагин",
+                        "hint": "Enter — поставить плагин MyFLOW в профиль "
+                                "DeepSeek Harness (потом перезапустить DSH)"})
+            except Exception:  # noqa: BLE001
+                pass
+
         # Строка «Дообучение»: показываем, сколько свежих диктовок накопилось.
         # Каждая диктовка — размеченный пример, модель стоит освежать; показываем
         # только там, где дообучение реально возможно (есть учебное окружение).
@@ -1101,6 +1119,12 @@ class MyFlowApp:
 
         if key == "retrain":
             return self.start_retrain()
+
+        if key == "dshbridge":
+            from myflow.dsh_bridge import install_bridge
+            ok, message = install_bridge()
+            print(f"[myflow] мост в DSH: {message}")
+            return ok, message
 
         if key == "judge":
             # Oracle LLM: оба движка + склейка. Требует живой whisper-сервер.
