@@ -69,6 +69,10 @@ def build_state(db: Path | None = None, settings: Path | None = None,
         "postproc": bool((cfg.get("polish") or {}).get("postproc", True)),
         "insert_mode": (cfg.get("insert_method") or "clipboard"),
         "history": [], "last": None,
+        "latency_ms": None, "latency_median_ms": None, "latency_worst_ms": None,
+        "duration_ms": None, "words_last": 0,
+        # Живое состояние приложения: подставляет приложение, когда подключено.
+        "live": {},
         "counts": {"dictations": 0, "with_text": 0, "dictionary": 0,
                    "snippets": 0, "since_training": 0, "threshold": RETRAIN_THRESHOLD},
     }
@@ -88,10 +92,22 @@ def build_state(db: Path | None = None, settings: Path | None = None,
                 pass
         rows = [dict(r) for r in con.execute(
             "select id, created_at, coalesce(edited_text, polished_text, asr_text) as text, "
-            "duration_ms, transcript_origin from history "
+            "duration_ms, e2e_latency_ms, transcript_origin from history "
             "where coalesce(asr_text,'') <> '' order by id desc limit ?", (limit,))]
         state["history"] = rows
         state["last"] = rows[0] if rows else None
+        # Живые цифры, которые можно взять из истории: задержка и объём фразы.
+        recent = [r["e2e_latency_ms"] for r in con.execute(
+            "select e2e_latency_ms from history where e2e_latency_ms is not null "
+            "order by id desc limit 20")]
+        if state["last"]:
+            state["latency_ms"] = state["last"].get("e2e_latency_ms")
+            state["duration_ms"] = state["last"].get("duration_ms")
+            state["words_last"] = len((state["last"].get("text") or "").split())
+        if recent:
+            ordered = sorted(recent)
+            state["latency_median_ms"] = ordered[len(ordered) // 2]
+            state["latency_worst_ms"] = ordered[-1]
         state["counts"]["since_training"] = _since_training(con)
     finally:
         con.close()
@@ -124,6 +140,10 @@ def snapshot_for(control) -> dict:
         return state
     state = build_state(limit=12)
     state["control"] = True
+    # Приложение может отдавать живое состояние (уровень микрофона, «слушаю», стадия).
+    # Если не отдаёт - окно честно покажет «—», а не нули.
+    if isinstance(panel.get("live"), dict):
+        state["live"] = panel["live"]
     state["modules"] = [
         {"key": row.get("key"), "label": row.get("label"),
          "on": bool(row.get("on")), "ok": row.get("ok", True),
@@ -221,6 +241,11 @@ PAGE = """<!doctype html>
   .pill{font-size:11px;letter-spacing:.04em;color:var(--neon);
         border:1px solid rgba(34,211,238,.3);border-radius:999px;padding:2px 10px;
         font-family:Consolas,monospace}
+  .level{margin-top:10px;height:6px;border-radius:999px;background:#12151f;
+         border:1px solid var(--line);overflow:hidden}
+  .level i{display:block;height:100%;width:0%;border-radius:999px;
+           background:linear-gradient(90deg,var(--ok),var(--orange),var(--bad));
+           transition:width .12s linear}
   footer{color:var(--dim);font-size:12px;margin-top:18px}
   .toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);
          background:#12141d;border:1px solid rgba(255,138,31,.4);
@@ -246,6 +271,15 @@ PAGE = """<!doctype html>
     <div class="value" id="insert">—</div></div>
   <div class="card"><div class="label">Дообучение</div>
     <div class="value" id="retrain">—</div></div>
+  <div class="card" id="c-mic"><div class="label">Микрофон</div>
+    <div class="value" id="mic-state">—</div>
+    <div class="level"><i id="mic-level"></i></div></div>
+  <div class="card"><div class="label">Задержка (медиана 20 фраз)</div>
+    <div class="value" id="latency">—</div>
+    <div class="hint" id="latency-last"></div></div>
+  <div class="card"><div class="label">Последняя фраза</div>
+    <div class="value" id="words">—</div>
+    <div class="hint" id="duration"></div></div>
 </div>
 
 <h2>Управление</h2>
@@ -330,6 +364,30 @@ async function tick(){
     document.getElementById("c-postproc").className =
       "card " + (s.polish && s.postproc ? "on" : "off");
     document.getElementById("insert").textContent = MODES[s.insert_mode] || s.insert_mode || "—";
+    const live = s.live || {};
+    const micCard = document.getElementById("c-mic");
+    if (live.listening !== undefined || live.level !== undefined) {
+      const lvl = Math.round((live.level || 0) * 100);
+      document.getElementById("mic-state").textContent = live.listening
+        ? (live.state || "слушаю") : (live.state || "пауза");
+      micCard.className = "card " + (live.listening ? "on" : "off");
+      document.getElementById("mic-level").style.width = lvl + "%";
+    } else {
+      document.getElementById("mic-state").textContent = s.control
+        ? "нет данных от приложения" : "нужен запуск MyFLOW";
+      micCard.className = "card off";
+      document.getElementById("mic-level").style.width = "0%";
+    }
+    const lat = s.latency_median_ms;
+    document.getElementById("latency").textContent =
+      lat ? `${Math.round(lat)} мс` : (s.latency_ms ? `${Math.round(s.latency_ms)} мс` : "—");
+    document.getElementById("latency-last").textContent = s.latency_ms
+      ? `последняя ${Math.round(s.latency_ms)} мс · худшая ${Math.round(s.latency_worst_ms||0)} мс`
+      : "надиктуй фразу — покажу";
+    document.getElementById("words").textContent = s.words_last
+      ? `${s.words_last} слов` : "—";
+    document.getElementById("duration").textContent = s.duration_ms
+      ? `звучала ${(s.duration_ms/1000).toFixed(1)} с` : "";
     const need = (s.counts.threshold||100) - (s.counts.since_training||0);
     document.getElementById("retrain").textContent =
       need > 0 ? `через ${need} диктовок` : "пора дообучить";
