@@ -46,6 +46,15 @@ from myflow.winfocus import (FocusHistory, WindowRef, current_window,
                              focus_window, idle_seconds, window_exists)
 from myflow.insertion import ClipboardPaste
 from myflow.opencode_inject import OpenCodeInjector
+from myflow.dsh_inject import DshInjector
+
+# Способы вставки и их подписи для панели (порядок задаёт цикл по ←→).
+INSERT_METHODS = ("clipboard", "opencode", "dsh")
+INSERT_METHOD_LABELS = {
+    "clipboard": "активное окно (Ctrl+V)",
+    "opencode": "чат OpenCode (без фокуса)",
+    "dsh": "DeepSeek Harness (без фокуса)",
+}
 from myflow.learning import record_edit_and_learn, watch_pasted_edit
 from myflow.overlay import StatusOverlay
 from myflow.pick_mic import pick_mic
@@ -290,15 +299,19 @@ class MyFlowApp:
                           if cfg.voiceprint.profile_path else None),
         )
         # Куда вставлять: обычно — буфер+Ctrl+V в активное окно; в opencode-режиме —
-        # WriteConsoleInputW напрямую в консоль (не требует фокуса, Enter по флагу).
+        # WriteConsoleInputW напрямую в консоль (не требует фокуса, Enter по флагу);
+        # в dsh-режиме — файл-инбокс, который читает плагин внутри DeepSeek Harness
+        # (тоже без фокуса: плагин вкладывает текст в текущую сессию через API).
         if cfg.insert_method == "opencode":
             self.paster = OpenCodeInjector(auto_enter=cfg.opencode_auto_enter)
+        elif cfg.insert_method == "dsh":
+            self.paster = DshInjector()
         elif cfg.insert_method == "clipboard":
             self.paster = ClipboardPaste()
         else:
             raise ValueError(
                 f"неизвестный insert_method: {cfg.insert_method!r} "
-                "(допустимо: 'clipboard' | 'opencode')"
+                "(допустимо: 'clipboard' | 'opencode' | 'dsh')"
             )
         self.overlay = overlay if overlay is not None else StatusOverlay()
         # Аудио последних фраз: позволяет перераспознать упавшую фразу (retry).
@@ -864,9 +877,9 @@ class MyFlowApp:
             {"key": "mode", "label": "Режим диктовки", "value": mode_label,
              "hint": "←→ авто ↔ PTT"},
             {"key": "insert", "label": "Куда вставлять",
-             "value": "активное окно (Ctrl+V)" if s.insert_method == "clipboard"
-                      else "чат OpenCode (без фокуса)",
-             "hint": "←→ сменить способ вставки"},
+             "value": INSERT_METHOD_LABELS.get(s.insert_method, s.insert_method),
+             "hint": "←→ сменить способ: активное окно → OpenCode → "
+                     "DeepSeek Harness (оба без фокуса)"},
             {"key": "style", "label": "Стиль текста", "value": s.default_style,
              "hint": "←→ стиль по умолчанию (F7 — на лету)"},
             {"key": "target", "label": "Цель вставки", "value": target_label,
@@ -998,12 +1011,20 @@ class MyFlowApp:
                 return True, f"режим: {'авто' if self._pref_auto else 'PTT'}"
 
             if action == "insert":
-                method = "opencode" if value else "clipboard"
+                # Цикл по ←→: активное окно → OpenCode → DeepSeek Harness.
+                current = (s.insert_method if s.insert_method in INSERT_METHODS
+                           else INSERT_METHODS[0])
+                method = INSERT_METHODS[(INSERT_METHODS.index(current) + 1)
+                                        % len(INSERT_METHODS)]
                 s.insert_method = method
                 store.save()
-                self.paster = (OpenCodeInjector(s.opencode_auto_enter)
-                               if method == "opencode" else ClipboardPaste())
-                return True, f"вставка: {method}"
+                if method == "opencode":
+                    self.paster = OpenCodeInjector(s.opencode_auto_enter)
+                elif method == "dsh":
+                    self.paster = DshInjector()
+                else:
+                    self.paster = ClipboardPaste()
+                return True, f"вставка: {INSERT_METHOD_LABELS.get(method, method)}"
 
             if action == "style":
                 s.default_style = str(value)
