@@ -21,10 +21,14 @@ class ReadChapterBatTest(unittest.TestCase):
     def test_launches_teleprompter(self):
         self.assertIn("myflow.readwindow", self.text, "окно с подсветкой остаётся")
 
-    def test_opens_text_in_notepad_by_default(self):
-        """Простая начитка: текст открывается в Блокноте, ничего вставлять не надо."""
-        self.assertIn("notepad.exe", self.text)
-        self.assertIn("--window", self.text, "подсветка доступна по флагу")
+    def test_window_is_the_default_reader(self):
+        """По умолчанию открывается белое окно чтения: крупно и по абзацам."""
+        window = self.text.index("myflow.readwindow")
+        notepad = self.text.index("notepad.exe")
+        self.assertLess(window, notepad, "окно запускается раньше Блокнота")
+
+    def test_notepad_is_optional(self):
+        self.assertIn("--notepad", self.text, "простой Блокнот остаётся по флагу")
 
     def test_uses_project_venv(self):
         self.assertIn(".venv\\Scripts\\python.exe", self.text)
