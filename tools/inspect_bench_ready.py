@@ -3,7 +3,7 @@ import sqlite3
 import sys
 from pathlib import Path
 
-ROOT = Path(r"C:\Projects\MyFLOW")
+ROOT = Path(__file__).resolve().parent.parent   # без абсолютных путей
 con = sqlite3.connect(ROOT / "data" / "myflow.sqlite")
 print("  ТАБЛИЦЫ:")
 for (name,) in con.execute("select name from sqlite_master where type='table'"):
