@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import os
 import re
 import sys
 import urllib.error
@@ -13,7 +14,7 @@ import urllib.request
 from pathlib import Path
 
 BASE = "http://127.0.0.1:19387"
-ASAR = Path(r"D:\DeepSeek Harness\resources\app.asar")
+ASAR = Path(os.environ.get("DSH_ASAR", ""))   # см. peek_dsh_api.py
 PATHS = ("/", "/api", "/api/health", "/api/status", "/api/sessions",
          "/api/session", "/api/state", "/api/events", "/api/workspace")
 
@@ -42,7 +43,7 @@ def main() -> int:
     for path in PATHS:
         print(f"    {path:<16} {probe(path, BASE)}")
 
-    if ASAR.exists():
+    if ASAR and ASAR.exists():
         print("\n  --- строки '/api/...' из asar ---")
         data = ASAR.read_bytes()
         found: dict[str, int] = {}
