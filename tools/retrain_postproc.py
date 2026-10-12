@@ -104,7 +104,9 @@ def main() -> int:
     if not run([str(RUNTIME_PY), "-X", "utf8", "tools/build_postproc_dataset.py",
                 "--out", str(WORK), "--variants", str(args.variants),
                 "--identity-share", str(args.identity_share),
-        "--min-words", str(args.min_words),
+                "--min-words", str(args.min_words),
+                "--corpus", str(args.corpus) if args.corpus else "",
+                "--corpus-share", str(args.corpus_share),
                 "--holdout-last", str(args.holdout)],
                "собираю датасет из текущей истории"):
         return 1
