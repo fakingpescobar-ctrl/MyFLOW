@@ -56,11 +56,16 @@ function targetAgent(ctx) {
 function deliver(ctx, text) {
   const agent = targetAgent(ctx);
   if (!agent) return false;
+  // ВАЖНО про источник сообщения. Диктовка — это ПРЯМАЯ реплика человека, поэтому
+  // источник встроенный: { kind: 'user' }. Своя разновидность (kind: 'plugin')
+  // требует, чтобы плагин её ЗАРЕГИСТРИРОВАЛ в типе сообщений; без регистрации
+  // рантайм отвергает ход с ошибкой «format v4 message requires a producer-owned
+  // source kind» — на этом мы уже спотыкались.
   const message = {
     id: `myflow-${Date.now()}-${randomUUID()}`,
     role: 'user',
     content: [{ type: 'text', text }],
-    source: { kind: 'plugin', plugin: PLUGIN_ID },
+    source: { kind: 'user' },
   };
   try {
     if (typeof agent.followup === 'function') {
