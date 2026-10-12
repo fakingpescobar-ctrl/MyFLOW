@@ -39,11 +39,30 @@ from myflow.teleprompter import Teleprompter, load_history  # noqa: E402
 REPORTS = ROOT / "data" / "bench" / "reports"
 
 
+def paragraph_breaks(text: str) -> set[int]:
+    """Индексы слов, после которых в тексте начинается новая строка-абзац.
+
+    Файл главы уже разбит по строкам: каждая строка — абзац или реплика диалога.
+    Окно раньше склеивало всё в одну простыню, и читать было невозможно. Теперь
+    разбивка сохраняется: после последнего слова строки ставим перенос.
+    """
+    breaks: set[int] = set()
+    index = 0
+    for line in text.splitlines():
+        words = line.split()
+        if not words:
+            continue
+        index += len(words)
+        breaks.add(index - 1)
+    return breaks
+
+
 class ReadingSession:
     """Состояние прохода: текст, позиция, ошибки, время. Без окна — для тестов."""
 
     def __init__(self, text: str, model: str = "GigaAM") -> None:
         self.prompter = Teleprompter(text)
+        self.breaks = paragraph_breaks(text)
         self.model = model
         self.started = time.monotonic()
         self.feed_count = 0
@@ -204,17 +223,20 @@ class ReadingWindow:  # pragma: no cover - нужен экран
         self.status.pack(fill="x", padx=10, pady=(0, 8))
 
     def _render_text(self) -> None:
-        """Разложить слова по текстовому виджету и запомнить их координаты."""
+        """Разложить слова по виджету, СОХРАНЯЯ строки-абзацы исходного текста."""
         self.text.delete("1.0", "end")
         self.word_positions = []
         words = self.session.words
+        breaks = self.session.breaks
         for index, word in enumerate(words):
             start = self.text.index("end-1c")
             self.text.insert("end", word)
             end = self.text.index("end-1c")
             self.word_positions.append((start, end))
-            if index != len(words) - 1:
-                self.text.insert("end", " ")
+            if index == len(words) - 1:
+                continue
+            # конец строки-абзаца -> пустая строка для воздуха, иначе пробел
+            self.text.insert("end", "\n\n" if index in breaks else " ")
 
     def _bind_keys(self) -> None:
         self.root.bind("<Escape>", lambda _e: self.command("quit"))
