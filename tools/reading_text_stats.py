@@ -7,8 +7,9 @@ import re
 import sys
 from pathlib import Path
 
-path = Path(sys.argv[1] if len(sys.argv) > 1 else
-            r"data\bench\private\klinok-ch1.txt")
+ROOT = Path(__file__).resolve().parent.parent
+path = Path(sys.argv[1]) if len(sys.argv) > 1 else \
+    ROOT / "data" / "bench" / "private" / "klinok-ch1.txt"
 if not path.exists():
     print(f"  нет файла: {path}")
     raise SystemExit(1)
