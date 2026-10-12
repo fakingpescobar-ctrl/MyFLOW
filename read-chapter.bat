@@ -10,10 +10,11 @@ rem
 rem  V MyFLOW vstavka dolzhna byt "aktivnoe okno Ctrl+V",
 rem  chitat po predlozheniyu s pauzoy. Zakryt - Esc.
 rem
-rem  Tekst kladetsya v data\bench\private\ i v git ne popadaet.
-rem  Zapusk:  read-chapter.bat                      - vozmet po umolchaniyu
-rem           read-chapter.bat put\glava.txt       - svoy fail
-rem           read-chapter.bat --check             - proverka bez okna
+rem  Tekst beretsya iz data\bench\private\ (v git ne popadaet):
+rem    esli est klinok-ch1.txt - beretsya on, inache pervyy .txt v papke.
+rem  Zapusk:  read-chapter.bat                  - sam naydet tekst
+rem           read-chapter.bat put\glava.txt   - svoy fail
+rem           read-chapter.bat --check         - proverka bez okna
 rem
 rem  VNIMANIE: vnutri blokov if nelzya skobki i && - cmd ih ne perevarivaet.
 rem ============================================================
@@ -22,16 +23,19 @@ setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 
 if not exist "%~dp0.venv\Scripts\python.exe" goto no_venv
-set "MODE="
-set "TEXT=%~1"
-if /i "%TEXT%"=="--check" goto check_mode
-if "%TEXT%"=="" set "TEXT=%~dp0data\bench\private\klinok-ch1.txt"
-if not exist "%TEXT%" goto no_text
-goto run
 
-:check_mode
-set "MODE=--check"
-set "TEXT=%~dp0data\bench\private\klinok-ch1.txt"
+set "MODE="
+set "TEXT="
+if /i "%~1"=="--check" set "MODE=--check"
+if defined MODE goto resolve
+set "TEXT=%~1"
+if defined TEXT goto resolve
+
+:resolve
+if defined TEXT if exist "%TEXT%" goto run
+for %%F in ("%~dp0data\bench\private\*.txt") do if not defined FOUND set "FOUND=%%F"
+if defined FOUND set "TEXT=%FOUND%"
+if not defined TEXT goto no_text
 if not exist "%TEXT%" goto no_text
 goto run
 
@@ -43,13 +47,9 @@ pause
 exit /b 1
 
 :no_text
-echo [chtenie] net faila s tekstom:
-echo    %TEXT%
-echo.
-echo Polozhi glavu v papku data\bench\private\ v kodirovke UTF-8
+echo [chtenie] net teksta. Polozhi glavu v papku data\bench\private\ v UTF-8
 echo ili ukazhi svoy put:  read-chapter.bat put\glava.txt
 echo.
-echo Chto uzhe est v papke:
 dir /b "%~dp0data\bench\private\*.txt" 2>nul
 pause
 exit /b 1
