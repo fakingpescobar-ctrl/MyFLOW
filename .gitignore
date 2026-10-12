@@ -24,3 +24,7 @@ data/validation/
 # Учебное окружение (CUDA-torch + transformers/peft — только для дообучения)
 .venv-train/
 
+
+# Тест «чтение вслух»: эталонный текст книги — только локально (авторское право)
+data/bench/private/
+
