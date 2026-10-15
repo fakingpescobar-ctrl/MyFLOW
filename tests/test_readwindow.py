@@ -179,7 +179,10 @@ class WindowSmokeTest(unittest.TestCase):
         from myflow.readwindow import ReadingWindow
 
         window = ReadingWindow(TEXT, 12, 800, 500, "GigaAM", highlight=False)
-        window.root.after(300, window.root.destroy)
+        # Тест проверяет код окна, но показывать его на экране нельзя: иначе оно
+        # мелькает у пользователя при каждом прогоне тестов (именно так и случилось).
+        window.root.withdraw()
+        window.root.after(200, window.root.destroy)
         window.run()          # не должно бросать исключений
 
     def test_highlight_window_opens_and_closes(self):
@@ -192,5 +195,6 @@ class WindowSmokeTest(unittest.TestCase):
         from myflow.readwindow import ReadingWindow
 
         window = ReadingWindow(TEXT, 12, 800, 500, "GigaAM", highlight=True)
-        window.root.after(300, window.root.destroy)
+        window.root.withdraw()          # окно теста не должно быть видно
+        window.root.after(200, window.root.destroy)
         window.run()
