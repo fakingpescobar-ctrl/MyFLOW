@@ -23,12 +23,17 @@ class LaunchModesTest(unittest.TestCase):
         self.assertIn('set "MYFLOW_WEBUI=1"', text,
                       "режим UI обязан поднять сервер интерфейса")
 
+    @staticmethod
+    def _commands(path: Path) -> str:
+        """Только строки-команды: комментарии (rem) не считаются вызовом."""
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        return "\n".join(line for line in lines
+                         if not line.strip().lower().startswith("rem"))
+
     def test_modes_do_not_start_each_other(self):
-        tui = (ROOT / "start-myflow.bat").read_text(encoding="utf-8", errors="replace")
-        self.assertNotIn("ui.bat", tui.replace("sm. ui.bat", ""),
+        self.assertNotIn("ui.bat", self._commands(ROOT / "start-myflow.bat"),
                          "TUI-батник не должен запускать окно")
-        ui = (ROOT / "ui.bat").read_text(encoding="utf-8", errors="replace")
-        self.assertNotIn("start-myflow", ui,
+        self.assertNotIn("start-myflow", self._commands(ROOT / "ui.bat"),
                          "UI-батник не должен запускать TUI-батник")
 
     def test_ui_mode_starts_app_minimized(self):
