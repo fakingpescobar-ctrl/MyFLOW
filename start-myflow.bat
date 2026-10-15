@@ -9,8 +9,9 @@ title MyFLOW
 setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 
-rem --- okno-interfeys s upravleniem (sm. ui.bat) ---
-set "MYFLOW_WEBUI=1"
+rem --- rezhim TUI: server interfeysa NE podnimaem (rezhim UI - otdelnyy
+rem     batnik ui.bat, on i podnimaet prilozhenie, i otkryvaet okno) ---
+set "MYFLOW_WEBUI=0"
 
 rem --- 0. esli MyFLOW uzhe zapushchen (inache dva PTT na odnu knopku) ---
 rem     proveryaem imenno prilozhenie (modul tui): server interfeysa

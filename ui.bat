@@ -1,6 +1,7 @@
 @echo off
 rem ============================================================
-rem  MyFLOW v rezhime OKNA: prilozhenie bez paneli + otdelnoe okno.
+rem  MyFLOW v rezhime OKNA: prilozhenie (svernuto) + otdelnoe okno UI.
+rem  Eto OTDELNYY variant zapuska: rezhim TUI - start-myflow.bat
 rem  (Rezhim TUI - eto otdelnyy batnik start-myflow.bat: tam panel v konsoli)
 rem
 rem  Ispolzuem rezhim prilozheniya u Chromium (Edge/Chrome):
