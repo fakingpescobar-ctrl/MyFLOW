@@ -71,13 +71,15 @@ class BridgeTest(unittest.TestCase):
         self.assertEqual(data["values"][0]["key"], "insert")
 
     def test_toggle_calls_the_same_pult(self):
+        """Первой пробуется форма TUI: control_apply(ключ, ...)."""
         result = self.post({"action": "module", "value": "llm"})
         self.assertTrue(result["ok"])
-        self.assertEqual(self.panel.calls, [("toggle", "llm")])
+        self.assertEqual(self.panel.calls, [("llm", None)])
 
     def test_adjust_calls_with_delta(self):
+        """И здесь форма TUI: control_apply(ключ, шаг)."""
         self.post({"action": "adjust", "value": "insert:+1"})
-        self.assertEqual(self.panel.calls, [("adjust", ("insert", 1))])
+        self.assertEqual(self.panel.calls, [("insert", 1)])
 
     def test_without_control_it_says_so(self):
         state = snapshot_for(None)
