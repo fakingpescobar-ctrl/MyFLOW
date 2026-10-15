@@ -91,12 +91,17 @@ def _log_warn(msg: str) -> None:
 
 
 def _find_opencode_pids() -> list[int]:
-    """PIDs открытых opencode.exe через WMI (как в opencode-tts)."""
+    """PIDs ИНТЕРАКТИВНЫХ opencode.exe, серверные (serve/--port) - в конце списка.
+
+    Почему это важно: `opencode serve --port N` - сервер, у него своя консоль, которую
+    пользователь не видит. Когда такой процесс оказывался первым, инжект отрабатывал
+    «успешно», а текст уходил в невидимую консоль - выглядело как «инжект не работает».
+    """
     try:
         r = subprocess.run(
             ["powershell", "-NoProfile", "-Command",
              "Get-CimInstance Win32_Process -Filter \"Name = 'opencode.exe'\" "
-             "| Select-Object ProcessId | ConvertTo-Json"],
+             "| Select-Object ProcessId, CommandLine | ConvertTo-Json"],
             stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10,
             creationflags=CREATE_NO_WINDOW,
         )
@@ -104,7 +109,22 @@ def _find_opencode_pids() -> list[int]:
             data = json.loads(r.stdout)
             if isinstance(data, dict):
                 data = [data]
-            return [int(e["ProcessId"]) for e in data]
+            interactive: list[int] = []
+            servers: list[int] = []
+            for entry in data:
+                try:
+                    pid = int(entry["ProcessId"])
+                except Exception:  # noqa: BLE001
+                    continue
+                cmdline = (entry.get("CommandLine") or "").lower()
+                if " serve" in cmdline or "--port" in cmdline:
+                    servers.append(pid)
+                else:
+                    interactive.append(pid)
+            if servers:
+                _log_warn(f"opencode: серверные процессы отложены ({servers}), "
+                          f"вставляем в интерактивные ({interactive or 'нет'})")
+            return interactive + servers
     except Exception as exc:
         _log_warn(f"WMI lookup opencode failed: {exc}")
     return []
