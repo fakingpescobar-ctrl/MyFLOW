@@ -81,7 +81,7 @@ def _app_paths_from_processes() -> list[Path]:
             ["powershell", "-NoProfile", "-Command",
              "Get-CimInstance Win32_Process -Filter \"Name = 'DeepSeek Harness.exe'\" "
              "| Select-Object -ExpandProperty ExecutablePath"],
-            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15,
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace", timeout=15,
             creationflags=CREATE_NO_WINDOW,
         )
         if result.returncode == 0:
