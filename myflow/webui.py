@@ -200,11 +200,23 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(length) or b"{}")
             action, value = body.get("action"), body.get("value")
+            ok, message = False, "не понял действие"
             if action == "module":
-                ok, message = self.apply("toggle", value)
+                # TUI переключает модуль, вызывая control_apply(ключ, ...). Точную
+                # форму угадывать не нужно: пробуем то, что понимает приложение, и
+                # берём первый успешный вариант.
+                for call in ((value, None), ("toggle", value), (value, 1),
+                             (value, True)):
+                    ok, message = self.apply(*call)
+                    if ok:
+                        break
             elif action == "adjust":
                 key, _, delta = str(value).partition(":")
-                ok, message = self.apply("adjust", (key, int(delta or 1)))
+                step = int(delta or 1)
+                for call in ((key, step), ("adjust", (key, step)), (key, "right")):
+                    ok, message = self.apply(*call)
+                    if ok:
+                        break
             else:
                 ok, message = self.apply(action, value)
             self._send(json.dumps({"ok": bool(ok), "message": message},
