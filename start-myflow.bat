@@ -9,13 +9,8 @@ title MyFLOW
 setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 
-rem --- rezhim TUI: server interfeysa NE podnimaem (rezhim UI - otdelnyy
-rem     batnik ui.bat, on i podnimaet prilozhenie, i otkryvaet okno) ---
-set "MYFLOW_WEBUI=0"
-
 rem --- 0. esli MyFLOW uzhe zapushchen (inache dva PTT na odnu knopku) ---
-rem     proveryaem imenno prilozhenie (modul tui): server interfeysa
-rem     (myflow.webui) rabotaet ryadom i meshat ne dolzhen
+rem     proveryaem imenno prilozhenie (modul tui), chtoby ne zapustit vtoroe
 powershell -NoProfile -Command "$p=Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | Where-Object { $_.CommandLine -like '*myflow.tui*' }; if ($p) { exit 2 } else { exit 0 }" >nul 2>&1
 if errorlevel 2 (
   echo [MyFLOW] uzhe zapushchen. Zakroy staroe okno MyFLOW.
