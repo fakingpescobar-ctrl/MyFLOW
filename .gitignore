@@ -28,3 +28,9 @@ data/validation/
 # Тест «чтение вслух»: эталонный текст книги — только локально (авторское право)
 data/bench/private/
 
+
+# сборка окна Tauri: артефакты Rust не храним в репозитории
+myflow-ui/src-tauri/target/
+myflow-ui/node_modules/
+myflow-ui/src-tauri/gen/
+*.pdb
