@@ -103,7 +103,7 @@ def _find_opencode_pids() -> list[int]:
              "[Console]::OutputEncoding=[Text.Encoding]::UTF8; "
              "Get-CimInstance Win32_Process -Filter \"Name = 'opencode.exe'\" "
              "| Select-Object ProcessId, CommandLine | ConvertTo-Json"],
-            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10,
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace", timeout=10,
             encoding="utf-8", errors="replace",
             creationflags=CREATE_NO_WINDOW,
         )
