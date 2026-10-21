@@ -29,8 +29,5 @@ data/validation/
 data/bench/private/
 
 
-# сборка окна Tauri: артефакты Rust не храним в репозитории
-myflow-ui/src-tauri/target/
-myflow-ui/node_modules/
-myflow-ui/src-tauri/gen/
+# отладочные символы MSVC (Windows-сборки)
 *.pdb
