@@ -1,7 +1,8 @@
 @echo off
 rem ============================================================
-rem  MyFLOW: skachat modeli (whisper ~547 MB, GigaAM ~214 MB).
-rem  Postprocessor edet v postavke vmeste s MyFLOW.
+rem  MyFLOW: skachat modeli (whisper ~547 MB).
+rem  GigaAM (~214 MB) skachaetsya sam pri pervom raspoznavanii.
+rem  LLM-mudel' i postprocessor v git ne lezhat - sm. README.md.
 rem
 rem  Kachka s dokachkoy: esli obryvaetsya - zapusti snova,
 rem  prodolzhit s togo zhe mesta.
