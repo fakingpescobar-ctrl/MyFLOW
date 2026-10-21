@@ -14,23 +14,27 @@
     python tools/fetch_models.py            # скачать недостающее
     python tools/fetch_models.py --check     # только показать, чего нет
 """
+
 from __future__ import annotations
 
 import argparse
-import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from myflow.bootstrap import MODEL_FILES, download_model
+
 MODELS = ROOT / "models"
 HF = "https://huggingface.co/{repo}/resolve/main/{name}"
 
-# (что, куда, откуда, сколько МБ примерно)
+# Whisper живёт в bootstrap (там же — URL, размер и докачка).
+# Здесь только порог «файл считается скачанным».
+WHISPER_MODEL = next(m for m in MODEL_FILES if m.label == "ASR whisper")
 WHISPER = {
     "what": "whisper large-v3-turbo",
-    "path": MODELS / "ggml-large-v3-turbo-q5_0.bin",
-    "url": HF.format(repo="ggerganov/whisper.cpp",
-                     name="ggml-large-v3-turbo-q5_0.bin"),
+    "path": WHISPER_MODEL.destination(),
     "min_mb": 400,
 }
 
@@ -39,26 +43,10 @@ def size_mb(path: Path) -> float:
     return path.stat().st_size / 2**20 if path.exists() else 0.0
 
 
-def download(url: str, target: Path) -> bool:
-    """Скачать с докачкой; вернуть True, если файл на месте и не пустой."""
-    target.parent.mkdir(parents=True, exist_ok=True)
-    cmd = ["curl.exe", "-L", "-C", "-", "--retry", "5", "--retry-delay", "5",
-           "--speed-limit", "50000", "--speed-time", "60", "--max-time", "3600",
-           "-o", str(target), url]
-    print(f"    качаю {target.name} ...")
-    try:
-        result = subprocess.run(cmd, cwd=str(ROOT))
-    except Exception as exc:  # noqa: BLE001
-        print(f"    не смог запустить curl: {exc!r}", file=sys.stderr)
-        return False
-    if result.returncode != 0:
-        print(f"    curl вернул код {result.returncode} (файл можно докачать повторным "
-              f"запуском — докачка включена)", file=sys.stderr)
-    return size_mb(target) > 1
-
-
 def check_whisper() -> bool:
-    return size_mb(WHISPER["path"]) >= WHISPER["min_mb"]
+    """Готово ли. Порог — тот же, что в bootstrap (размер с допуском 1 %):
+    оборванный файл не должен считаться скачанным."""
+    return WHISPER_MODEL.present()
 
 
 def check_gigaam() -> tuple[bool, Path | None]:
@@ -87,10 +75,12 @@ def main() -> int:
     missing: list[str] = []
 
     whisper_ok = check_whisper()
-    print(f"  [{'ok' if whisper_ok else 'НЕТ'}] whisper: "
-          f"{size_mb(WHISPER['path']):.0f} МБ")
+    print(
+        f"  [{'ok' if whisper_ok else 'НЕТ'}] whisper: "
+        f"{size_mb(WHISPER['path']):.0f} МБ"
+    )
     if not whisper_ok and not args.check:
-        if download(WHISPER["url"], WHISPER["path"]):
+        if download_model(WHISPER_MODEL):
             whisper_ok = True
             print(f"    готово: {size_mb(WHISPER['path']):.0f} МБ")
         else:
@@ -99,17 +89,25 @@ def main() -> int:
         missing.append("whisper (этот скрипт)")
 
     giga_ok, giga_path = check_gigaam()
-    print(f"  [{'ok' if giga_ok else 'НЕТ'}] GigaAM v3 e2e: "
-          f"{size_mb(giga_path) if giga_path else 0:.0f} МБ")
+    print(
+        f"  [{'ok' if giga_ok else 'НЕТ'}] GigaAM v3 e2e: "
+        f"{size_mb(giga_path) if giga_path else 0:.0f} МБ"
+    )
     if not giga_ok:
-        missing.append("GigaAM — скачается сам при первом запуске "
-                       "распознавания (нужен интернет один раз)")
+        missing.append(
+            "GigaAM — скачается сам при первом запуске "
+            "распознавания (нужен интернет один раз)"
+        )
 
     post_ok, post_mb = check_postproc()
-    print(f"  [{'ok' if post_ok else 'НЕТ'}] постпроцессор (наша LoRA): {post_mb:.0f} МБ")
+    print(
+        f"  [{'ok' if post_ok else 'НЕТ'}] постпроцессор (наша LoRA): {post_mb:.0f} МБ"
+    )
     if not post_ok:
-        missing.append("постпроцессор — он едет в поставке вместе с MyFLOW "
-                       "(myflow-postproc-*.gguf в папке models/)")
+        missing.append(
+            "постпроцессор — он едет в поставке вместе с MyFLOW "
+            "(myflow-postproc-*.gguf в папке models/)"
+        )
 
     print()
     if missing:

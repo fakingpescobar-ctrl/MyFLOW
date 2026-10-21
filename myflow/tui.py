@@ -21,6 +21,7 @@
 Флаги:   --no-servers (не поднимать серверы), --demo (витрина для скриншота),
          --screen panel|dashboard|settings, --hold N (секунд держать кадр).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -53,9 +54,9 @@ def fg(n: int) -> str:
 C_TEXT = fg(252)
 C_DIM = fg(244)
 C_ACCENT = fg(45)
-C_INV = CSI + "7m"       # инверсия — для главной «кнопки» и выделения
-C_BORDER_DIM = fg(238)   # рамка кадра: тише, чем содержимое
-C_KEY = fg(250)          # цвет скобок вокруг клавиш
+C_INV = CSI + "7m"  # инверсия — для главной «кнопки» и выделения
+C_BORDER_DIM = fg(238)  # рамка кадра: тише, чем содержимое
+C_KEY = fg(250)  # цвет скобок вокруг клавиш
 C_OK = fg(114)
 C_WARN = fg(214)
 C_ERR = fg(203)
@@ -65,9 +66,21 @@ C_TITLE = fg(81)
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 # Многоколоночные эмодзи из логов ломают выравнивание рамки — заменяем на ASCII.
 _GLYPHS = {
-    "●": "*", "○": "-", "⚙": "~", "✓": "+", "✗": "!", "…": "...",
-    "¶": "P", "⎌": "U", "↻": "R", "⌘": ">", "·": "-", "→": "->",
-    "🎤": "mic", "«": '"', "»": '"',
+    "●": "*",
+    "○": "-",
+    "⚙": "~",
+    "✓": "+",
+    "✗": "!",
+    "…": "...",
+    "¶": "P",
+    "⎌": "U",
+    "↻": "R",
+    "⌘": ">",
+    "·": "-",
+    "→": "->",
+    "🎤": "mic",
+    "«": '"',
+    "»": '"',
 }
 
 
@@ -103,8 +116,10 @@ def outer_frame(title: str, body: Sequence[str], w: int, h: int) -> list[str]:
     inner = w - 2
     # Рамка приглушённая, заголовок — акцентный: контент читается легче.
     frame_c = C_BORDER_DIM
-    top = (f"{frame_c}╔═{RESET}{BOLD}{C_TITLE}{label}{RESET}"
-           f"{frame_c}" + "═" * max(0, inner - 1 - len(label)) + f"╗{RESET}")
+    top = (
+        f"{frame_c}╔═{RESET}{BOLD}{C_TITLE}{label}{RESET}"
+        f"{frame_c}" + "═" * max(0, inner - 1 - len(label)) + f"╗{RESET}"
+    )
     bottom = f"{frame_c}╚" + "═" * inner + f"╝{RESET}"
     lines = [top]
     room = h - 2
@@ -125,7 +140,9 @@ def block(title: str, rows: Sequence[str], w: int, focused: bool = False) -> lis
     if len(label) > inner - 2:
         label = label[: max(0, inner - 2)]
     dashes = "─" * max(0, inner - 1 - len(label))
-    out = [f"{color}┌─{RESET}{BOLD if focused else ''}{label}{RESET}{color}{dashes}┐{RESET}"]
+    out = [
+        f"{color}┌─{RESET}{BOLD if focused else ''}{label}{RESET}{color}{dashes}┐{RESET}"
+    ]
     for r in rows:
         out.append(f"{color}│{RESET}" + pad_to(" " + r, inner) + f"{color}│{RESET}")
     out.append(f"{color}└" + "─" * inner + f"┘{RESET}")
@@ -133,14 +150,23 @@ def block(title: str, rows: Sequence[str], w: int, focused: bool = False) -> lis
 
 
 def status_color(state: str) -> str:
-    return {"ok": C_OK, "external": C_OK, "starting": C_WARN,
-            "down": C_DIM, "error": C_ERR}.get(state, C_DIM)
+    return {
+        "ok": C_OK,
+        "external": C_OK,
+        "starting": C_WARN,
+        "down": C_DIM,
+        "error": C_ERR,
+    }.get(state, C_DIM)
 
 
 # main.py передаёт цвета в HEX (#f5c542 и т.п.) — переводим в ANSI 256.
 _HEX_MAP = {
-    "#f5c542": C_WARN, "#46a758": C_OK, "#e5484d": C_ERR,
-    "#9aa0a6": C_DIM, "#f2f5f7": C_TEXT, "#e8e8e8": C_TEXT,
+    "#f5c542": C_WARN,
+    "#46a758": C_OK,
+    "#e5484d": C_ERR,
+    "#9aa0a6": C_DIM,
+    "#f2f5f7": C_TEXT,
+    "#e8e8e8": C_TEXT,
 }
 
 
@@ -160,8 +186,13 @@ def hex_to_ansi(color: str) -> str:
 
 
 def status_label(state: str) -> str:
-    return {"ok": "работает", "external": "работает (внешний)", "starting": "запускается",
-            "down": "не запущен", "error": "ОШИБКА"}.get(state, state)
+    return {
+        "ok": "работает",
+        "external": "работает (внешний)",
+        "starting": "запускается",
+        "down": "не запущен",
+        "error": "ОШИБКА",
+    }.get(state, state)
 
 
 # ---- разбор клавиш ----
@@ -170,25 +201,58 @@ def status_label(state: str) -> str:
 # таблицу {H,P,K,M}, поэтому F5 (\x00 + «?») не распознавался и «пересканировать
 # микрофоны» не срабатывало вообще.
 _EXT_KEYS: dict[int, dict[bytes, str]] = {
-    0x00: {   # \x00 — функциональные клавиши
-        b";": "f1", b"<": "f2", b"=": "f3", b">": "f4", b"?": "f5",
-        b"@": "f6", b"A": "f7", b"B": "f8", b"C": "f9", b"D": "f10",
-        b"W": "f11", b"X": "f12", b"S": "delete", b"G": "home", b"O": "end",
+    0x00: {  # \x00 — функциональные клавиши
+        b";": "f1",
+        b"<": "f2",
+        b"=": "f3",
+        b">": "f4",
+        b"?": "f5",
+        b"@": "f6",
+        b"A": "f7",
+        b"B": "f8",
+        b"C": "f9",
+        b"D": "f10",
+        b"W": "f11",
+        b"X": "f12",
+        b"S": "delete",
+        b"G": "home",
+        b"O": "end",
     },
-    0xE0: {   # \xe0 — стрелки и навигация
-        b"H": "up", b"P": "down", b"K": "left", b"M": "right",
-        b"S": "delete", b"G": "home", b"O": "end",
+    0xE0: {  # \xe0 — стрелки и навигация
+        b"H": "up",
+        b"P": "down",
+        b"K": "left",
+        b"M": "right",
+        b"S": "delete",
+        b"G": "home",
+        b"O": "end",
     },
 }
 
 # Windows Terminal (VT-ввод) может прислать F5 как ESC-последовательность \x1b[15~
 _VT_KEYS: dict[str, str] = {
-    "A": "up", "B": "down", "C": "right", "D": "left",
-    "H": "home", "F": "end", "2~": "insert", "3~": "delete",
-    "5~": "pageup", "6~": "pagedown",
-    "11~": "f1", "12~": "f2", "13~": "f3", "14~": "f4", "15~": "f5",
-    "17~": "f6", "18~": "f7", "19~": "f8", "20~": "f9", "21~": "f10",
-    "23~": "f11", "24~": "f12",
+    "A": "up",
+    "B": "down",
+    "C": "right",
+    "D": "left",
+    "H": "home",
+    "F": "end",
+    "2~": "insert",
+    "3~": "delete",
+    "5~": "pageup",
+    "6~": "pagedown",
+    "11~": "f1",
+    "12~": "f2",
+    "13~": "f3",
+    "14~": "f4",
+    "15~": "f5",
+    "17~": "f6",
+    "18~": "f7",
+    "19~": "f8",
+    "20~": "f9",
+    "21~": "f10",
+    "23~": "f11",
+    "24~": "f12",
 }
 
 
@@ -211,10 +275,10 @@ def map_mouse_sequence(seq: str) -> str | None:
     if not m:
         return None
     code, x, y, kind = int(m.group(1)), int(m.group(2)), int(m.group(3)), m.group(4)
-    if code & 64:                                   # колесо
+    if code & 64:  # колесо
         direction = "down" if code & 1 else "up"
         return f"wheel{direction}:{x},{y}"
-    if code & 32:                                   # движение с кнопкой
+    if code & 32:  # движение с кнопкой
         return f"drag:{x},{y}"
     return f"click:{x},{y}" if kind == "M" else f"release:{x},{y}"
 
@@ -251,8 +315,9 @@ def fit_width(line: str, width: int) -> str:
     return "".join(out) + RESET
 
 
-def button_bar(buttons: Sequence[tuple[str, str]], width: int,
-               primary: str | None = None) -> list[str]:
+def button_bar(
+    buttons: Sequence[tuple[str, str]], width: int, primary: str | None = None
+) -> list[str]:
     """Полоска «кнопок»: [F5] пересканировать  [Enter] запустить …
 
     buttons — пары (клавиша, подпись). primary — клавиша главного действия,
@@ -260,11 +325,14 @@ def button_bar(buttons: Sequence[tuple[str, str]], width: int,
     строку — переносим на следующую (раньше хвост молча обрезался вместе с
     подписями, из-за чего казалось, что «кнопок нет»).
     """
+
     def render(key: str, label: str) -> str:
         if primary and key == primary:
             return f"{C_INV}{BOLD} {key} {label} {RESET}"
-        return (f"{C_KEY}[{RESET}{C_ACCENT}{key}{RESET}{C_KEY}]{RESET}"
-                f"{C_DIM} {label} {RESET}")
+        return (
+            f"{C_KEY}[{RESET}{C_ACCENT}{key}{RESET}{C_KEY}]{RESET}"
+            f"{C_DIM} {label} {RESET}"
+        )
 
     lines: list[str] = []
     current = ""
@@ -282,8 +350,9 @@ def button_bar(buttons: Sequence[tuple[str, str]], width: int,
 
 
 # ----------------------------------------------------------------- консоль
-def size_plan(cur: tuple[int, int], want: tuple[int, int],
-              spare: int = 300) -> tuple[int, int, int, int]:
+def size_plan(
+    cur: tuple[int, int], want: tuple[int, int], spare: int = 300
+) -> tuple[int, int, int, int]:
     """Что ставить окну и буферу: (ширина_окна, высота_окна, ширина_буфера, высота_буфера).
 
     Буфер ВСЕГДА выше окна — даже если окно уже нужного размера. Это не
@@ -306,8 +375,10 @@ def buffer_rows_for(window_rows: int, spare: int = 300) -> int:
     лишние строки уходят в историю и кадр не двигают. От прокрутки колесом
     защищает мышиный режим (see Console.enable_mouse), а не размер буфера.
     """
-    return max(int(window_rows) + 300 if spare == 300 else int(window_rows) + int(spare),
-               int(window_rows))
+    return max(
+        int(window_rows) + 300 if spare == 300 else int(window_rows) + int(spare),
+        int(window_rows),
+    )
 
 
 class Console:
@@ -332,7 +403,7 @@ class Console:
     def _enable_vt() -> bool:
         try:
             k = ctypes.windll.kernel32
-            handle = k.GetStdHandle(-11)                      # STD_OUTPUT_HANDLE
+            handle = k.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
             mode = ctypes.c_ulong()
             if not k.GetConsoleMode(handle, ctypes.byref(mode)):
                 return False
@@ -359,6 +430,7 @@ class Console:
         терминал прокрутит содержимое и кадр «слипнется» (проверено скриншотом).
         """
         import os
+
         if os.environ.get("WT_SESSION", "").strip():
             return True
         try:
@@ -376,21 +448,32 @@ class Console:
     def raw_size(self) -> tuple[int, int]:
         """Истинный размер видимого окна (без вычета строки под легенду)."""
         try:
+
             class _Coord(ctypes.Structure):
                 _fields_ = [("X", ctypes.c_short), ("Y", ctypes.c_short)]
 
             class _SmallRect(ctypes.Structure):
-                _fields_ = [("Left", ctypes.c_short), ("Top", ctypes.c_short),
-                            ("Right", ctypes.c_short), ("Bottom", ctypes.c_short)]
+                _fields_ = [
+                    ("Left", ctypes.c_short),
+                    ("Top", ctypes.c_short),
+                    ("Right", ctypes.c_short),
+                    ("Bottom", ctypes.c_short),
+                ]
 
             class _Csbi(ctypes.Structure):
-                _fields_ = [("dwSize", _Coord), ("dwCursorPosition", _Coord),
-                            ("wAttributes", ctypes.c_ushort), ("srWindow", _SmallRect),
-                            ("dwMaximumWindowSize", _Coord)]
+                _fields_ = [
+                    ("dwSize", _Coord),
+                    ("dwCursorPosition", _Coord),
+                    ("wAttributes", ctypes.c_ushort),
+                    ("srWindow", _SmallRect),
+                    ("dwMaximumWindowSize", _Coord),
+                ]
 
             handle = ctypes.windll.kernel32.GetStdHandle(-11)
             info = _Csbi()
-            if ctypes.windll.kernel32.GetConsoleScreenBufferInfo(handle, ctypes.byref(info)):
+            if ctypes.windll.kernel32.GetConsoleScreenBufferInfo(
+                handle, ctypes.byref(info)
+            ):
                 width = info.srWindow.Right - info.srWindow.Left + 1
                 height = info.srWindow.Bottom - info.srWindow.Top + 1
                 if width > 0 and height > 0:
@@ -399,6 +482,7 @@ class Console:
             pass
         try:
             import shutil as _sh
+
             ts = _sh.get_terminal_size()
             return int(ts.columns), int(ts.lines)
         except Exception:  # noqa: BLE001
@@ -430,8 +514,12 @@ class Console:
                 _fields_ = [("X", ctypes.c_short), ("Y", ctypes.c_short)]
 
             class _SmallRect(ctypes.Structure):
-                _fields_ = [("Left", ctypes.c_short), ("Top", ctypes.c_short),
-                            ("Right", ctypes.c_short), ("Bottom", ctypes.c_short)]
+                _fields_ = [
+                    ("Left", ctypes.c_short),
+                    ("Top", ctypes.c_short),
+                    ("Right", ctypes.c_short),
+                    ("Bottom", ctypes.c_short),
+                ]
 
             def set_buffer(w: int, h: int) -> bool:
                 return bool(k.SetConsoleScreenBufferSize(handle, _Coord(w, h)))
@@ -453,10 +541,10 @@ class Console:
                 return want_w, want_h
 
             if want_w > cur_w or want_h > cur_h:
-                set_buffer(max(want_w, cur_w), max(want_h, cur_h))   # растим буфер
+                set_buffer(max(want_w, cur_w), max(want_h, cur_h))  # растим буфер
                 set_window(want_w, want_h)
             else:
-                set_window(want_w, want_h)                           # сперва окно
+                set_window(want_w, want_h)  # сперва окно
             # Буфер ВЫШЕ окна: иначе каждый посторонний лог прокручивает экран и
             # кадр съезжает (проверено: буфер=окно -> после 3 строк лога «куча»,
             # буфер с запасом -> кадр на месте).
@@ -468,7 +556,7 @@ class Console:
         # Диагностика: если размер не совпал с желаемым, значит терминал его не
         # принял (бывает в Windows Terminal: окно принадлежит ему, а не нам).
         # Запоминаем это, чтобы честно сказать пользователю, а не молчать.
-        self.size_refused = (raw != (want_w, want_h))
+        self.size_refused = raw != (want_w, want_h)
         return raw
 
     def enable_mouse(self) -> None:
@@ -477,7 +565,7 @@ class Console:
             return
         try:
             k = ctypes.windll.kernel32
-            handle = k.GetStdHandle(-10)                      # STD_INPUT_HANDLE
+            handle = k.GetStdHandle(-10)  # STD_INPUT_HANDLE
             mode = ctypes.c_ulong()
             if k.GetConsoleMode(handle, ctypes.byref(mode)):
                 # ENABLE_VIRTUAL_TERMINAL_INPUT = 0x0200
@@ -507,21 +595,32 @@ class Console:
         задуманным кадром и тем, что оказалось в консоли.
         """
         try:
+
             class _Coord(ctypes.Structure):
                 _fields_ = [("X", ctypes.c_short), ("Y", ctypes.c_short)]
 
             class _SmallRect(ctypes.Structure):
-                _fields_ = [("Left", ctypes.c_short), ("Top", ctypes.c_short),
-                            ("Right", ctypes.c_short), ("Bottom", ctypes.c_short)]
+                _fields_ = [
+                    ("Left", ctypes.c_short),
+                    ("Top", ctypes.c_short),
+                    ("Right", ctypes.c_short),
+                    ("Bottom", ctypes.c_short),
+                ]
 
             class _Csbi(ctypes.Structure):
-                _fields_ = [("dwSize", _Coord), ("dwCursorPosition", _Coord),
-                            ("wAttributes", ctypes.c_ushort), ("srWindow", _SmallRect),
-                            ("dwMaximumWindowSize", _Coord)]
+                _fields_ = [
+                    ("dwSize", _Coord),
+                    ("dwCursorPosition", _Coord),
+                    ("wAttributes", ctypes.c_ushort),
+                    ("srWindow", _SmallRect),
+                    ("dwMaximumWindowSize", _Coord),
+                ]
 
             handle = ctypes.windll.kernel32.GetStdHandle(-11)
             info = _Csbi()
-            ctypes.windll.kernel32.GetConsoleScreenBufferInfo(handle, ctypes.byref(info))
+            ctypes.windll.kernel32.GetConsoleScreenBufferInfo(
+                handle, ctypes.byref(info)
+            )
             win_w = info.srWindow.Right - info.srWindow.Left + 1
             win_h = info.srWindow.Bottom - info.srWindow.Top + 1
             rows: list[str] = []
@@ -529,16 +628,20 @@ class Console:
             written = ctypes.c_ulong()
             for y in range(info.srWindow.Top, info.srWindow.Bottom + 1):
                 ctypes.windll.kernel32.ReadConsoleOutputCharacterW(
-                    handle, buf, win_w, _Coord(0, y), ctypes.byref(written))
+                    handle, buf, win_w, _Coord(0, y), ctypes.byref(written)
+                )
                 rows.append(buf.value[: written.value].rstrip())
             import os as _os
-            head = [f"окно={win_w}x{win_h} буфер={info.dwSize.X}x{info.dwSize.Y} "
-                    f"вьюпорт_top={info.srWindow.Top}",
-                    f"WT_SESSION={'ДА' if _os.environ.get('WT_SESSION') else 'нет'} "
-                    f"WT считаем={self.is_windows_terminal()} "
-                    f"размер фиксировали={getattr(self, '_locked_size', None)}",
-                    f"нарисованных строк в кадре={len(intended or [])}",
-                    "=== ЭКРАН (как видит пользователь) ==="]
+
+            head = [
+                f"окно={win_w}x{win_h} буфер={info.dwSize.X}x{info.dwSize.Y} "
+                f"вьюпорт_top={info.srWindow.Top}",
+                f"WT_SESSION={'ДА' if _os.environ.get('WT_SESSION') else 'нет'} "
+                f"WT считаем={self.is_windows_terminal()} "
+                f"размер фиксировали={getattr(self, '_locked_size', None)}",
+                f"нарисованных строк в кадре={len(intended or [])}",
+                "=== ЭКРАН (как видит пользователь) ===",
+            ]
             out = head + [f"{i + 1:>3}|{r}" for i, r in enumerate(rows)]
             if intended:
                 out += ["", "=== ЧТО МЫ ХОТЕЛИ НАРИСОВАТЬ ==="]
@@ -559,21 +662,32 @@ class Console:
         вывод), значит кадр сдвинулся и его надо нарисовать заново целиком.
         """
         try:
+
             class _Coord(ctypes.Structure):
                 _fields_ = [("X", ctypes.c_short), ("Y", ctypes.c_short)]
 
             class _SmallRect(ctypes.Structure):
-                _fields_ = [("Left", ctypes.c_short), ("Top", ctypes.c_short),
-                            ("Right", ctypes.c_short), ("Bottom", ctypes.c_short)]
+                _fields_ = [
+                    ("Left", ctypes.c_short),
+                    ("Top", ctypes.c_short),
+                    ("Right", ctypes.c_short),
+                    ("Bottom", ctypes.c_short),
+                ]
 
             class _Csbi(ctypes.Structure):
-                _fields_ = [("dwSize", _Coord), ("dwCursorPosition", _Coord),
-                            ("wAttributes", ctypes.c_ushort), ("srWindow", _SmallRect),
-                            ("dwMaximumWindowSize", _Coord)]
+                _fields_ = [
+                    ("dwSize", _Coord),
+                    ("dwCursorPosition", _Coord),
+                    ("wAttributes", ctypes.c_ushort),
+                    ("srWindow", _SmallRect),
+                    ("dwMaximumWindowSize", _Coord),
+                ]
 
             handle = ctypes.windll.kernel32.GetStdHandle(-11)
             info = _Csbi()
-            if ctypes.windll.kernel32.GetConsoleScreenBufferInfo(handle, ctypes.byref(info)):
+            if ctypes.windll.kernel32.GetConsoleScreenBufferInfo(
+                handle, ctypes.byref(info)
+            ):
                 return int(info.srWindow.Top)
         except Exception:  # noqa: BLE001
             pass
@@ -589,22 +703,32 @@ class Console:
         Берём `srWindow` из GetConsoleScreenBufferInfo.
         """
         try:
+
             class _Coord(ctypes.Structure):
                 _fields_ = [("X", ctypes.c_short), ("Y", ctypes.c_short)]
 
             class _SmallRect(ctypes.Structure):
-                _fields_ = [("Left", ctypes.c_short), ("Top", ctypes.c_short),
-                            ("Right", ctypes.c_short), ("Bottom", ctypes.c_short)]
+                _fields_ = [
+                    ("Left", ctypes.c_short),
+                    ("Top", ctypes.c_short),
+                    ("Right", ctypes.c_short),
+                    ("Bottom", ctypes.c_short),
+                ]
 
             class _Csbi(ctypes.Structure):
-                _fields_ = [("dwSize", _Coord), ("dwCursorPosition", _Coord),
-                            ("wAttributes", ctypes.c_ushort), ("srWindow", _SmallRect),
-                            ("dwMaximumWindowSize", _Coord)]
+                _fields_ = [
+                    ("dwSize", _Coord),
+                    ("dwCursorPosition", _Coord),
+                    ("wAttributes", ctypes.c_ushort),
+                    ("srWindow", _SmallRect),
+                    ("dwMaximumWindowSize", _Coord),
+                ]
 
             handle = ctypes.windll.kernel32.GetStdHandle(-11)
             info = _Csbi()
-            if ctypes.windll.kernel32.GetConsoleScreenBufferInfo(handle,
-                                                                 ctypes.byref(info)):
+            if ctypes.windll.kernel32.GetConsoleScreenBufferInfo(
+                handle, ctypes.byref(info)
+            ):
                 width = info.srWindow.Right - info.srWindow.Left + 1
                 height = info.srWindow.Bottom - info.srWindow.Top + 1
                 if width > 0 and height > 0:
@@ -647,7 +771,7 @@ class Console:
             if i < len(prev) and prev[i] == ln:
                 continue
             buf.append(f"{CSI}{i + 1};1H{ln}{CSI}K")
-        for i in range(len(visible), len(prev)):       # кадр стал короче
+        for i in range(len(visible), len(prev)):  # кадр стал короче
             buf.append(f"{CSI}{i + 1};1H{CSI}K")
         if buf:
             self.out.write("".join(buf))
@@ -659,7 +783,7 @@ class Console:
         if self.vt:
             self.out.write(CSI + "2J" + CSI + "H")
         self.out.flush()
-        self._last_frame = []          # после очистки кадр рисуем целиком
+        self._last_frame = []  # после очистки кадр рисуем целиком
 
     def reset(self) -> None:
         self.out.write(RESET + CSI + "?25h")
@@ -673,7 +797,9 @@ class PaneSink(io.TextIOBase):
     В консоль НЕ пишем: кадр рисует сам TUI, любой посторонний вывод его сломает.
     """
 
-    def __init__(self, pane: "TuiState", log_file: Path | None, max_lines: int = 400) -> None:
+    def __init__(
+        self, pane: "TuiState", log_file: Path | None, max_lines: int = 400
+    ) -> None:
         super().__init__()
         self.pane = pane
         self.max_lines = max_lines
@@ -684,7 +810,9 @@ class PaneSink(io.TextIOBase):
             try:
                 log_file.parent.mkdir(parents=True, exist_ok=True)
                 self._fh = open(log_file, "a", encoding="utf-8", errors="replace")
-                self._fh.write(f"\n=== TUI-сессия {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+                self._fh.write(
+                    f"\n=== TUI-сессия {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n"
+                )
                 self._fh.flush()
             except Exception:  # noqa: BLE001
                 self._fh = None
@@ -737,7 +865,7 @@ class TuiState:
     status_text: str = "ожидание"
     status_color: str = C_DIM
     log: list[str] = field(default_factory=list)
-    servers: dict = field(default_factory=dict)   # key -> dict(state, note, ms)
+    servers: dict = field(default_factory=dict)  # key -> dict(state, note, ms)
     lock: threading.Lock = field(default_factory=threading.Lock)
     started_at: float = field(default_factory=time.monotonic)
     phrases: int = 0
@@ -778,7 +906,12 @@ class TuiState:
 
     def snapshot(self):
         with self.lock:
-            return (self.status_text, self.status_color, list(self.log), dict(self.servers))
+            return (
+                self.status_text,
+                self.status_color,
+                list(self.log),
+                dict(self.servers),
+            )
 
 
 # ----------------------------------------------------------------- серверы
@@ -806,12 +939,14 @@ class ServerSpec:
 def models_dir() -> Path:
     """Каталог моделей: рядом с проектом (<repo>/models), см. myflow.config."""
     from myflow.config import models_dir as _models_dir
+
     return _models_dir()
 
 
 def llama_dir() -> Path:
     """Каталог llama.cpp: рядом с проектом (<repo>/bin/llama-cpp)."""
     from myflow.config import llama_dir as _llama_dir
+
     return _llama_dir()
 
 
@@ -859,51 +994,121 @@ def default_specs(root: Path = ROOT) -> list[ServerSpec]:
     """
     models = models_dir()
     from myflow.config import whisper_dir
+
     whisper = whisper_dir() / "Release" / "whisper-server.exe"
-    from myflow.asr import whisper_needed      # локально: без циклических импортов
+    from myflow.asr import whisper_needed  # локально: без циклических импортов
+
     # Модель ASR можно подменить через MYFLOW_WHISPER_MODEL (например, на
     # ggml-large-v3-q5_0.bin для «режима качества»: медленнее в ~4 раза, по
     # замерам на своих записях выигрыша по WER не даёт — см. README).
     from myflow.config import whisper_model_path
+
     whisper_model = whisper_model_path()
     specs: list[ServerSpec] = []
     # whisper-сервер поднимаем ТОЛЬКО если он реально нужен: при бэкенде GigaAM
     # (локальная ONNX-модель на CPU) он занимал бы ~1 ГБ VRAM впустую.
     if whisper_needed():
-        specs.append(ServerSpec(
-            key="asr", title="ASR whisper.cpp", port=8081,
-            url="http://127.0.0.1:8081", health_path="/health",
-            exe=whisper, model=whisper_model,
-            args=["--host", "127.0.0.1", "--port", "8081", "-l", "ru",
-                  "-bs", "5", "-sns", "-t", "4"],
-            log=root / "data" / "asr.log", required=True,
-        ))
-    specs.append(ServerSpec(
-        key="llm", title="LLM Qwen3-4B (полировка)", port=8082,
-        url="http://127.0.0.1:8082", health_path="/v1/models",
-        exe=llama_dir() / "llama-server.exe",
-        model=models / "Qwen3-4B-Instruct-2507-Q8_0.gguf",
-        args=["--host", "127.0.0.1", "--port", "8082", "-c", "8192",
-              "-np", "1", "-kvu", "-ngl", "99", "-fa", "on",
-              "-ctk", "q8_0", "-ctv", "q8_0", "--jinja"],
-        log=root / "data" / "llm.log", required=False,
-    ))
+        specs.append(
+            ServerSpec(
+                key="asr",
+                title="ASR whisper.cpp",
+                port=8081,
+                url="http://127.0.0.1:8081",
+                health_path="/health",
+                exe=whisper,
+                model=whisper_model,
+                args=[
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    "8081",
+                    "-l",
+                    "ru",
+                    "-bs",
+                    "5",
+                    "-sns",
+                    "-t",
+                    "4",
+                ],
+                log=root / "data" / "asr.log",
+                required=True,
+            )
+        )
+    specs.append(
+        ServerSpec(
+            key="llm",
+            title="LLM Qwen3-4B (полировка)",
+            port=8082,
+            url="http://127.0.0.1:8082",
+            health_path="/v1/models",
+            exe=llama_dir() / "llama-server.exe",
+            model=models / "Qwen3-4B-Instruct-2507-Q8_0.gguf",
+            args=[
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "8082",
+                "-c",
+                "8192",
+                "-np",
+                "1",
+                "-kvu",
+                "-ngl",
+                "99",
+                "-fa",
+                "on",
+                "-ctk",
+                "q8_0",
+                "-ctv",
+                "q8_0",
+                "--jinja",
+            ],
+            log=root / "data" / "llm.log",
+            required=False,
+        )
+    )
     # Дообученный постпроцессор (этап 4): второй сервер, только если модель собрана.
     # Квантизаций может лежать несколько (Q8_0, Q6_K...). Берём самую тяжёлую:
     # в этой серии она же и самая точная (проверено: Q6_K 472 МБ дал 0.113 против
     # 0.098 у Q8_0 на одних и тех же парах). Алфавитный порядок брал Q6_K.
-    postproc_models = sorted(models.glob("myflow-postproc-*.gguf"),
-                             key=lambda path: path.stat().st_size, reverse=True)
+    postproc_models = sorted(
+        models.glob("myflow-postproc-*.gguf"),
+        key=lambda path: path.stat().st_size,
+        reverse=True,
+    )
     if postproc_models:
-        specs.append(ServerSpec(
-            key="postproc", title="Постпроцессор MyFLOW (0.6B)", port=8083,
-            url="http://127.0.0.1:8083", health_path="/v1/models",
-            exe=llama_dir() / "llama-server.exe",
-            model=postproc_models[0],
-            args=["--host", "127.0.0.1", "--port", "8083", "-c", "4096", "-np", "1",
-                  "-kvu", "-ngl", "99", "-fa", "on", "-ctk", "q8_0", "-ctv", "q8_0",
-                  "--jinja"],
-            log=ROOT / "data" / "llm-postproc.log"))
+        specs.append(
+            ServerSpec(
+                key="postproc",
+                title="Постпроцессор MyFLOW (0.6B)",
+                port=8083,
+                url="http://127.0.0.1:8083",
+                health_path="/v1/models",
+                exe=llama_dir() / "llama-server.exe",
+                model=postproc_models[0],
+                args=[
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    "8083",
+                    "-c",
+                    "4096",
+                    "-np",
+                    "1",
+                    "-kvu",
+                    "-ngl",
+                    "99",
+                    "-fa",
+                    "on",
+                    "-ctk",
+                    "q8_0",
+                    "-ctv",
+                    "q8_0",
+                    "--jinja",
+                ],
+                log=ROOT / "data" / "llm-postproc.log",
+            )
+        )
     return specs
 
 
@@ -921,11 +1126,11 @@ class Supervisor:
         self._lock = threading.Lock()
         # Job Object: серверы умрут вместе с процессом MyFLOW (даже при kill -9).
         from myflow.jobobj import ProcessJob
+
         self.job = ProcessJob()
 
     # ---- проверки ----
     @staticmethod
-
     def port_open(port: int, host: str = "127.0.0.1", timeout: float = 0.3) -> bool:
         try:
             with socket.socket() as s:
@@ -938,6 +1143,7 @@ class Supervisor:
     def health(url: str, path: str, timeout: float = 1.5) -> bool:
         try:
             import requests
+
             return bool(requests.get(url + path, timeout=timeout).ok)
         except Exception:  # noqa: BLE001
             return False
@@ -949,7 +1155,9 @@ class Supervisor:
         if self.enabled and spec.key in self._own:
             proc = self._procs.get(spec.key)
             if proc is not None and proc.poll() is not None:
-                note = f"процесс завершился (код {proc.returncode}); лог: {spec.log.name}"
+                note = (
+                    f"процесс завершился (код {proc.returncode}); лог: {spec.log.name}"
+                )
                 return "error", note
         # Наш процесс: пока модель грузится (llama-server открывает порт ПОСЛЕ
         # загрузки 4 ГБ модели, а бывает и раньше) — это НОРМАЛЬНОЕ состояние
@@ -962,8 +1170,10 @@ class Supervisor:
         if self.health(spec.url, spec.health_path):
             return "external", "был запущен раньше"
         if self.port_open(spec.port):
-            return "error", (f"порт {spec.port} занят ЧУЖИМ процессом "
-                             f"(health не отвечает) — освободи порт")
+            return "error", (
+                f"порт {spec.port} занят ЧУЖИМ процессом "
+                f"(health не отвечает) — освободи порт"
+            )
         if not self.enabled:
             return "down", "запуск серверов отключён (--no-servers)"
         return "down", "не запущен"
@@ -989,15 +1199,18 @@ class Supervisor:
             self._errors[spec.key] = missing
             return False
         if self.port_open(spec.port):
-            return True                      # кто-то уже слушает — не трогаем
+            return True  # кто-то уже слушает — не трогаем
         try:
             spec.log.parent.mkdir(parents=True, exist_ok=True)
             fh = open(spec.log, "ab")
             try:
                 proc = subprocess.Popen(
                     [str(spec.exe), "-m", str(spec.model), *spec.args],
-                    stdin=subprocess.DEVNULL, stdout=fh, stderr=subprocess.STDOUT,
-                    cwd=str(ROOT), creationflags=self.CREATE_NO_WINDOW,
+                    stdin=subprocess.DEVNULL,
+                    stdout=fh,
+                    stderr=subprocess.STDOUT,
+                    cwd=str(ROOT),
+                    creationflags=self.CREATE_NO_WINDOW,
                 )
             finally:
                 fh.close()
@@ -1013,21 +1226,25 @@ class Supervisor:
             self._errors[spec.key] = f"не удалось запустить: {exc!r}"
             return False
 
-    def wait_ready(self, spec: ServerSpec, timeout: float,
-                   tick: Callable[[], None] | None = None) -> bool:
+    def wait_ready(
+        self, spec: ServerSpec, timeout: float, tick: Callable[[], None] | None = None
+    ) -> bool:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if self.health(spec.url, spec.health_path):
                 return True
             proc = self._procs.get(spec.key)
             if proc is not None and proc.poll() is not None:
-                self._errors[spec.key] = (f"процесс завершился (код {proc.returncode}); "
-                                          f"лог: {spec.log.name}")
+                self._errors[spec.key] = (
+                    f"процесс завершился (код {proc.returncode}); лог: {spec.log.name}"
+                )
                 return False
             if tick:
                 tick()
             time.sleep(0.4)
-        self._errors[spec.key] = f"не ответил за {int(timeout)} с (лог: {spec.log.name})"
+        self._errors[spec.key] = (
+            f"не ответил за {int(timeout)} с (лог: {spec.log.name})"
+        )
         return False
 
     def stop(self, spec: ServerSpec) -> bool:
@@ -1146,12 +1363,19 @@ class LevelMeter:
                     # Плавное затухание: столбик не дёргается на паузах.
                     self._peak = max(peak, self._peak * 0.99)
 
-            kwargs = dict(samplerate=self.samplerate, channels=1, dtype="float32",
-                          device=device, callback=_cb, blocksize=1024)
+            kwargs = dict(
+                samplerate=self.samplerate,
+                channels=1,
+                dtype="float32",
+                device=device,
+                callback=_cb,
+                blocksize=1024,
+            )
             if self._factory is not None:
                 stream = self._factory(**kwargs)
             else:
                 import sounddevice as sd
+
                 stream = sd.InputStream(**kwargs)
             stream.start()
             self._stream = stream
@@ -1178,14 +1402,15 @@ class LevelMeter:
         """Полоска уровня + метка порога (порог = минимальный пик фразы)."""
         # Логарифмическая шкала: 0.001 -> 0, 1.0 -> ширина
         import math
+
         level = 0.0 if peak <= 0 else min(1.0, max(0.0, (math.log10(peak) + 3) / 3))
         filled = int(round(level * width))
         gate_pos = int(round(((math.log10(gate) + 3) / 3) * width)) if gate > 0 else 0
         cells = []
         for i in range(width):
             if i == gate_pos:
-                cells.append("╎")       # метка порога видна всегда — по ней
-            elif i < filled:            # видно, проходит ли голос
+                cells.append("╎")  # метка порога видна всегда — по ней
+            elif i < filled:  # видно, проходит ли голос
                 cells.append("█")
             else:
                 cells.append("░")
@@ -1215,8 +1440,10 @@ def build_choices(store, mics: list[dict], system_ok: bool) -> SettingsState:
         return mic_notes[i] if i < len(mic_notes) else ""
 
     mode_opts = [("авто — слушает постоянно", "auto"), ("PTT — держишь F8", "ptt")]
-    insert_opts = [("в активное окно (Ctrl+V)", "clipboard"),
-                   ("в чат OpenCode (без фокуса)", "opencode")]
+    insert_opts = [
+        ("в активное окно (Ctrl+V)", "clipboard"),
+        ("в чат OpenCode (без фокуса)", "opencode"),
+    ]
 
     def pick_index(options, value) -> int:
         for i, (_, v) in enumerate(options):
@@ -1224,11 +1451,18 @@ def build_choices(store, mics: list[dict], system_ok: bool) -> SettingsState:
                 return i
         return 0
 
-    state = SettingsState(choices=[
-        Choice("mic", "Микрофон", mic_opts, mic_idx, mic_note),
-        Choice("mode", "Режим диктовки", mode_opts, pick_index(mode_opts, s.mode)),
-        Choice("insert", "Куда вставлять", insert_opts, pick_index(insert_opts, s.insert_method)),
-    ])
+    state = SettingsState(
+        choices=[
+            Choice("mic", "Микрофон", mic_opts, mic_idx, mic_note),
+            Choice("mode", "Режим диктовки", mode_opts, pick_index(mode_opts, s.mode)),
+            Choice(
+                "insert",
+                "Куда вставлять",
+                insert_opts,
+                pick_index(insert_opts, s.insert_method),
+            ),
+        ]
+    )
     return state
 
 
@@ -1240,8 +1474,9 @@ def apply_choices(store, values: dict) -> None:
     store.save()
 
 
-def render_settings(state: SettingsState, store, w: int, h: int,
-                    level: tuple[float, str] | None = None) -> list[str]:
+def render_settings(
+    state: SettingsState, store, w: int, h: int, level: tuple[float, str] | None = None
+) -> list[str]:
     """level = (пик, ошибка) для живого индикатора выделенного микрофона."""
     body: list[str] = []
     inner_w = w - 6
@@ -1270,29 +1505,48 @@ def render_settings(state: SettingsState, store, w: int, h: int,
                 bar = LevelMeter.bar(peak)
                 ok = peak >= 0.01
                 color = C_OK if ok else C_WARN
-                verdict = "проходит порог 0.010" if ok else "тихо — фраза будет отсечена"
-                meter = (f"{C_DIM}уровень {RESET}{color}{bar}{RESET}"
-                         f"{C_DIM} {peak:.4f}{RESET}  "
-                         f"{color}{verdict}{RESET}")
+                verdict = (
+                    "проходит порог 0.010" if ok else "тихо — фраза будет отсечена"
+                )
+                meter = (
+                    f"{C_DIM}уровень {RESET}{color}{bar}{RESET}"
+                    f"{C_DIM} {peak:.4f}{RESET}  "
+                    f"{color}{verdict}{RESET}"
+                )
             body.append(f"   {meter}")
             body.append("")
     cur = store.get()
-    info = (f"{C_DIM}сейчас: микрофон {cur.asr.input_device if cur.asr.input_device is not None else 'системный'}"
-            f" · режим {cur.mode} · вставка {cur.insert_method}{RESET}")
+    info = (
+        f"{C_DIM}сейчас: микрофон {cur.asr.input_device if cur.asr.input_device is not None else 'системный'}"
+        f" · режим {cur.mode} · вставка {cur.insert_method}{RESET}"
+    )
     if h > len(body) + 8:
         body += ["", info, ""]
-    body += ["   " + line for line in button_bar([
-        ("↑↓", "выбор"),
-        ("←→", "раздел"),
-        ("F5", "пересканировать"),
-        ("Enter", "запустить"),
-        ("Esc", "выход"),
-    ], inner_w - 4, primary="Enter")]
+    body += [
+        "   " + line
+        for line in button_bar(
+            [
+                ("↑↓", "выбор"),
+                ("←→", "раздел"),
+                ("F5", "пересканировать"),
+                ("Enter", "запустить"),
+                ("Esc", "выход"),
+            ],
+            inner_w - 4,
+            primary="Enter",
+        )
+    ]
     return outer_frame("MyFLOW · настройки запуска", body, w, h)
 
 
-def render_boot(rows: Sequence[str], w: int, h: int, spin: str, note: str = "") -> list[str]:
-    body = ["", f"  {C_ACCENT}{spin}{RESET}  {C_TEXT}поднимаю локальные серверы...{RESET}", ""]
+def render_boot(
+    rows: Sequence[str], w: int, h: int, spin: str, note: str = ""
+) -> list[str]:
+    body = [
+        "",
+        f"  {C_ACCENT}{spin}{RESET}  {C_TEXT}поднимаю локальные серверы...{RESET}",
+        "",
+    ]
     for r in rows:
         body.append("   " + r)
     if note:
@@ -1342,8 +1596,11 @@ def _module_row(item: dict, selected: bool, width: int, name_w: int = 13) -> str
         mark, mcolor = "○", C_DIM
     # Одинаковая ширина у обоих состояний: иначе колонка «ёлочек» прыгает.
     toggle_plain = "[вкл] " if item.get("on") else "[выкл]"
-    toggle = (f"{C_OK}{toggle_plain}{RESET}" if item.get("on")
-              else f"{C_DIM}{toggle_plain}{RESET}")
+    toggle = (
+        f"{C_OK}{toggle_plain}{RESET}"
+        if item.get("on")
+        else f"{C_DIM}{toggle_plain}{RESET}"
+    )
     prefix = "▸ " if selected else "  "
     name = f"{item['label']:<{name_w}}"
     room = max(6, width - 2 - 2 - name_w - len(toggle_plain) - 1)
@@ -1352,9 +1609,11 @@ def _module_row(item: dict, selected: bool, width: int, name_w: int = 13) -> str
     mark_plain = f"{prefix}{mark} {name}{value_txt}"
     if selected:
         return f"{C_INV}{mark_plain}{' ' * pad}{toggle_plain}{RESET}"
-    return (f"{C_DIM if not selected else C_TEXT}{prefix}{RESET}{mcolor}{mark}{RESET} "
-            f"{C_TEXT if selected else C_DIM}{name}{RESET}"
-            f"{C_DIM}{value_txt}{RESET}{' ' * pad}{toggle}")
+    return (
+        f"{C_DIM if not selected else C_TEXT}{prefix}{RESET}{mcolor}{mark}{RESET} "
+        f"{C_TEXT if selected else C_DIM}{name}{RESET}"
+        f"{C_DIM}{value_txt}{RESET}{' ' * pad}{toggle}"
+    )
 
 
 def _value_row(item: dict, selected: bool, width: int, name_w: int = 17) -> str:
@@ -1369,27 +1628,38 @@ def _value_row(item: dict, selected: bool, width: int, name_w: int = 17) -> str:
         return f"{C_INV}{plain}{RESET}"
     arrows = f"{C_KEY}◀{RESET}"
     arrows_r = f"{C_KEY}▶{RESET}"
-    return (f"{C_DIM}{prefix}{RESET}{C_TEXT}{label}{RESET}"
-            f" {arrows} {C_TEXT}{value}{RESET}{' ' * pad} {arrows_r}")
+    return (
+        f"{C_DIM}{prefix}{RESET}{C_TEXT}{label}{RESET}"
+        f" {arrows} {C_TEXT}{value}{RESET}{' ' * pad} {arrows_r}"
+    )
 
 
 def key_legend(width: int, module_hint: str | None = None) -> list[str]:
     """Легенда клавиш с подписями (переносится по ширине, ничего не обрезается)."""
-    chips = [("↑↓", "строка"), ("←→", "значение"), ("Enter", "вкл/выкл"),
-             ("PgUp/PgDn", "журнал"), ("End", "живой лог"), ("s", "серверы"),
-             ("r", "мастер"), ("q", "выход"),
-             ("F6", "привязать окно"), ("F7", "стиль"), ("F8", "запись/стоп"),
-             ("F9", "отмена"), ("F10", "вставить отложенное"),
-             ("F5", "пересканировать микрофоны"),
-             ("F11", "выгрузить/поднять LLM")]
+    chips = [
+        ("↑↓", "строка"),
+        ("←→", "значение"),
+        ("Enter", "вкл/выкл"),
+        ("PgUp/PgDn", "журнал"),
+        ("End", "живой лог"),
+        ("s", "серверы"),
+        ("r", "мастер"),
+        ("q", "выход"),
+        ("F6", "привязать окно"),
+        ("F7", "стиль"),
+        ("F8", "запись/стоп"),
+        ("F9", "отмена"),
+        ("F10", "вставить отложенное"),
+        ("F5", "пересканировать микрофоны"),
+        ("F11", "выгрузить/поднять LLM"),
+    ]
     lines = button_bar(chips, width)
     if module_hint:
         lines.append(f"{C_WARN}подсказка: {module_hint}{RESET}")
     return lines
 
 
-def stamp_confirm(lines: Sequence[str], question: str, hint: str,
-                  w: int) -> list[str]:
+def stamp_confirm(lines: Sequence[str], question: str, hint: str, w: int) -> list[str]:
     """Наложить модальное подтверждение по центру кадра (Да/Нет).
 
     Кадр уже нарисован (рамка на всю ширину), поэтому аккуратно подменяем
@@ -1407,17 +1677,29 @@ def stamp_confirm(lines: Sequence[str], question: str, hint: str,
         text = fit_width(text, room)
         visible = vlen(strip_ansi(text))
         left = max(0, (room - visible) // 2)
-        return (" " * left + text + " " * max(0, room - visible - left))
+        return " " * left + text + " " * max(0, room - visible - left)
 
     title = " Подтверждение "
-    head = (f"{C_WARN}╔═{RESET}{BOLD}{C_WARN}{title}{RESET}"
-            f"{C_WARN}" + "═" * max(0, box_w - 2 - len(title)) + f"╗{RESET}")
+    head = (
+        f"{C_WARN}╔═{RESET}{BOLD}{C_WARN}{title}{RESET}"
+        f"{C_WARN}" + "═" * max(0, box_w - 2 - len(title)) + f"╗{RESET}"
+    )
     bottom = f"{C_WARN}╚" + "═" * (box_w - 2) + f"╝{RESET}"
     body = [
         f"{C_WARN}║{RESET}{centered(C_TEXT + question + RESET)}{C_WARN}║{RESET}",
         f"{C_WARN}║{RESET}{centered('')}{C_WARN}║{RESET}",
-        f"{C_WARN}║{RESET}{centered(C_OK + 'Да — Enter / y' + RESET + C_DIM + '     ' +
-                                C_ERR + 'Нет — n / Esc' + RESET)}{C_WARN}║{RESET}",
+        f"{C_WARN}║{RESET}{
+            centered(
+                C_OK
+                + 'Да — Enter / y'
+                + RESET
+                + C_DIM
+                + '     '
+                + C_ERR
+                + 'Нет — n / Esc'
+                + RESET
+            )
+        }{C_WARN}║{RESET}",
         f"{C_WARN}║{RESET}{centered(C_DIM + hint + RESET)}{C_WARN}║{RESET}",
     ]
     box = [head] + body + [bottom]
@@ -1428,8 +1710,13 @@ def stamp_confirm(lines: Sequence[str], question: str, hint: str,
             break
         visible = vlen(strip_ansi(box_line))
         right = max(0, inner - pad - visible)
-        out[idx] = (f"{C_BORDER}║{RESET}" + " " * pad + box_line + " " * right
-                    + f"{C_BORDER}║{RESET}")
+        out[idx] = (
+            f"{C_BORDER}║{RESET}"
+            + " " * pad
+            + box_line
+            + " " * right
+            + f"{C_BORDER}║{RESET}"
+        )
     return out
 
 
@@ -1438,11 +1725,19 @@ def stamp_confirm(lines: Sequence[str], question: str, hint: str,
 LAST_LAYOUT: dict = {}
 
 
-def render_panel(snap: dict, w: int, h: int, cfg_line: str,
-                 journal: Sequence[str], scroll: int, sel: int,
-                 level: tuple[float, str] | None = None,
-                 status_line: str = "", counters: dict | None = None,
-                 confirm: tuple[str, str] | None = None) -> list[str]:
+def render_panel(
+    snap: dict,
+    w: int,
+    h: int,
+    cfg_line: str,
+    journal: Sequence[str],
+    scroll: int,
+    sel: int,
+    level: tuple[float, str] | None = None,
+    status_line: str = "",
+    counters: dict | None = None,
+    confirm: tuple[str, str] | None = None,
+) -> list[str]:
     """Единый пульт-центр: движки, управление, живой уровень, журнал, клавиши."""
     modules = snap.get("modules", [])
     values = snap.get("values", [])
@@ -1457,9 +1752,11 @@ def render_panel(snap: dict, w: int, h: int, cfg_line: str,
             meter = f"{C_ERR}микрофон: нет доступа ({err}){RESET}"
         else:
             ok = peak >= 0.01
-            meter = (f"{C_DIM}уровень {RESET}"
-                     f"{C_OK if ok else C_WARN}{LevelMeter.bar(peak, width=14)}{RESET}"
-                     f"{C_DIM} {peak:.4f}{RESET}")
+            meter = (
+                f"{C_DIM}уровень {RESET}"
+                f"{C_OK if ok else C_WARN}{LevelMeter.bar(peak, width=14)}{RESET}"
+                f"{C_DIM} {peak:.4f}{RESET}"
+            )
     else:
         meter = ""
     body.append(f"  {cfg_line}")
@@ -1473,37 +1770,60 @@ def render_panel(snap: dict, w: int, h: int, cfg_line: str,
     two_col = w >= 108
     if two_col:
         col = (w - 14) // 2
-        left = [_module_row(m, i == sel, col - 4, name_w_mod)
-                for i, m in enumerate(modules)]
-        right = [_value_row(v, (len(modules) + i) == sel, col - 4, name_w_val)
-                 for i, v in enumerate(values)]
+        left = [
+            _module_row(m, i == sel, col - 4, name_w_mod) for i, m in enumerate(modules)
+        ]
+        right = [
+            _value_row(v, (len(modules) + i) == sel, col - 4, name_w_val)
+            for i, v in enumerate(values)
+        ]
         height = max(len(left), len(right))
         left += [""] * (height - len(left))
         right += [""] * (height - len(right))
         lblock = block("Движки и модули", left, col)
         rblock = block("Управление (меняется на лету)", right, col)
         for i in range(height + 2):
-            body.append(" " + (lblock[i] if i < len(lblock) else " " * col) + " " +
-                        (rblock[i] if i < len(rblock) else ""))
+            body.append(
+                " "
+                + (lblock[i] if i < len(lblock) else " " * col)
+                + " "
+                + (rblock[i] if i < len(rblock) else "")
+            )
     else:
-        body += [" " + x for x in block(
-            "Движки и модули", [_module_row(m, i == sel, w - 10, name_w_mod)
-                                for i, m in enumerate(modules)], w - 6)]
+        body += [
+            " " + x
+            for x in block(
+                "Движки и модули",
+                [
+                    _module_row(m, i == sel, w - 10, name_w_mod)
+                    for i, m in enumerate(modules)
+                ],
+                w - 6,
+            )
+        ]
         body.append("")
-        body += [" " + x for x in block(
-            "Управление (меняется на лету)",
-            [_value_row(v, (len(modules) + i) == sel, w - 10, name_w_val)
-             for i, v in enumerate(values)], w - 6)]
+        body += [
+            " " + x
+            for x in block(
+                "Управление (меняется на лету)",
+                [
+                    _value_row(v, (len(modules) + i) == sel, w - 10, name_w_val)
+                    for i, v in enumerate(values)
+                ],
+                w - 6,
+            )
+        ]
 
-    legend = key_legend(w - 6,
-                        rows[sel].get("hint") if 0 <= sel < len(rows) else None)
+    legend = key_legend(w - 6, rows[sel].get("hint") if 0 <= sel < len(rows) else None)
     # Журнал важнее легенды клавиш: в маленьком окне (например, 120x30 по
     # умолчанию в Windows Terminal) легенда съедала всю высоту и журнала не было
     # видно вообще. Сначала сжимаем легенду, и только потом отказываемся от журнала.
     if journal:
+
         def _space_for(legend_lines: list[str]) -> int:
             # 2 рамки кадра + 2 рамки блока журнала + пустая строка перед журналом
             return h - len(body) - len(legend_lines) - 4 - 2
+
         if _space_for(legend) < 4:
             for candidate in (legend[:1], []):
                 if _space_for(candidate) >= 4:
@@ -1511,19 +1831,24 @@ def render_panel(snap: dict, w: int, h: int, cfg_line: str,
                     break
     # Журнал забирает остаток высоты; окно строк считаем по отступу прокрутки
     # (в рендере, а не в вызывающем коде — только тут известна реальная высота).
-    space = h - len(body) - len(legend) - 4 - 2      # 2 рамки кадра, 2 рамки блока
+    space = h - len(body) - len(legend) - 4 - 2  # 2 рамки кадра, 2 рамки блока
     if space >= 3 and journal:
         end = max(space, len(journal) - max(0, scroll))
         start = max(0, end - space)
         shown = list(journal[start:end])
         if scroll > 0:
-            shown = [f"{C_WARN}↑ прокрутка: {scroll} строк назад "
-                     f"(End — в конец){RESET}"] + shown[1:]
+            shown = [
+                f"{C_WARN}↑ прокрутка: {scroll} строк назад (End — в конец){RESET}"
+            ] + shown[1:]
         body.append("")
         # Запоминаем, где на экране оказался журнал: колесо мыши должно листать
         # ТОЛЬКО его (см. TuiApp._on_wheel). Строки нумеруем с 1: строка 0 — рамка.
-        _journal_rows = ["  " + x for x in block(
-            "Журнал (PgUp/PgDn — листать)", [journal_style(r) for r in shown], w - 6)]
+        _journal_rows = [
+            "  " + x
+            for x in block(
+                "Журнал (PgUp/PgDn — листать)", [journal_style(r) for r in shown], w - 6
+            )
+        ]
         LAST_LAYOUT["journal"] = (len(body) + 1, len(body) + len(_journal_rows))
         body += _journal_rows
     body.append("")
@@ -1547,8 +1872,10 @@ def render_dashboard(state: TuiState, w: int, h: int, cfg_line: str) -> list[str
         title = info.get("title", key)
         note = info.get("note", "")
         pad = 26 - len(title)
-        body.append(f"   {C_TEXT}{title}{RESET}{' ' * max(1, pad)}"
-                    f"{status_color(st)}[{status_label(st)}]{RESET}   {C_DIM}{note}{RESET}")
+        body.append(
+            f"   {C_TEXT}{title}{RESET}{' ' * max(1, pad)}"
+            f"{status_color(st)}[{status_label(st)}]{RESET}   {C_DIM}{note}{RESET}"
+        )
     body.append("")
 
     inner_w = w - 8
@@ -1561,25 +1888,38 @@ def render_dashboard(state: TuiState, w: int, h: int, cfg_line: str) -> list[str
         start = max(0, end - rows_room)
         tail = log[start:end]
         if offset > 0:
-            tail = ([f"{C_WARN}↑ прокрутка: {offset} строк назад "
-                     f"(End — в конец){RESET}"] + tail[1:])
+            tail = [
+                f"{C_WARN}↑ прокрутка: {offset} строк назад (End — в конец){RESET}"
+            ] + tail[1:]
     else:
         tail = [f"{C_DIM}пока пусто — нажми F8 и говори{RESET}"]
-    body += ["   " + x for x in block("Журнал", [C_DIM + r + RESET for r in tail], inner_w + 2)]
+    body += [
+        "   " + x
+        for x in block("Журнал", [C_DIM + r + RESET for r in tail], inner_w + 2)
+    ]
     body.append("")
     uptime = int(time.monotonic() - state.started_at)
-    body.append(f"   {status_ansi}{status_text}{RESET}"
-                f"    {C_DIM}фраз: {state.phrases} · последняя e2e: {state.last_e2e_ms} мс"
-                f" · сессия {uptime // 60} мин{RESET}")
+    body.append(
+        f"   {status_ansi}{status_text}{RESET}"
+        f"    {C_DIM}фраз: {state.phrases} · последняя e2e: {state.last_e2e_ms} мс"
+        f" · сессия {uptime // 60} мин{RESET}"
+    )
     body.append("")
-    body += ["   " + line for line in button_bar([
-        ("PgUp/PgDn", "журнал"),
-        ("End", "в конец"),
-        ("r", "настройки"),
-        ("s", "серверы"),
-        ("c", "очистить"),
-        ("q", "выход"),
-    ], inner_w - 4, primary="q")]
+    body += [
+        "   " + line
+        for line in button_bar(
+            [
+                ("PgUp/PgDn", "журнал"),
+                ("End", "в конец"),
+                ("r", "настройки"),
+                ("s", "серверы"),
+                ("c", "очистить"),
+                ("q", "выход"),
+            ],
+            inner_w - 4,
+            primary="q",
+        )
+    ]
     return outer_frame("MyFLOW · пульт", body, w, h)
 
 
@@ -1628,6 +1968,7 @@ class TuiOverlay:
 class TuiApp:
     def __init__(self, *, no_servers: bool = False) -> None:
         from myflow.config import SettingsStore
+
         self.store = SettingsStore()
         self.console = Console()
         self.state = TuiState()
@@ -1653,7 +1994,9 @@ class TuiApp:
         self._gfx = None
         self._overlay = None
         self._demo = False
-        self._force_settings = False   # --settings: показать мастер даже при готовом конфиге
+        self._force_settings = (
+            False  # --settings: показать мастер даже при готовом конфиге
+        )
         # True — приложение создали мы сами (тогда и гасим его при выходе).
         self._app_owned = False
         # Модальное подтверждение (смена движка ASR): (вопрос, подсказка, действие)
@@ -1664,6 +2007,7 @@ class TuiApp:
         log_file = ROOT / "data" / "main.log"
         try:
             from myflow.main import _rotate_log
+
             _rotate_log(log_file)
         except Exception:  # noqa: BLE001
             pass
@@ -1731,7 +2075,9 @@ class TuiApp:
                     self.state.servers = snap
                 time.sleep(2.0)
 
-        self._health_thread = threading.Thread(target=loop, daemon=True, name="tui-health")
+        self._health_thread = threading.Thread(
+            target=loop, daemon=True, name="tui-health"
+        )
         self._health_thread.start()
 
     # ---- фаза 1: серверы ----
@@ -1743,6 +2089,7 @@ class TuiApp:
         # а 4B ещё нужен Oracle LLM. Незачем держать 4 ГБ в памяти «на всякий».
         try:
             from myflow.config import models_dir as _models_dir
+
             available = bool(list(_models_dir().glob("myflow-postproc-*.gguf")))
             needed = needed_servers(self.store.get(), postproc_available=available)
         except Exception:  # noqa: BLE001
@@ -1759,7 +2106,7 @@ class TuiApp:
             if missing:
                 self._draw_boot(spin[i % 4], note=f"{spec.title}: {missing}")
                 i += 1
-                for _ in range(20):                   # ~2 c, чтобы успеть прочитать
+                for _ in range(20):  # ~2 c, чтобы успеть прочитать
                     self._draw_boot(spin[i % 4], note=f"{spec.title}: {missing}")
                     i += 1
                     time.sleep(0.1)
@@ -1774,20 +2121,23 @@ class TuiApp:
                 if self.supervisor.health(spec.url, spec.health_path):
                     break
                 time.sleep(0.25)
-            self.supervisor.status(spec)             # обновить внутренние ошибки
+            self.supervisor.status(spec)  # обновить внутренние ошибки
 
     def _draw_boot(self, spin: str, note: str = "") -> None:
         w, h = self.console.size()
         rows = []
         for key, info in self.supervisor.health_snapshot().items():
             st = info["state"]
-            rows.append(f"{C_TEXT}{info['title']:<26}{RESET}{status_color(st)}"
-                        f"[{status_label(st)}]{RESET} {C_DIM}{info['note']}{RESET}")
+            rows.append(
+                f"{C_TEXT}{info['title']:<26}{RESET}{status_color(st)}"
+                f"[{status_label(st)}]{RESET} {C_DIM}{info['note']}{RESET}"
+            )
         self.console.draw(render_boot(rows, w, h, spin, note))
 
     # ---- фаза 2: настройки ----
     def _scan_mics(self) -> None:
         from myflow.pick_mic import gather_mics, probe_device
+
         self._draw_boot("*", note="сканирую микрофоны (проверяю сигнал)...")
         try:
             self._mics = gather_mics()
@@ -1809,8 +2159,9 @@ class TuiApp:
                 # сравнить варианты (MME/DirectSound) по живому уровню.
                 meter.switch(state.values().get("mic"))
                 w, h = self.console.size()
-                self.console.draw(render_settings(state, st, w, h,
-                                                  level=(meter.peak(), meter.error)))
+                self.console.draw(
+                    render_settings(state, st, w, h, level=(meter.peak(), meter.error))
+                )
                 key = self._read_key(0.15)
                 if key == "up":
                     state.move_item(-1)
@@ -1826,7 +2177,7 @@ class TuiApp:
                 elif key in ("esc", "q", "ctrl-c"):
                     return False
                 elif key == "f5":
-                    meter.stop()            # не держим устройство во время скана
+                    meter.stop()  # не держим устройство во время скана
                     self._scan_mics()
                     state = build_choices(st, self._mics, self._system_ok)
         finally:
@@ -1858,9 +2209,11 @@ class TuiApp:
                 target = f"⚲ {locked.label[:24]}"
             elif cur is not None:
                 target = cur.label[:24]
-        return (f"{pill(mode, C_OK)}"
-                f"  {C_DIM}стиль{RESET} {C_TEXT}{s.default_style}{RESET}"
-                f"  {C_DIM}цель{RESET} {C_ACCENT}⚲ {target}{RESET}")
+        return (
+            f"{pill(mode, C_OK)}"
+            f"  {C_DIM}стиль{RESET} {C_TEXT}{s.default_style}{RESET}"
+            f"  {C_DIM}цель{RESET} {C_ACCENT}⚲ {target}{RESET}"
+        )
 
     def _config_line(self) -> str:
         s = self.store.get()
@@ -1876,12 +2229,14 @@ class TuiApp:
                 target = f"⚲ {locked.label[:26]}"
             elif cur is not None:
                 target = cur.label[:26]
-        return (f"{C_TEXT}{BOLD}режим:{RESET} {C_ACCENT}{mode}{RESET}"
-                f"   {C_TEXT}{BOLD}стиль:{RESET} {C_ACCENT}{s.default_style}{RESET}"
-                f"   {C_TEXT}{BOLD}вставляю в:{RESET} {C_ACCENT}{target}{RESET}"
-                f"   {C_TEXT}{BOLD}микрофон:{RESET} {C_ACCENT}"
-                f"{'#' + str(mic) if mic is not None else 'системный'}{RESET}"
-                f"   {C_TEXT}{BOLD}вставка:{RESET} {C_ACCENT}{s.insert_method}{RESET}")
+        return (
+            f"{C_TEXT}{BOLD}режим:{RESET} {C_ACCENT}{mode}{RESET}"
+            f"   {C_TEXT}{BOLD}стиль:{RESET} {C_ACCENT}{s.default_style}{RESET}"
+            f"   {C_TEXT}{BOLD}вставляю в:{RESET} {C_ACCENT}{target}{RESET}"
+            f"   {C_TEXT}{BOLD}микрофон:{RESET} {C_ACCENT}"
+            f"{'#' + str(mic) if mic is not None else 'системный'}{RESET}"
+            f"   {C_TEXT}{BOLD}вставка:{RESET} {C_ACCENT}{s.insert_method}{RESET}"
+        )
 
     def _dashboard_phase(self) -> str:
         """Возвращает 'quit' | 'settings'."""
@@ -1956,7 +2311,9 @@ class TuiApp:
                 if "запись" in status_line:
                     # Живая анимация: видно, что микрофон пишет прямо сейчас.
                     spinner = "·", "··", "···", "··"
-                    status_line = f"{status_line} {spinner[int(time.monotonic() * 3) % 4]}"
+                    status_line = (
+                        f"{status_line} {spinner[int(time.monotonic() * 3) % 4]}"
+                    )
                 counters = snap.get("counters", {})
                 notes = []
                 if counters.get("mic_scanning"):
@@ -1966,16 +2323,28 @@ class TuiApp:
                 scan_note = ("  ·  " + "  ·  ".join(notes)) if notes else ""
                 try:
                     frame_lines = render_panel(
-                    snap, w, h, self._panel_header(), journal, offset, sel,
-                    level=(meter.peak(), meter.error),
-                    confirm=((self._confirm["question"], self._confirm["hint"])
-                             if self._confirm else None),
-                    status_line=(f"{status_ansi}{norm_text(status_line)}{RESET}"
-                                 f"  фраз: {counters.get('phrases', 0)}"
-                                 f" · отложено: {counters.get('pending', 0)}"
-                                 f" · в очереди: {counters.get('queue', 0)}"
-                                 f"{scan_note}"),
-                        counters=counters)
+                        snap,
+                        w,
+                        h,
+                        self._panel_header(),
+                        journal,
+                        offset,
+                        sel,
+                        level=(meter.peak(), meter.error),
+                        confirm=(
+                            (self._confirm["question"], self._confirm["hint"])
+                            if self._confirm
+                            else None
+                        ),
+                        status_line=(
+                            f"{status_ansi}{norm_text(status_line)}{RESET}"
+                            f"  фраз: {counters.get('phrases', 0)}"
+                            f" · отложено: {counters.get('pending', 0)}"
+                            f" · в очереди: {counters.get('queue', 0)}"
+                            f"{scan_note}"
+                        ),
+                        counters=counters,
+                    )
                 except Exception as exc:  # noqa: BLE001 — панель важнее бага в рендере
                     # Ошибка отрисовки НЕ должна ронять TUI: показываем кадр-заглушку
                     # и пишем в журнал, чтобы баг было видно.
@@ -2004,10 +2373,16 @@ class TuiApp:
                     if last_key in ("enter", "space", "y", "д"):
                         action = self._confirm["action"]
                         self._confirm = None
-                        self.state.add_log(f"подтверждено: {self._confirm_note(action)}")
-                        self._panel_apply(snap.get("modules", []),
-                                          snap.get("values", []), action["sel"],
-                                          action["key"], force=True)
+                        self.state.add_log(
+                            f"подтверждено: {self._confirm_note(action)}"
+                        )
+                        self._panel_apply(
+                            snap.get("modules", []),
+                            snap.get("values", []),
+                            action["sel"],
+                            action["key"],
+                            force=True,
+                        )
                     elif last_key in ("n", "esc", "backspace", "н", "q"):
                         # ВАЖНО: q тоже закрывает окно (иначе из него нет выхода,
                         # а выход из приложения заблокирован — окно модальное).
@@ -2029,8 +2404,11 @@ class TuiApp:
                 elif last_key == "o":
                     self._toggle_gfx()
                 elif last_key == "f5":
-                    ok, msg = (self.app.control_apply("rescan_mics")
-                               if self.app is not None else (False, "нет приложения"))
+                    ok, msg = (
+                        self.app.control_apply("rescan_mics")
+                        if self.app is not None
+                        else (False, "нет приложения")
+                    )
                     self.state.add_log(f"{'✓' if ok else '✗'} {msg}")
                 elif last_key in ("pageup", "pagedown", "home", "end"):
                     self._scroll_journal(last_key, h)
@@ -2039,10 +2417,15 @@ class TuiApp:
                 elif last_key in ("left", "right", "enter", "space"):
                     modules = snap.get("modules", [])
                     values = snap.get("values", [])
-                    asr_sel = next((i for i, m in enumerate(modules)
-                                    if m.get("key") == "asr"), None)
-                    if (asr_sel == sel and self._confirm_needed()
-                            and last_key in ("enter", "space", "left", "right")):
+                    asr_sel = next(
+                        (i for i, m in enumerate(modules) if m.get("key") == "asr"),
+                        None,
+                    )
+                    if (
+                        asr_sel == sel
+                        and self._confirm_needed()
+                        and last_key in ("enter", "space", "left", "right")
+                    ):
                         self._ask_asr_confirm(modules, values, sel, last_key)
                     else:
                         sel = self._panel_apply(modules, values, sel, last_key)
@@ -2076,8 +2459,9 @@ class TuiApp:
         except Exception:  # noqa: BLE001
             return True
 
-    def _ask_asr_confirm(self, modules: list[dict], values: list[dict],
-                         sel: int, key: str) -> None:
+    def _ask_asr_confirm(
+        self, modules: list[dict], values: list[dict], sel: int, key: str
+    ) -> None:
         """Спросить подтверждение перед сменой движка распознавания.
 
         Смена движка — не косметика: whisper требует поднять сервер на :8081, и
@@ -2096,17 +2480,29 @@ class TuiApp:
         else:
             question = "Вернуть распознавание на GigaAM?"
             hint = "Локальная модель на CPU; whisper-сервер выгрузится (~1 ГБ VRAM)"
-        self._confirm = {"question": question, "hint": hint,
-                         "action": {"sel": sel, "key": "enter", "engine": engine}}
+        self._confirm = {
+            "question": question,
+            "hint": hint,
+            "action": {"sel": sel, "key": "enter", "engine": engine},
+        }
 
     @staticmethod
     def _confirm_note(action: dict) -> str:
         engine = (action or {}).get("engine", "")
-        return ("переключаю на GigaAM" if "gigaam" in (engine or "").lower()
-                else "переключаю на whisper")
+        return (
+            "переключаю на GigaAM"
+            if "gigaam" in (engine or "").lower()
+            else "переключаю на whisper"
+        )
 
-    def _panel_apply(self, modules: list[dict], values: list[dict],
-                     sel: int, key: str, force: bool = False) -> int:
+    def _panel_apply(
+        self,
+        modules: list[dict],
+        values: list[dict],
+        sel: int,
+        key: str,
+        force: bool = False,
+    ) -> int:
         """Применить нажатие к выделенной строке панели. Возвращает новый выбор.
 
         Тип строки определяем по позиции (индекс >= числа модулей). Раньше здесь
@@ -2142,11 +2538,14 @@ class TuiApp:
                 if key_name == "mic":
                     self._cycle_mic(1 if key in ("right", "enter", "space") else -1)
                 elif key_name == "mode":
-                    ok, msg = app.control_apply("mode", self._store().get().mode != "auto")
+                    ok, msg = app.control_apply(
+                        "mode", self._store().get().mode != "auto"
+                    )
                     self.state.add_log(f"{'✓' if ok else '✗'} {msg}")
                 elif key_name == "insert":
                     ok, msg = app.control_apply(
-                        "insert", self._store().get().insert_method != "opencode")
+                        "insert", self._store().get().insert_method != "opencode"
+                    )
                     self.state.add_log(f"{'✓' if ok else '✗'} {msg}")
                 elif key_name == "style":
                     self._cycle_style_live(1 if key == "right" else -1)
@@ -2169,23 +2568,25 @@ class TuiApp:
             choices = []
         if not choices:
             from myflow.pick_mic import fast_mic_list
+
             choices = fast_mic_list()
         # WDM-KS-индексы нестабильны (после переподключений «устройство исчезло»),
         # поэтому в перебор берём только те, что не помечены мёртвыми и не WDM.
-        good = [m for m in choices
-                if m.get("alive") is not False and m.get("api") != "WDM"]
+        good = [
+            m for m in choices if m.get("alive") is not False and m.get("api") != "WDM"
+        ]
         choices = good or choices
         if not choices:
             self.state.add_log("микрофонов не найдено (F5 — пересканировать)")
             return
         cur = self._store().get().asr.input_device
         idxs: list[object] = [None]
-        for m in choices:                      # уникальные, в порядке появления
+        for m in choices:  # уникальные, в порядке появления
             if m["idx"] not in idxs:
                 idxs.append(m["idx"])
         pos = idxs.index(cur) if cur in idxs else 0
         new = idxs[(pos + direction) % len(idxs)]
-        if new == cur and len(idxs) > 1:       # не «застреваем» на одном значении
+        if new == cur and len(idxs) > 1:  # не «застреваем» на одном значении
             new = idxs[(pos + 2 * direction) % len(idxs)]
         ok, msg = self.app.control_apply("mic", new)
         self.state.add_log(f"{'✓' if ok else '✗'} {msg}")
@@ -2221,7 +2622,8 @@ class TuiApp:
         if self.console.is_windows_terminal():
             self.state.add_log(
                 f"окно {cols}x{rows} сохранено, но размером управляет Windows "
-                f"Terminal — растяни окно мышью (WT запомнит)")
+                f"Terminal — растяни окно мышью (WT запомнит)"
+            )
             return
         try:
             applied = self.console.lock_size(int(cols), int(rows))
@@ -2273,6 +2675,7 @@ class TuiApp:
 
     def _toggle_gfx(self) -> None:
         from myflow.overlay import StatusOverlay
+
         if self._gfx is None:
             self._gfx = StatusOverlay()
             self._gfx.start()
@@ -2330,13 +2733,15 @@ class TuiApp:
                 self.state.add_log(f"перезапускаю {spec.title}...")
                 if self.supervisor.start(spec):
                     ok = self.supervisor.wait_ready(spec, 90.0)
-                    self.state.add_log(f"{spec.title}: {'готов' if ok else 'не поднялся'}")
+                    self.state.add_log(
+                        f"{spec.title}: {'готов' if ok else 'не поднялся'}"
+                    )
         with self.state.lock:
             self.state.servers = self.supervisor.health_snapshot()
 
     def _show_error(self, message: str) -> None:
         w, h = self.console.size()
-        for _ in range(150):                      # ~15 c или до Enter
+        for _ in range(150):  # ~15 c или до Enter
             self.console.draw(render_error(message, w, h))
             if self._read_key(0.1) in ("enter", "esc", "q", "ctrl-c"):
                 return
@@ -2363,7 +2768,8 @@ class TuiApp:
                     self._size_retry_at = time.monotonic() + 0.4
                     self.state.add_log(
                         f"окно: просил {tui_cfg.cols}x{tui_cfg.rows}, терминал даёт "
-                        f"{self.console.raw_size()[0]}x{self.console.raw_size()[1]} — пробую ещё")
+                        f"{self.console.raw_size()[0]}x{self.console.raw_size()[1]} — пробую ещё"
+                    )
                 else:
                     self.state.add_log(f"окно: {tui_cfg.cols}x{tui_cfg.rows}")
                 if self.app is not None:
@@ -2371,7 +2777,9 @@ class TuiApp:
                     self.app.set_console_resize(self.apply_window_size)
                     # Под Windows Terminal/conpty размер задаёт терминал — пульт
                     # честно об этом скажет в строке «Размер окна».
-                    self.app.set_terminal_managed_size(self.console.is_windows_terminal())
+                    self.app.set_terminal_managed_size(
+                        self.console.is_windows_terminal()
+                    )
                     _raw = self.console.raw_size()
                     self.app.set_window_size_now(_raw[0], _raw[1])
             if getattr(tui_cfg, "mouse_wheel", True):
@@ -2390,6 +2798,7 @@ class TuiApp:
             # меняется прямо на панели (микрофон/режим/вставка/стиль).
             # Вернуться в мастер можно клавишей r.
             from myflow.config import SETTINGS_FILE
+
             first_run = not Path(SETTINGS_FILE).exists()
             if (first_run or self._force_settings) and not self._settings_phase():
                 return 0
@@ -2410,7 +2819,8 @@ class TuiApp:
                     try:
                         path = ROOT / "data" / "screen_dump.txt"
                         self.console.dump_screen(
-                            path, list(getattr(self, "_last_frame_lines", []) or []))
+                            path, list(getattr(self, "_last_frame_lines", []) or [])
+                        )
                         print(f"[myflow] экран сохранён: {path}")
                     except Exception as exc:  # noqa: BLE001
                         print(f"[myflow] дамп экрана не удался: {exc!r}")
@@ -2425,7 +2835,9 @@ class TuiApp:
                 # пульт «защищал» размер и сжимал окно обратно — выглядело как
                 # «окно сбивается на стандартные настройки».
                 # Повторные попытки поставить размер, если терминал не принял сразу.
-                if getattr(self, "_size_retry_left", 0) and time.monotonic() >= getattr(self, "_size_retry_at", 0.0):
+                if getattr(self, "_size_retry_left", 0) and time.monotonic() >= getattr(
+                    self, "_size_retry_at", 0.0
+                ):
                     self._size_retry_left -= 1
                     self._size_retry_at = time.monotonic() + 1.0
                     try:
@@ -2439,8 +2851,12 @@ class TuiApp:
                     if self._size_retry_left == 0 and self.console.size_refused:
                         self.state.add_log(
                             "окно: терминал не даёт менять размер — растяни мышью "
-                            "или выбери «Размер окна» в панели")
-                if getattr(self, "_locked_size", None) and not self.console.is_windows_terminal():
+                            "или выбери «Размер окна» в панели"
+                        )
+                if (
+                    getattr(self, "_locked_size", None)
+                    and not self.console.is_windows_terminal()
+                ):
                     try:
                         raw = self.console.raw_size()
                         if raw != self._locked_size:
@@ -2454,7 +2870,10 @@ class TuiApp:
                 # (посторонний вывод), кадр сдвинулся — рисуем заново целиком.
                 try:
                     top = self.console.viewport_top()
-                    if getattr(self, "_last_top", None) is not None and top != self._last_top:
+                    if (
+                        getattr(self, "_last_top", None) is not None
+                        and top != self._last_top
+                    ):
                         self.console.clear()
                     self._last_top = top
                 except Exception:  # noqa: BLE001
@@ -2463,7 +2882,8 @@ class TuiApp:
                 self.state.add_log(
                     f"конфигурация: режим={self.store.get().mode}, "
                     f"вставка={self.store.get().insert_method}, "
-                    f"микрофон={self.store.get().asr.input_device}")
+                    f"микрофон={self.store.get().asr.input_device}"
+                )
                 action = self._dashboard_phase()
                 if action != "settings" or self._stop.is_set():
                     break
@@ -2502,46 +2922,151 @@ class TuiApp:
 # ----------------------------------------------------------------- демо
 def _demo_snapshot() -> dict:
     """Пример снимка для витрины панели (реальные данные — из приложения)."""
-    return {"modules": [
-        {"key": "asr", "label": "ASR", "value": "GigaAM v3 e2e (CPU)", "on": True,
-         "ok": True, "note": "", "hint": "Enter — сменить движок (GigaAM ↔ whisper)"},
-        {"key": "router", "label": "Авто-выбор",
-         "value": "GigaAM → whisper при сомнении", "on": True, "ok": True,
-         "note": "второе мнение",
-         "hint": "Enter — включить/выключить: подозрительные фразы уходят в whisper"},
-        {"key": "judge", "label": "Oracle LLM",
-         "value": "выключен", "on": False, "ok": True, "note": "точность",
-         "hint": "Enter — оба движка, LLM склеивает лучший текст"},
-        {"key": "vad", "label": "VAD", "value": "Silero v6 · 0.30", "on": True, "ok": True,
-         "note": "", "hint": "←→ порог, Enter — автостоп по паузе"},
-        {"key": "llm", "label": "Post-Processor", "value": "qwen3-4b · :8082", "on": True, "ok": True,
-         "note": "", "hint": "Enter — включить/выключить полировку"},
-        {"key": "voice", "label": "Голос", "value": "31 фраз · auto · 0.25", "on": True,
-         "ok": True, "note": "", "hint": "Enter вкл/выкл, ←→ режим (auto/always/off)"},
-        {"key": "ax", "label": "AX", "value": "UI Automation", "on": True, "ok": True,
-         "note": "", "hint": "Enter — включить/выключить UI Automation"},
-        {"key": "snippets", "label": "Сниппеты", "value": "фразы → готовый текст",
-         "on": True, "ok": True, "note": "", "hint": "Enter — включить/выключить"},
-        {"key": "fastpath", "label": "Быстрый путь", "value": "не звать LLM, если готово",
-         "on": True, "ok": True, "note": "", "hint": "Enter — включить/выключить"},
-        {"key": "learning", "label": "Обучение", "value": "словарь из правок", "on": True,
-         "ok": True, "note": "", "hint": "Enter — включить/выключить"},
-        {"key": "overlay", "label": "Оверлей", "value": "плашка статуса", "on": False,
-         "ok": True, "note": "", "hint": "Enter — включить/выключить"},
-        {"key": "keep_audio", "label": "Аудио фраз", "value": "последние 50", "on": True,
-         "ok": True, "note": "", "hint": "Enter — включить/выключить"},
-    ], "values": [
-        {"key": "mic", "label": "Микрофон", "value": "Ardor Gaming Vox [DS]",
-         "hint": "←→ сменить микрофон на лету (F5 — пересканировать)"},
-        {"key": "mode", "label": "Режим диктовки", "value": "авто (слушает)",
-         "hint": "←→ авто ↔ PTT"},
-        {"key": "insert", "label": "Куда вставлять", "value": "активное окно (Ctrl+V)",
-         "hint": "←→ сменить способ вставки"},
-        {"key": "style", "label": "Стиль текста", "value": "plain",
-         "hint": "←→ стиль по умолчанию (F7 — на лету)"},
-        {"key": "target", "label": "Цель вставки", "value": "⚲ Анализ и улучшение проекта",
-         "hint": "Enter — закрепить/снять окно (F6)"},
-    ], "counters": {"phrases": 12, "pending": 0, "queue": 0}}
+    return {
+        "modules": [
+            {
+                "key": "asr",
+                "label": "ASR",
+                "value": "GigaAM v3 e2e (CPU)",
+                "on": True,
+                "ok": True,
+                "note": "",
+                "hint": "Enter — сменить движок (GigaAM ↔ whisper)",
+            },
+            {
+                "key": "router",
+                "label": "Авто-выбор",
+                "value": "GigaAM → whisper при сомнении",
+                "on": True,
+                "ok": True,
+                "note": "второе мнение",
+                "hint": "Enter — включить/выключить: подозрительные фразы уходят в whisper",
+            },
+            {
+                "key": "judge",
+                "label": "Oracle LLM",
+                "value": "выключен",
+                "on": False,
+                "ok": True,
+                "note": "точность",
+                "hint": "Enter — оба движка, LLM склеивает лучший текст",
+            },
+            {
+                "key": "vad",
+                "label": "VAD",
+                "value": "Silero v6 · 0.30",
+                "on": True,
+                "ok": True,
+                "note": "",
+                "hint": "←→ порог, Enter — автостоп по паузе",
+            },
+            {
+                "key": "llm",
+                "label": "Post-Processor",
+                "value": "qwen3-4b · :8082",
+                "on": True,
+                "ok": True,
+                "note": "",
+                "hint": "Enter — включить/выключить полировку",
+            },
+            {
+                "key": "voice",
+                "label": "Голос",
+                "value": "31 фраз · auto · 0.25",
+                "on": True,
+                "ok": True,
+                "note": "",
+                "hint": "Enter вкл/выкл, ←→ режим (auto/always/off)",
+            },
+            {
+                "key": "ax",
+                "label": "AX",
+                "value": "UI Automation",
+                "on": True,
+                "ok": True,
+                "note": "",
+                "hint": "Enter — включить/выключить UI Automation",
+            },
+            {
+                "key": "snippets",
+                "label": "Сниппеты",
+                "value": "фразы → готовый текст",
+                "on": True,
+                "ok": True,
+                "note": "",
+                "hint": "Enter — включить/выключить",
+            },
+            {
+                "key": "fastpath",
+                "label": "Быстрый путь",
+                "value": "не звать LLM, если готово",
+                "on": True,
+                "ok": True,
+                "note": "",
+                "hint": "Enter — включить/выключить",
+            },
+            {
+                "key": "learning",
+                "label": "Обучение",
+                "value": "словарь из правок",
+                "on": True,
+                "ok": True,
+                "note": "",
+                "hint": "Enter — включить/выключить",
+            },
+            {
+                "key": "overlay",
+                "label": "Оверлей",
+                "value": "плашка статуса",
+                "on": False,
+                "ok": True,
+                "note": "",
+                "hint": "Enter — включить/выключить",
+            },
+            {
+                "key": "keep_audio",
+                "label": "Аудио фраз",
+                "value": "последние 50",
+                "on": True,
+                "ok": True,
+                "note": "",
+                "hint": "Enter — включить/выключить",
+            },
+        ],
+        "values": [
+            {
+                "key": "mic",
+                "label": "Микрофон",
+                "value": "Ardor Gaming Vox [DS]",
+                "hint": "←→ сменить микрофон на лету (F5 — пересканировать)",
+            },
+            {
+                "key": "mode",
+                "label": "Режим диктовки",
+                "value": "авто (слушает)",
+                "hint": "←→ авто ↔ PTT",
+            },
+            {
+                "key": "insert",
+                "label": "Куда вставлять",
+                "value": "активное окно (Ctrl+V)",
+                "hint": "←→ сменить способ вставки",
+            },
+            {
+                "key": "style",
+                "label": "Стиль текста",
+                "value": "plain",
+                "hint": "←→ стиль по умолчанию (F7 — на лету)",
+            },
+            {
+                "key": "target",
+                "label": "Цель вставки",
+                "value": "⚲ Анализ и улучшение проекта",
+                "hint": "Enter — закрепить/снять окно (F6)",
+            },
+        ],
+        "counters": {"phrases": 12, "pending": 0, "queue": 0},
+    }
 
 
 def size_check() -> int:
@@ -2557,15 +3082,21 @@ def size_check() -> int:
     console.lock_size(*want)
     w1, h1 = console.raw_size()
     if (w1, h1) == want:
-        print(f"попытка поставить {want[0]}x{want[1]}: получилось -> размер менять МОЖНО")
+        print(
+            f"попытка поставить {want[0]}x{want[1]}: получилось -> размер менять МОЖНО"
+        )
     else:
-        print(f"попытка поставить {want[0]}x{want[1]}: терминал даёт {w1}x{h1} "
-              f"-> размер менять НЕ ДАЁТ (окно принадлежит терминалу)")
+        print(
+            f"попытка поставить {want[0]}x{want[1]}: терминал даёт {w1}x{h1} "
+            f"-> размер менять НЕ ДАЁТ (окно принадлежит терминалу)"
+        )
     console.lock_size(w0, h0)
     print(f"вернул исходный размер: {console.raw_size()[0]}x{console.raw_size()[1]}")
-    print("Если меняется — пульт сам поставит нужный размер; если нет — "
-          "растяни окно мышью (размер запомнится) или задай размер в настройках "
-          "профиля терминала.")
+    print(
+        "Если меняется — пульт сам поставит нужный размер; если нет — "
+        "растяни окно мышью (размер запомнится) или задай размер в настройках "
+        "профиля терминала."
+    )
     return 0
 
 
@@ -2577,8 +3108,16 @@ def demo_app(hold: float, screen: str = "panel") -> int:
     st.set_status("запись…", hex_to_ansi("#f5c542"))
     st.phrases, st.last_e2e_ms = 12, 1180
     st.servers = {
-        "asr": {"title": "ASR whisper.cpp", "state": "ok", "note": "large-v3-turbo, RTF 0.12"},
-        "llm": {"title": "LLM Qwen3-4B (полировка)", "state": "ok", "note": "полировка ~230 мс"},
+        "asr": {
+            "title": "ASR whisper.cpp",
+            "state": "ok",
+            "note": "large-v3-turbo, RTF 0.12",
+        },
+        "llm": {
+            "title": "LLM Qwen3-4B (полировка)",
+            "state": "ok",
+            "note": "полировка ~230 мс",
+        },
     }
     for line in [
         "● запись начата (окно: code.exe | main.py - Visual Studio Code)",
@@ -2590,12 +3129,29 @@ def demo_app(hold: float, screen: str = "panel") -> int:
         "e2e=1240 мс (asr=520, polish=236)",
     ]:
         st.add_log(line)
-    mics = [{"name": "Микрофон (USB Audio Device)", "idx": 1, "alive": True,
-             "status": "жив (rms=0.0121)", "api": "DS"},
-            {"name": "Микрофон (Realtek(R) Audio)", "idx": 3, "alive": True,
-             "status": "тихий вход (rms=0.00061) — подними усиление?", "api": "MME"},
-            {"name": "Набор микрофонов (Kinect USB Audio)", "idx": 5, "alive": False,
-             "status": "нет сигнала (rms=0.000015)", "api": "MME"}]
+    mics = [
+        {
+            "name": "Микрофон (USB Audio Device)",
+            "idx": 1,
+            "alive": True,
+            "status": "жив (rms=0.0121)",
+            "api": "DS",
+        },
+        {
+            "name": "Микрофон (Realtek(R) Audio)",
+            "idx": 3,
+            "alive": True,
+            "status": "тихий вход (rms=0.00061) — подними усиление?",
+            "api": "MME",
+        },
+        {
+            "name": "Набор микрофонов (Kinect USB Audio)",
+            "idx": 5,
+            "alive": False,
+            "status": "нет сигнала (rms=0.000015)",
+            "api": "MME",
+        },
+    ]
     settings = build_choices(tui.store, mics, True)
     settings.focus = 0
     tui.console.clear()
@@ -2605,17 +3161,26 @@ def demo_app(hold: float, screen: str = "panel") -> int:
         while time.monotonic() < end:
             w, h = tui.console.size()
             if screen == "settings":
-                tui.console.draw(render_settings(settings, tui.store, w, h,
-                                                 level=(0.045, "")))
+                tui.console.draw(
+                    render_settings(settings, tui.store, w, h, level=(0.045, ""))
+                )
             elif screen == "dashboard":
                 tui.console.draw(render_dashboard(st, w, h, tui._config_line()))
             else:
                 # Витрина единого пульта-центра: движки, управление, уровень, журнал.
-                tui.console.draw(render_panel(
-                    _demo_snapshot(), w, h, tui._panel_header(),
-                    [strip_ansi(x) for x in st.log],
-                    0, 3, level=(0.1027, ""),
-                    status_line="✓ вставлено  фраз: 12 · отложено: 0 · в очереди: 0"))
+                tui.console.draw(
+                    render_panel(
+                        _demo_snapshot(),
+                        w,
+                        h,
+                        tui._panel_header(),
+                        [strip_ansi(x) for x in st.log],
+                        0,
+                        3,
+                        level=(0.1027, ""),
+                        status_line="✓ вставлено  фраз: 12 · отложено: 0 · в очереди: 0",
+                    )
+                )
             time.sleep(0.2)
     finally:
         tui.console.clear()
@@ -2624,21 +3189,44 @@ def demo_app(hold: float, screen: str = "panel") -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="myflow.tui", description="MyFLOW: один TUI вместо трёх окон")
-    ap.add_argument("--no-servers", action="store_true",
-                    help="не поднимать whisper/llama (уже запущены вручную)")
-    ap.add_argument("--settings", action="store_true",
-                    help="показать мастер настройки, даже если конфиг уже есть")
-    ap.add_argument("--demo", action="store_true", help="показать экран с примерными данными")
-    ap.add_argument("--screen", choices=("panel", "dashboard", "settings"),
-                    default="panel",
-                    help="какой экран показывать в демо")
-    ap.add_argument("--hold", type=float, default=8.0, help="сколько секунд держать демо-кадр")
-    ap.add_argument("--size-check", action="store_true",
-                    help="проверить, даёт ли этот терминал менять размер окна")
-    ap.add_argument("--dump-screen", type=float, default=0.0, metavar="СЕК",
-                    help="через СЕК секунд сохранить экран в data/screen_dump.txt "
-                         "(диагностика отрисовки)")
+    ap = argparse.ArgumentParser(
+        prog="myflow.tui", description="MyFLOW: один TUI вместо трёх окон"
+    )
+    ap.add_argument(
+        "--no-servers",
+        action="store_true",
+        help="не поднимать whisper/llama (уже запущены вручную)",
+    )
+    ap.add_argument(
+        "--settings",
+        action="store_true",
+        help="показать мастер настройки, даже если конфиг уже есть",
+    )
+    ap.add_argument(
+        "--demo", action="store_true", help="показать экран с примерными данными"
+    )
+    ap.add_argument(
+        "--screen",
+        choices=("panel", "dashboard", "settings"),
+        default="panel",
+        help="какой экран показывать в демо",
+    )
+    ap.add_argument(
+        "--hold", type=float, default=8.0, help="сколько секунд держать демо-кадр"
+    )
+    ap.add_argument(
+        "--size-check",
+        action="store_true",
+        help="проверить, даёт ли этот терминал менять размер окна",
+    )
+    ap.add_argument(
+        "--dump-screen",
+        type=float,
+        default=0.0,
+        metavar="СЕК",
+        help="через СЕК секунд сохранить экран в data/screen_dump.txt "
+        "(диагностика отрисовки)",
+    )
     args = ap.parse_args(argv)
 
     if args.size_check:
@@ -2648,9 +3236,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         return demo_app(args.hold, args.screen)
 
     if sys.stdin is None or not sys.stdin.isatty():
-        print("[MyFLOW] нет интерактивной консоли: TUI не запустить. "
-              "Запусти через start-myflow.bat или python -m myflow.main.")
+        print(
+            "[MyFLOW] нет интерактивной консоли: TUI не запустить. "
+            "Запусти через start-myflow.bat или python -m myflow.main."
+        )
         return 3
+    # Перед пультом: проверяем, что всё на месте, и предлагаем докачать.
+    # Модуль локальный (ломает циклические импорты), и тяжёлого не тянет.
+    from myflow.bootstrap import preflight
+
+    if not preflight():
+        print("[MyFLOW] не хватает компонентов — разберись по списку выше.")
+        return 4
     tui = TuiApp(no_servers=args.no_servers)
     tui._force_settings = bool(args.settings)
     tui._dump_after = float(args.dump_screen or 0.0)

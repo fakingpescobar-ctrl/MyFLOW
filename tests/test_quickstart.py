@@ -5,6 +5,7 @@
 файлами: все упомянутые батники существуют, порядок шагов на месте, доктор и
 скачивание моделей описаны.
 """
+
 import re
 import unittest
 from pathlib import Path
@@ -22,14 +23,33 @@ class QuickstartTest(unittest.TestCase):
         mentioned = set(re.findall(r"[a-z-]+\.bat", self.text))
         self.assertTrue(mentioned, "в инструкции должны быть батники")
         for name in mentioned:
-            self.assertTrue((ROOT / name).exists(), f"в инструкции есть {name}, а файла нет")
+            self.assertTrue(
+                (ROOT / name).exists(), f"в инструкции есть {name}, а файла нет"
+            )
 
     def test_chain_order(self):
-        order = ["install-myflow.bat", "fetch-models.bat", "doctor.py", "start-myflow.bat"]
+        """Цепочка шагов: окружение -> модели -> доктор -> запуск.
+
+        Модели теперь качает сам `myflow.bootstrap` (он же и предлагает
+        поставить недостающие пакеты), поэтому проверяем именно его.
+        """
+        order = [
+            "install-myflow.bat",
+            "bootstrap --fix",
+            "doctor.py",
+            "start-myflow.bat",
+        ]
         positions = [self.text.index(item) for item in order]
-        self.assertEqual(positions, sorted(positions),
-                         "шаги должны идти в правильном порядке: "
-                         "установка -> модели -> доктор -> запуск")
+        self.assertEqual(
+            positions,
+            sorted(positions),
+            "шаги должны идти в правильном порядке: "
+            "установка -> модели -> доктор -> запуск",
+        )
+
+    def test_fetch_models_bat_still_offered(self):
+        """Батник жив и остаётся запасным путём (качает только whisper)."""
+        self.assertIn("fetch-models.bat", self.text)
 
     def test_readme_links_to_quickstart(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

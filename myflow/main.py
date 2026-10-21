@@ -12,6 +12,7 @@
 
 Запуск:  python -m myflow.main
 """
+
 from __future__ import annotations
 
 import ctypes
@@ -32,8 +33,13 @@ from myflow.asr import WhisperClient, AsrResult, make_asr_client
 from myflow.audio_store import AudioStore
 from myflow.axtext import AxReader, AxWatcher
 from myflow.db import Database, DictationRecord
-from myflow.config import (SettingsStore, DATA_DIR, DEFAULT_APP_CATEGORIES,
-                        ROOT, detect_category)
+from myflow.config import (
+    SettingsStore,
+    DATA_DIR,
+    DEFAULT_APP_CATEGORIES,
+    ROOT,
+    detect_category,
+)
 from myflow.fastpath import fast_path_allowed, looks_wellformed
 from myflow.asr_router import review as review_asr_quality
 from myflow.asr_judge import merge as judge_merge
@@ -42,8 +48,14 @@ from myflow.postproc_prompt import POSTPROC_STYLE
 from myflow.config import models_dir
 from myflow.pick_mic import fast_mic_list
 from myflow.voiceprint import VoiceGate
-from myflow.winfocus import (FocusHistory, WindowRef, current_window,
-                             focus_window, idle_seconds, window_exists)
+from myflow.winfocus import (
+    FocusHistory,
+    WindowRef,
+    current_window,
+    focus_window,
+    idle_seconds,
+    window_exists,
+)
 from myflow.insertion import ClipboardPaste, HistoryOnlyPaste
 from myflow.opencode_inject import OpenCodeInjector
 from myflow.dsh_inject import DshInjector
@@ -104,6 +116,7 @@ def _tb_to_file(marker: str) -> None:
 @dataclass
 class _LivePreview:
     """Драфт-кусок для инкрементального ASR (не вставляется, не в БД)."""
+
     pcm_int16: np.ndarray
 
 
@@ -116,6 +129,7 @@ class _Job:
     отменял только текущую фразу, а уже поставленные в очередь всё равно
     вставлялись.
     """
+
     gen: int
     item: Recording | _LivePreview
 
@@ -151,13 +165,17 @@ def active_process_name() -> str:
         ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         if not pid.value:
             return ""
-        h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid.value)  # QUERY_LIMITED
+        h = ctypes.windll.kernel32.OpenProcess(
+            0x1000, False, pid.value
+        )  # QUERY_LIMITED
         if not h:
             return ""
         try:
             buf = ctypes.create_unicode_buffer(1024)
             size = ctypes.c_ulong(len(buf))
-            if ctypes.windll.kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+            if ctypes.windll.kernel32.QueryFullProcessImageNameW(
+                h, 0, buf, ctypes.byref(size)
+            ):
                 return Path(buf.value).name.lower()
         finally:
             ctypes.windll.kernel32.CloseHandle(h)
@@ -184,6 +202,7 @@ def _with_router(cfg):
     но при отбраковке склейки правило авто-выбора надо всё равно применить.
     """
     import copy as _copy
+
     clone = _copy.copy(cfg)
     clone.router = True
     return clone
@@ -196,7 +215,8 @@ def _set_thread_priority_below_normal() -> None:
     try:
         THREAD_PRIORITY_BELOW_NORMAL = -1
         ctypes.windll.kernel32.SetThreadPriority(
-            ctypes.windll.kernel32.GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL)
+            ctypes.windll.kernel32.GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL
+        )
     except Exception:  # noqa: BLE001 — не критично
         pass
 
@@ -213,6 +233,7 @@ def _health_check(whisper) -> bool:
         except Exception:  # noqa: BLE001
             return False
     import requests
+
     try:
         r = requests.get(f"{whisper.cfg.url}/health", timeout=3)
         return r.ok
@@ -242,6 +263,7 @@ def _health_check_llm(polish: PolishClient, *, cached: bool = True) -> bool:
             # Клиент без alive() (тестовые заглушки, старые сборки) — проверяем
             # обычным запросом, но с коротким connect-таймаутом.
             import requests
+
             url = getattr(getattr(polish, "cfg", None), "url", "")
             if url:
                 alive = bool(requests.get(f"{url}/models", timeout=(0.35, 2.0)).ok)
@@ -255,9 +277,12 @@ def _health_check_llm(polish: PolishClient, *, cached: bool = True) -> bool:
 
 
 class MyFlowApp:
-    def __init__(self, overlay: StatusOverlay | None = None,
-                 settings: SettingsStore | None = None,
-                 db: Database | None = None) -> None:
+    def __init__(
+        self,
+        overlay: StatusOverlay | None = None,
+        settings: SettingsStore | None = None,
+        db: Database | None = None,
+    ) -> None:
         """overlay — свой статус-слой (TUI подставляет свой); None = обычная плашка.
 
         settings/db можно подсунуть свои: это нужно тестам, чтобы переключения
@@ -276,9 +301,13 @@ class MyFlowApp:
             adaptive_noise_gate=cfg.adaptive_noise_gate,
             noise_ratio=cfg.noise_ratio,
             noise_max_gate=cfg.noise_max_gate,
-            on_auto_stop=self._on_auto_stop if (not self._pref_auto and cfg.auto_stop_by_silence) else None,
+            on_auto_stop=self._on_auto_stop
+            if (not self._pref_auto and cfg.auto_stop_by_silence)
+            else None,
             on_utterance=self._on_utterance if self._pref_auto else None,
-            on_interval=self._on_live_preview if cfg.flags.get("live_preview", True) else None,
+            on_interval=self._on_live_preview
+            if cfg.flags.get("live_preview", True)
+            else None,
         )
         self.whisper = make_asr_client(cfg.asr)
         # Фразы-подсказки для ASR: дефолт, если не заданы в settings.json.
@@ -295,9 +324,14 @@ class MyFlowApp:
             min_seconds=cfg.voiceprint.min_seconds,
             auto_enroll=cfg.voiceprint.auto_enroll,
             enroll_min_score=cfg.voiceprint.enroll_min_score,
-            model_path=Path(cfg.voiceprint.model_path) if cfg.voiceprint.model_path else None,
-            profile_path=(Path(cfg.voiceprint.profile_path)
-                          if cfg.voiceprint.profile_path else None),
+            model_path=Path(cfg.voiceprint.model_path)
+            if cfg.voiceprint.model_path
+            else None,
+            profile_path=(
+                Path(cfg.voiceprint.profile_path)
+                if cfg.voiceprint.profile_path
+                else None
+            ),
         )
         # Куда вставлять: обычно — буфер+Ctrl+V в активное окно; в opencode-режиме —
         # WriteConsoleInputW напрямую в консоль (не требует фокуса, Enter по флагу);
@@ -329,12 +363,14 @@ class MyFlowApp:
         self.ax = AxReader()
         self._ax_ready = False
         self._last_insert_pid = 0
-        self._last_insert_ts: float = 0.0    # момент последней вставки (delete_last: защита <60с)
+        self._last_insert_ts: float = (
+            0.0  # момент последней вставки (delete_last: защита <60с)
+        )
         # Цель вставки: окно, активное в момент старта диктовки. Нужна, чтобы
         # случайный клик мышью во время фразы не увёл текст в другое окно.
         self._focus_history = FocusHistory()
         self._target: WindowRef | None = None
-        self._target_locked: WindowRef | None = None   # явно закреплённая цель (F6)
+        self._target_locked: WindowRef | None = None  # явно закреплённая цель (F6)
         self._focus_thread: threading.Thread | None = None
         # Микрофоны для панели: (список, время) + фоновое сканирование.
         self._mic_cache: tuple[list[dict], float] | None = None
@@ -342,11 +378,11 @@ class MyFlowApp:
         self._mic_scanning = False
         # Отложенные вставки (пользователь был занят) — FIFO, ничего не теряем.
         self._pending: deque[tuple[str, WindowRef | None, int | None]] = deque()
-        self._stopping = threading.Event()             # сигнал остановки фоновых петель
+        self._stopping = threading.Event()  # сигнал остановки фоновых петель
         # Очередь фраз: worker обрабатывает последовательно, а recorder в
         # AUTO-режиме тем временем продолжает слушать (не теряем фразы).
         self._queue: queue.Queue[_Job] = queue.Queue()
-        self._gen = 0                    # поколение отмены (см. _Job)
+        self._gen = 0  # поколение отмены (см. _Job)
         # Live-превью держим в ОДНОМ слоте (последнее побеждает) и разбираем
         # только когда очередь фраз пуста: драфты не должны стоять впереди
         # реальной диктовки и тормозить вставку.
@@ -354,8 +390,8 @@ class MyFlowApp:
         self._preview_slot: _Job | None = None
         self._worker: threading.Thread | None = None
         self._busy = False
-        self._ptt_held = False           # логически «идёт PTT-запись»
-        self._key_down = False           # F8 физически удерживается (автоповтор)
+        self._ptt_held = False  # логически «идёт PTT-запись»
+        self._key_down = False  # F8 физически удерживается (автоповтор)
         self._auto_stopped = False
         self._listener: keyboard.Listener | None = None
         self._listener_watchdog: threading.Thread | None = None
@@ -367,7 +403,7 @@ class MyFlowApp:
         self._llm_revive: threading.Thread | None = None
         self._repolish_thread: threading.Thread | None = None
         self._deferred_polish_count = 0
-        self._polish_user_off = False   # полировку выключил сам пользователь
+        self._polish_user_off = False  # полировку выключил сам пользователь
         self._mic_watchdog: threading.Thread | None = None
         # Живость движков для панели: считается в фоне, панель читает кэш.
         self._health: dict = {}
@@ -391,8 +427,11 @@ class MyFlowApp:
         self._style_override: str | None = None
         self._last_style_switch_t = 0.0
         # Порядок цикла F7 — как в STYLE_PROMPTS (стабильный, не сеты).
-        self._style_cycle = [s for s in ("plain", "casual", "formal", "terminal", "summarize")
-                             if s in STYLE_PROMPTS]
+        self._style_cycle = [
+            s
+            for s in ("plain", "casual", "formal", "terminal", "summarize")
+            if s in STYLE_PROMPTS
+        ]
 
     # ---- запуск / останов ----
 
@@ -401,8 +440,9 @@ class MyFlowApp:
         # закрытом порте) и запуск приложения ждал её. Если сервер мёртв, мы это
         # скажем, а фраза не потеряется: отказ ASR пишется в историю с аудио,
         # плюс работает резерв на GigaAM (_asr_fallback).
-        threading.Thread(target=self._check_asr_background, daemon=True,
-                         name="asr-check").start()
+        threading.Thread(
+            target=self._check_asr_background, daemon=True, name="asr-check"
+        ).start()
         # Проверку LLM здесь НЕ делаем: при лежащем сервере она стоит ~0.35 с и
         # задерживала запуск. Этим занимается фоновый прогрев (_prewarm_llm_work)
         # и сторож полировки; _polish_safe умеет быстро отказаться без сервера.
@@ -411,8 +451,7 @@ class MyFlowApp:
             self.overlay.start()
         # AX поднимаем в ФОНЕ: его старт ждёт ответа PowerShell-хелпера (~0.19 с)
         # и держал запуск приложения. Пока не готов — правки ловим через буфер.
-        threading.Thread(target=self._start_ax, daemon=True,
-                         name="ax-start").start()
+        threading.Thread(target=self._start_ax, daemon=True, name="ax-start").start()
         self._warm_asr()
         # Приватность/размер: чистим историю старше retention (по умолчанию 90 дней).
         try:
@@ -421,38 +460,49 @@ class MyFlowApp:
                 print(f"[myflow] история: удалено старых диктовок — {removed}")
         except Exception as exc:  # noqa: BLE001 — не мешает запуску
             print(f"[myflow] не удалось почистить историю: {exc!r}")
-        self._worker = threading.Thread(target=self._worker_loop, daemon=True,
-                                        name="phrase-worker")
+        self._worker = threading.Thread(
+            target=self._worker_loop, daemon=True, name="phrase-worker"
+        )
         self._worker.start()
         # Слушатель хоткеев — в ФОНЕ: при повторной установке Win32-хука pynput
         # ждёт ~0.65 с (замер), и старт/перезапуск пульта висел. Сторож
         # (_listener_watchdog_loop) поднимет его заново, если что-то не так.
         self._start_listener_async()
         self._listener_watchdog = threading.Thread(
-            target=self._listener_watchdog_loop, daemon=True, name="listener-watchdog")
+            target=self._listener_watchdog_loop, daemon=True, name="listener-watchdog"
+        )
         self._listener_watchdog.start()
         self._start_focus_tracker()
         self._pending_thread = threading.Thread(
-            target=self._pending_worker, daemon=True, name="pending-insert")
+            target=self._pending_worker, daemon=True, name="pending-insert"
+        )
         self._pending_thread.start()
         if (self.settings.get().insert_target or "start") == "start":
             hk = self.settings.get().hotkey
-            print("[myflow] цель вставки: окно, из которого начата диктовка "
-                  "(клик мышью в сторону текст не уведёт; "
-                  f"{hk.lock_target_key}=закрепить окно, "
-                  f"{hk.flush_pending_key}=вставить отложенное сейчас)")
-            print("[myflow] если в момент вставки ты сам работаешь мышью — "
-                  "вставка подождёт паузы и не отберёт управление")
+            print(
+                "[myflow] цель вставки: окно, из которого начата диктовка "
+                "(клик мышью в сторону текст не уведёт; "
+                f"{hk.lock_target_key}=закрепить окно, "
+                f"{hk.flush_pending_key}=вставить отложенное сейчас)"
+            )
+            print(
+                "[myflow] если в момент вставки ты сам работаешь мышью — "
+                "вставка подождёт паузы и не отберёт управление"
+            )
         if self._pref_auto:
             self.recorder.start_continuous()
-            print("[myflow] готов (AUTO: слушаю постоянно, фраза по паузе). "
-                  f"F8=стоп фразы, F9=скип, {self.settings.get().hotkey.style_cycle_key}=стиль")
+            print(
+                "[myflow] готов (AUTO: слушаю постоянно, фраза по паузе). "
+                f"F8=стоп фразы, F9=скип, {self.settings.get().hotkey.style_cycle_key}=стиль"
+            )
         else:
             polish_state = "LLM" if self.polish.cfg.enabled else "без полировки"
-            print(f"[myflow] готов ({polish_state}, PTT). "
-                  f"PTT={self.settings.get().hotkey.ptt_key} (держи — диктуешь), "
-                  f"cancel={self.settings.get().hotkey.cancel_key}, "
-                  f"style={self.settings.get().hotkey.style_cycle_key} (цикл стилей)")
+            print(
+                f"[myflow] готов ({polish_state}, PTT). "
+                f"PTT={self.settings.get().hotkey.ptt_key} (держи — диктуешь), "
+                f"cancel={self.settings.get().hotkey.cancel_key}, "
+                f"style={self.settings.get().hotkey.style_cycle_key} (цикл стилей)"
+            )
         self._log_stats()
 
         # Автолечение LLM: следим за очередью недополированных фраз.
@@ -480,7 +530,7 @@ class MyFlowApp:
         while not self._stopping.wait(interval):
             try:
                 if not self._pref_auto:
-                    continue          # в PTT поток открывается по нажатию
+                    continue  # в PTT поток открывается по нажатию
                 reason = self.recorder.reopen()
                 if reason:
                     status = getattr(self.recorder, "_last_status_text", "")
@@ -493,8 +543,9 @@ class MyFlowApp:
     def _ensure_mic_watchdog(self) -> None:
         if self._mic_watchdog is not None and self._mic_watchdog.is_alive():
             return
-        self._mic_watchdog = threading.Thread(target=self._mic_watchdog_loop,
-                                              daemon=True, name="mic-watchdog")
+        self._mic_watchdog = threading.Thread(
+            target=self._mic_watchdog_loop, daemon=True, name="mic-watchdog"
+        )
         self._mic_watchdog.start()
 
     def _health_loop(self, interval: float = 2.0) -> None:
@@ -510,17 +561,18 @@ class MyFlowApp:
                     asr_ok = bool(self.whisper.health())
                 except Exception:  # noqa: BLE001
                     asr_ok = False
-                llm_ok = (bool(self.polish.cfg.enabled)
-                          and _health_check_llm(self.polish))
+                llm_ok = bool(self.polish.cfg.enabled) and _health_check_llm(
+                    self.polish
+                )
                 try:
                     # Список микрофонов тоже обновляем в фоне (sd.query_devices
                     # ~10-20 мс — в цикле отрисовки это лишняя задержка).
                     from myflow.pick_mic import fast_mic_list
+
                     self._mic_cache = (fast_mic_list(), time.monotonic())
                 except Exception:  # noqa: BLE001
                     pass
-                self._health = {"asr": asr_ok, "llm": llm_ok,
-                                "ts": time.monotonic()}
+                self._health = {"asr": asr_ok, "llm": llm_ok, "ts": time.monotonic()}
             except Exception:  # noqa: BLE001 — сторож не должен падать
                 pass
             if self._stopping.wait(interval):
@@ -529,8 +581,9 @@ class MyFlowApp:
     def _ensure_health_worker(self) -> None:
         if self._health_thread is not None and self._health_thread.is_alive():
             return
-        self._health_thread = threading.Thread(target=self._health_loop,
-                                              daemon=True, name="health")
+        self._health_thread = threading.Thread(
+            target=self._health_loop, daemon=True, name="health"
+        )
         self._health_thread.start()
 
     def _prewarm_llm(self) -> None:
@@ -548,11 +601,18 @@ class MyFlowApp:
         # Прогреваем ИМЕННО ту модель, которая будет полировать: либо 4B, либо
         # дообученный постпроцессор. Иначе при включённом постпроцессоре мы бы
         # зря поднимали 4 ГБ.
-        target = ("postproc"
-                  if getattr(self.polish.cfg, "postproc", False)
-                  and self.postproc_model_available() else "llm")
-        threading.Thread(target=self._ensure_server, args=(target,), daemon=True,
-                         name=f"prewarm-{target}").start()
+        target = (
+            "postproc"
+            if getattr(self.polish.cfg, "postproc", False)
+            and self.postproc_model_available()
+            else "llm"
+        )
+        threading.Thread(
+            target=self._ensure_server,
+            args=(target,),
+            daemon=True,
+            name=f"prewarm-{target}",
+        ).start()
 
     def _prewarm_llm_work(self) -> None:
         try:
@@ -566,14 +626,18 @@ class MyFlowApp:
         # ВАЖНО: не выключаем полировку сразу. При запуске llama-server грузит
         # 4 ГБ модели ~5-15 с, и если в этот момент считать её мёртвой, первые
         # фразы уйдут «сырым ASR» (именно это и видел пользователь). Ждём.
-        deadline_wait = max(5.0, float(getattr(self.polish.cfg, "wait_on_fail_seconds", 2.5)) * 8)
+        deadline_wait = max(
+            5.0, float(getattr(self.polish.cfg, "wait_on_fail_seconds", 2.5)) * 8
+        )
         if self._wait_llm_ready(deadline_wait):
             print("[myflow] LLM готова (прогрев завершён) — полировка работает")
             return
         if self.polish.cfg.enabled:
-            print(f"[myflow] WARNING: llama-server не отвечает на "
-                  f"{self.polish.cfg.url} спустя {deadline_wait:.0f} с — полировка "
-                  f"отключена до поднятия сервера (scripts/start-llm.ps1)")
+            print(
+                f"[myflow] WARNING: llama-server не отвечает на "
+                f"{self.polish.cfg.url} спустя {deadline_wait:.0f} с — полировка "
+                f"отключена до поднятия сервера (scripts/start-llm.ps1)"
+            )
             self.polish.cfg.enabled = False
             self._ensure_polish_watchdog()
 
@@ -586,21 +650,27 @@ class MyFlowApp:
             return
         if not st["dictations"]:
             return
-        print(f"[myflow] история: {st['dictations']} фраз, ошибок {st['errors']} "
-              f"({st['error_rate'] * 100:.2f}%), p50={st['p50_latency_ms']} мс, "
-              f"p90={st['p90_latency_ms']} мс, p99={st['p99_latency_ms']} мс, "
-              f"avg divergence={st['avg_divergence']}")
+        print(
+            f"[myflow] история: {st['dictations']} фраз, ошибок {st['errors']} "
+            f"({st['error_rate'] * 100:.2f}%), p50={st['p50_latency_ms']} мс, "
+            f"p90={st['p90_latency_ms']} мс, p99={st['p99_latency_ms']} мс, "
+            f"avg divergence={st['avg_divergence']}"
+        )
         if st["by_status"]:
-            print("[myflow]   статусы: " + ", ".join(
-                f"{k}={v}" for k, v in st["by_status"].items()))
+            print(
+                "[myflow]   статусы: "
+                + ", ".join(f"{k}={v}" for k, v in st["by_status"].items())
+            )
 
     def _check_asr_background(self) -> None:
         """Предупредить, если ASR недоступен (не блокируя старт приложения)."""
         try:
             if not _health_check(self.whisper):
                 url = getattr(getattr(self.whisper, "cfg", None), "url", "")
-                print(f"[myflow] WARNING: ASR не отвечает ({url or 'локальная модель'}) — "
-                      f"фразы пойдут через резерв (GigaAM) или в retry")
+                print(
+                    f"[myflow] WARNING: ASR не отвечает ({url or 'локальная модель'}) — "
+                    f"фразы пойдут через резерв (GigaAM) или в retry"
+                )
         except Exception as exc:  # noqa: BLE001
             print(f"[myflow] проверка ASR не удалась: {exc!r}")
 
@@ -620,16 +690,20 @@ class MyFlowApp:
             _set_thread_priority_below_normal()
             try:
                 if not warmup():
-                    print("[myflow] локальная ASR-модель не загрузилась — "
-                          "первая диктовка может не распознаться")
+                    print(
+                        "[myflow] локальная ASR-модель не загрузилась — "
+                        "первая диктовка может не распознаться"
+                    )
             except Exception as exc:  # noqa: BLE001
                 print(f"[myflow] прогрев ASR: {exc!r}")
             # Заодно греем модель голоса (ONNX, ~25 МБ) — тоже в фоне.
             try:
                 if self.voice.ready and self.voice.warmup():
-                    print(f"[myflow] ☺ профиль голоса найден "
-                          f"({self.voice.profile.count} фраз, "
-                          f"порог {self.voice.threshold})")
+                    print(
+                        f"[myflow] ☺ профиль голоса найден "
+                        f"({self.voice.profile.count} фраз, "
+                        f"порог {self.voice.threshold})"
+                    )
             except Exception as exc:  # noqa: BLE001
                 print(f"[myflow] модель голоса: {exc!r}")
 
@@ -644,11 +718,15 @@ class MyFlowApp:
         try:
             self._ax_ready = self.ax.start()
             if self._ax_ready:
-                print("[myflow] наблюдение за полем ввода: UI Automation активен "
-                      "(правки ловим без Ctrl+C)")
+                print(
+                    "[myflow] наблюдение за полем ввода: UI Automation активен "
+                    "(правки ловим без Ctrl+C)"
+                )
             else:
-                print(f"[myflow] UI Automation недоступен ({self.ax.last_error}) — "
-                      "правки ловим через буфер обмена")
+                print(
+                    f"[myflow] UI Automation недоступен ({self.ax.last_error}) — "
+                    "правки ловим через буфер обмена"
+                )
         except Exception as exc:  # noqa: BLE001
             self._ax_ready = False
             print(f"[myflow] AX-хелпер не поднялся: {exc!r}")
@@ -659,7 +737,9 @@ class MyFlowApp:
         """Короткое имя текущего ASR-движка для панели."""
         if type(self.whisper).__name__ == "GigaAmClient":
             model = str(getattr(self.whisper, "model_name", "v3"))
-            short = model.replace("gigaam-", "").replace("-e2e", " e2e").replace("-ctc", "")
+            short = (
+                model.replace("gigaam-", "").replace("-e2e", " e2e").replace("-ctc", "")
+            )
             # Метка должна оставаться короткой (ширина колонки в панели) —
             # авто-выбор показываем в подсказке строки, см. control_snapshot().
             return f"GigaAM {short} (CPU)"
@@ -676,7 +756,7 @@ class MyFlowApp:
         text = (name or "").strip()
         for prefix in ("Набор микрофонов (", "Микрофон (", "Микрофон "):
             if text.startswith(prefix):
-                text = text[len(prefix):]
+                text = text[len(prefix) :]
                 break
         return text.rstrip(") ").strip() or name
 
@@ -691,6 +771,7 @@ class MyFlowApp:
     def retrain_state(self) -> dict:
         """Что накопилось для дообучения: новые диктовки, когда учились, идёт ли прогон."""
         import json as _json
+
         state_path = ROOT / "data" / "train" / "state.json"
         trained_at, trained_on, max_trained = "", 0, 0
         if state_path.exists():
@@ -704,14 +785,21 @@ class MyFlowApp:
         dictations, max_id = 0, 0
         try:
             import sqlite3
+
             db = ROOT / "data" / "myflow.sqlite"
             if db.exists():
                 con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
-                dictations = int(con.execute(
-                    "SELECT COUNT(*) FROM history WHERE asr_text IS NOT NULL "
-                    "AND TRIM(asr_text) != ''").fetchone()[0])
-                max_id = int(con.execute(
-                    "SELECT COALESCE(MAX(id), 0) FROM history").fetchone()[0])
+                dictations = int(
+                    con.execute(
+                        "SELECT COUNT(*) FROM history WHERE asr_text IS NOT NULL "
+                        "AND TRIM(asr_text) != ''"
+                    ).fetchone()[0]
+                )
+                max_id = int(
+                    con.execute("SELECT COALESCE(MAX(id), 0) FROM history").fetchone()[
+                        0
+                    ]
+                )
                 con.close()
         except Exception:  # noqa: BLE001
             pass
@@ -722,17 +810,26 @@ class MyFlowApp:
         log_path = ROOT / "data" / "retrain.log"
         if log_path.exists():
             try:
-                lines = [ln for ln in log_path.read_text(encoding="utf-8").splitlines()
-                         if ln.strip()]
+                lines = [
+                    ln
+                    for ln in log_path.read_text(encoding="utf-8").splitlines()
+                    if ln.strip()
+                ]
                 last_log = lines[-1][:60] if lines else ""
             except Exception:  # noqa: BLE001
                 pass
-        return {"new": new, "dictations": dictations, "trained_on": trained_on,
-                "trained_at": trained_at, "running": running, "last_log": last_log,
-                # getattr: приложение-заглушка (тесты, встраивание) может не иметь
-                # атрибута класса — берём разумный порог по умолчанию.
-                "threshold": getattr(self, "RETRAIN_THRESHOLD", 100),
-                "env_ready": self._train_python().exists()}
+        return {
+            "new": new,
+            "dictations": dictations,
+            "trained_on": trained_on,
+            "trained_at": trained_at,
+            "running": running,
+            "last_log": last_log,
+            # getattr: приложение-заглушка (тесты, встраивание) может не иметь
+            # атрибута класса — берём разумный порог по умолчанию.
+            "threshold": getattr(self, "RETRAIN_THRESHOLD", 100),
+            "env_ready": self._train_python().exists(),
+        }
 
     def start_retrain(self) -> tuple[bool, str]:
         """Запустить дообучение в фоне (журнал: data/retrain.log)."""
@@ -740,23 +837,31 @@ class MyFlowApp:
         if state["running"]:
             return False, "дообучение уже идёт (смотри журнал)"
         if not state["env_ready"]:
-            return False, ("нет учебного окружения .venv-train — "
-                           "см. tools/train_postproc.md")
+            return False, (
+                "нет учебного окружения .venv-train — см. tools/train_postproc.md"
+            )
         import subprocess
+
         log_path = ROOT / "data" / "retrain.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             fh = open(log_path, "a", encoding="utf-8")
             self._retrain_proc = subprocess.Popen(
-                [str(self._train_python()), "-X", "utf8",
-                 str(ROOT / "tools" / "retrain_postproc.py")],
-                cwd=str(ROOT), stdout=fh, stderr=subprocess.STDOUT,
+                [
+                    str(self._train_python()),
+                    "-X",
+                    "utf8",
+                    str(ROOT / "tools" / "retrain_postproc.py"),
+                ],
+                cwd=str(ROOT),
+                stdout=fh,
+                stderr=subprocess.STDOUT,
                 stdin=subprocess.DEVNULL,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
         except Exception as exc:  # noqa: BLE001
             return False, f"не смог запустить дообучение: {exc!r}"
-        print("[myflow] дообучение постпроцессора запущено в фоне "
-              "(data/retrain.log)")
+        print("[myflow] дообучение постпроцессора запущено в фоне (data/retrain.log)")
         return True, "дообучение запущено (~20 мин, GPU занят)"
 
     def control_snapshot(self) -> dict:
@@ -782,81 +887,173 @@ class MyFlowApp:
         vad_threshold = float(getattr(self.recorder, "vad_threshold", 0.3))
 
         modules = [
-            {"key": "asr", "label": "ASR", "value": self._asr_label(), "on": True,
-             "ok": asr_ok,
-             "note": "проверка…" if health_stale else (
-                 "распознавание + второе мнение whisper"
-                 if getattr(s.asr, "router", False) and type(self.whisper).__name__ == "GigaAmClient"
-                 else "распознавание речи"),
-             "hint": "Enter — сменить движок (спросит подтверждение): whisper "
-                     "поднимает сервер :8081, GigaAM работает всегда"},
-            {"key": "router", "label": "Авто-выбор",
-             "value": ("GigaAM → whisper при сомнении" if getattr(s.asr, "router", False)
-                       else "выключен: только GigaAM"),
-             "on": bool(getattr(s.asr, "router", False)), "ok": True,
-             "note": "второе мнение",
-             "hint": "Enter — вкл/выкл: подозрительные фразы уходят в whisper "
-                     "(несовместим с «Oracle LLM»)"},
-            {"key": "judge", "label": "Oracle LLM",
-             "value": ("оба движка → LLM склеивает" if getattr(s.asr, "judge", False)
-                       else "выключен"),
-             "on": bool(getattr(s.asr, "judge", False)), "ok": True,
-             "note": "точность",
-             "hint": "Enter — вкл/выкл: оба движка, LLM склеивает (~0.4 с; "
-                     "несовместим с «Авто-выбор»)"},
-            {"key": "size", "label": "Размер окна",
-             "value": ("управляет терминал — растяни окно"
-                       if getattr(self, "_terminal_managed_size", False)
-                       else ((f"{int(s.tui.cols)}x{int(s.tui.rows)}"
-                              + ("" if getattr(s.tui, "fixed_size", True) else " (свободный)"))
-                             if getattr(s.tui, "cols", 0) and getattr(s.tui, "rows", 0)
-                             else (f"{self._window_size_now[0]}x{self._window_size_now[1]} (текущий)"
-                                   if getattr(self, "_window_size_now", None)
-                                   else "как в терминале"))),
-             "on": bool(getattr(s.tui, "fixed_size", True)), "ok": True,
-             "note": "оформление",
-             "hint": ("Терминал (Windows Terminal) сам задаёт размер окна: растяни его "
-                      "мышью — терминал запомнит. Пульт подстроится и покажет журнал"
-                      if getattr(self, "_terminal_managed_size", False)
-                      else "Enter — сменить размер окна (100x28 → 120x34 → 140x44 → "
-                           "160x50); можно просто растянуть окно мышью")},
-            {"key": "vad", "label": "VAD", "value": f"Silero v6 · {vad_threshold:.2f}",
-             "on": bool(s.auto_stop_by_silence), "ok": True, "note": "детектор речи",
-             "hint": "←→ порог, Enter — автостоп по паузе"},
-            {"key": "llm", "label": "Post-Processor",
-             "value": "включён" if s.polish.enabled else "выключен",
-             "on": bool(s.polish.enabled), "ok": llm_ok,
-             # Модель показываем всегда (живость — зелёным индикатором `ok`),
-             # иначе в первые секунды после старта вместо неё было «проверка…».
-             "note": ("своя 0.6B · :8083" if self.postproc_model_available()
-                      else "Qwen3-4B · :8082 (своей ещё нет)"),
-             "hint": "Enter — включить/выключить пост-обработку текста (постпроцессор "
-                     "— своя Qwen3-0.6B). 4B держим только для Oracle LLM"},
-                {"key": "voice", "label": "Голос",
-             "value": f"{voice_profile} фраз · {s.voiceprint.mode} · {s.voiceprint.threshold:.2f}",
-             "on": voice_on, "ok": voice_profile > 0, "note": "проверка владельца",
-             "hint": "Enter вкл/выкл, ←→ режим (auto/always/off)"},
-            {"key": "ax", "label": "AX",
-             "value": "UI Automation" if self._ax_ready else "буфер обмена",
-             "on": bool(self._ax_ready), "ok": bool(self._ax_ready),
-             "note": "наблюдение за полем ввода",
-             "hint": "Enter — включить/выключить UI Automation"},
-            {"key": "snippets", "label": "Сниппеты", "value": "фразы → готовый текст",
-             "on": bool(flags.get("snippets", True)), "ok": True, "note": "замены фраз",
-             "hint": "Enter — включить/выключить"},
-            {"key": "fastpath", "label": "Быстрый путь",
-             "value": "не звать LLM, если готово",
-             "on": bool(getattr(s.polish, "skip_wellformed", True)), "ok": True,
-             "note": "экономия 100-180 мс", "hint": "Enter — включить/выключить"},
-            {"key": "learning", "label": "Обучение", "value": "словарь из правок",
-             "on": bool(flags.get("learning", True)), "ok": True, "note": "самообучение",
-             "hint": "Enter — включить/выключить"},
-            {"key": "overlay", "label": "Оверлей", "value": "плашка статуса",
-             "on": bool(flags.get("overlay", False)), "ok": True, "note": "поверх окон",
-             "hint": "Enter — включить/выключить"},
-            {"key": "keep_audio", "label": "Аудио фраз", "value": f"последние {s.audio_keep}",
-             "on": bool(flags.get("keep_audio", True)), "ok": True,
-             "note": "для повторного распознавания", "hint": "Enter — включить/выключить"},
+            {
+                "key": "asr",
+                "label": "ASR",
+                "value": self._asr_label(),
+                "on": True,
+                "ok": asr_ok,
+                "note": "проверка…"
+                if health_stale
+                else (
+                    "распознавание + второе мнение whisper"
+                    if getattr(s.asr, "router", False)
+                    and type(self.whisper).__name__ == "GigaAmClient"
+                    else "распознавание речи"
+                ),
+                "hint": "Enter — сменить движок (спросит подтверждение): whisper "
+                "поднимает сервер :8081, GigaAM работает всегда",
+            },
+            {
+                "key": "router",
+                "label": "Авто-выбор",
+                "value": (
+                    "GigaAM → whisper при сомнении"
+                    if getattr(s.asr, "router", False)
+                    else "выключен: только GigaAM"
+                ),
+                "on": bool(getattr(s.asr, "router", False)),
+                "ok": True,
+                "note": "второе мнение",
+                "hint": "Enter — вкл/выкл: подозрительные фразы уходят в whisper "
+                "(несовместим с «Oracle LLM»)",
+            },
+            {
+                "key": "judge",
+                "label": "Oracle LLM",
+                "value": (
+                    "оба движка → LLM склеивает"
+                    if getattr(s.asr, "judge", False)
+                    else "выключен"
+                ),
+                "on": bool(getattr(s.asr, "judge", False)),
+                "ok": True,
+                "note": "точность",
+                "hint": "Enter — вкл/выкл: оба движка, LLM склеивает (~0.4 с; "
+                "несовместим с «Авто-выбор»)",
+            },
+            {
+                "key": "size",
+                "label": "Размер окна",
+                "value": (
+                    "управляет терминал — растяни окно"
+                    if getattr(self, "_terminal_managed_size", False)
+                    else (
+                        (
+                            f"{int(s.tui.cols)}x{int(s.tui.rows)}"
+                            + (
+                                ""
+                                if getattr(s.tui, "fixed_size", True)
+                                else " (свободный)"
+                            )
+                        )
+                        if getattr(s.tui, "cols", 0) and getattr(s.tui, "rows", 0)
+                        else (
+                            f"{self._window_size_now[0]}x{self._window_size_now[1]} (текущий)"
+                            if getattr(self, "_window_size_now", None)
+                            else "как в терминале"
+                        )
+                    )
+                ),
+                "on": bool(getattr(s.tui, "fixed_size", True)),
+                "ok": True,
+                "note": "оформление",
+                "hint": (
+                    "Терминал (Windows Terminal) сам задаёт размер окна: растяни его "
+                    "мышью — терминал запомнит. Пульт подстроится и покажет журнал"
+                    if getattr(self, "_terminal_managed_size", False)
+                    else "Enter — сменить размер окна (100x28 → 120x34 → 140x44 → "
+                    "160x50); можно просто растянуть окно мышью"
+                ),
+            },
+            {
+                "key": "vad",
+                "label": "VAD",
+                "value": f"Silero v6 · {vad_threshold:.2f}",
+                "on": bool(s.auto_stop_by_silence),
+                "ok": True,
+                "note": "детектор речи",
+                "hint": "←→ порог, Enter — автостоп по паузе",
+            },
+            {
+                "key": "llm",
+                "label": "Post-Processor",
+                "value": "включён" if s.polish.enabled else "выключен",
+                "on": bool(s.polish.enabled),
+                "ok": llm_ok,
+                # Модель показываем всегда (живость — зелёным индикатором `ok`),
+                # иначе в первые секунды после старта вместо неё было «проверка…».
+                "note": (
+                    "своя 0.6B · :8083"
+                    if self.postproc_model_available()
+                    else "Qwen3-4B · :8082 (своей ещё нет)"
+                ),
+                "hint": "Enter — включить/выключить пост-обработку текста (постпроцессор "
+                "— своя Qwen3-0.6B). 4B держим только для Oracle LLM",
+            },
+            {
+                "key": "voice",
+                "label": "Голос",
+                "value": f"{voice_profile} фраз · {s.voiceprint.mode} · {s.voiceprint.threshold:.2f}",
+                "on": voice_on,
+                "ok": voice_profile > 0,
+                "note": "проверка владельца",
+                "hint": "Enter вкл/выкл, ←→ режим (auto/always/off)",
+            },
+            {
+                "key": "ax",
+                "label": "AX",
+                "value": "UI Automation" if self._ax_ready else "буфер обмена",
+                "on": bool(self._ax_ready),
+                "ok": bool(self._ax_ready),
+                "note": "наблюдение за полем ввода",
+                "hint": "Enter — включить/выключить UI Automation",
+            },
+            {
+                "key": "snippets",
+                "label": "Сниппеты",
+                "value": "фразы → готовый текст",
+                "on": bool(flags.get("snippets", True)),
+                "ok": True,
+                "note": "замены фраз",
+                "hint": "Enter — включить/выключить",
+            },
+            {
+                "key": "fastpath",
+                "label": "Быстрый путь",
+                "value": "не звать LLM, если готово",
+                "on": bool(getattr(s.polish, "skip_wellformed", True)),
+                "ok": True,
+                "note": "экономия 100-180 мс",
+                "hint": "Enter — включить/выключить",
+            },
+            {
+                "key": "learning",
+                "label": "Обучение",
+                "value": "словарь из правок",
+                "on": bool(flags.get("learning", True)),
+                "ok": True,
+                "note": "самообучение",
+                "hint": "Enter — включить/выключить",
+            },
+            {
+                "key": "overlay",
+                "label": "Оверлей",
+                "value": "плашка статуса",
+                "on": bool(flags.get("overlay", False)),
+                "ok": True,
+                "note": "поверх окон",
+                "hint": "Enter — включить/выключить",
+            },
+            {
+                "key": "keep_audio",
+                "label": "Аудио фраз",
+                "value": f"последние {s.audio_keep}",
+                "on": bool(flags.get("keep_audio", True)),
+                "ok": True,
+                "note": "для повторного распознавания",
+                "hint": "Enter — включить/выключить",
+            },
         ]
 
         # Ввод: микрофон/режим/вставка/стиль/цель — меняются на лету.
@@ -872,27 +1069,51 @@ class MyFlowApp:
             # устройства по индексу, чтобы панель не врала «системный».
             try:
                 import sounddevice as sd
-                mic_label = (f"{self._short_mic_name(sd.query_devices(mic)['name'])}"
-                             f" [#{mic}]")
+
+                mic_label = (
+                    f"{self._short_mic_name(sd.query_devices(mic)['name'])} [#{mic}]"
+                )
             except Exception:  # noqa: BLE001
                 mic_label = f"#{mic}"
         mode_label = "авто (слушает)" if self._pref_auto else "PTT (F8)"
         target = self._target_locked or self._target
-        target_label = ("⚲ " + target.label) if self._target_locked is not None else (
-            target.label if target is not None else "активное окно")
+        target_label = (
+            ("⚲ " + target.label)
+            if self._target_locked is not None
+            else (target.label if target is not None else "активное окно")
+        )
         values = [
-            {"key": "mic", "label": "Микрофон", "value": mic_label,
-             "hint": "←→ сменить микрофон на лету (F5 — пересканировать)"},
-            {"key": "mode", "label": "Режим диктовки", "value": mode_label,
-             "hint": "←→ авто ↔ PTT"},
-            {"key": "insert", "label": "Куда вставлять",
-             "value": INSERT_METHOD_LABELS.get(s.insert_method, s.insert_method),
-             "hint": "←→ сменить способ: активное окно → OpenCode → "
-                     "DeepSeek Harness (оба без фокуса)"},
-            {"key": "style", "label": "Стиль текста", "value": s.default_style,
-             "hint": "←→ стиль по умолчанию (F7 — на лету)"},
-            {"key": "target", "label": "Цель вставки", "value": target_label,
-             "hint": "Enter — закрепить/снять окно (F6)"},
+            {
+                "key": "mic",
+                "label": "Микрофон",
+                "value": mic_label,
+                "hint": "←→ сменить микрофон на лету (F5 — пересканировать)",
+            },
+            {
+                "key": "mode",
+                "label": "Режим диктовки",
+                "value": mode_label,
+                "hint": "←→ авто ↔ PTT",
+            },
+            {
+                "key": "insert",
+                "label": "Куда вставлять",
+                "value": INSERT_METHOD_LABELS.get(s.insert_method, s.insert_method),
+                "hint": "←→ сменить способ: активное окно → OpenCode → "
+                "DeepSeek Harness (оба без фокуса)",
+            },
+            {
+                "key": "style",
+                "label": "Стиль текста",
+                "value": s.default_style,
+                "hint": "←→ стиль по умолчанию (F7 — на лету)",
+            },
+            {
+                "key": "target",
+                "label": "Цель вставки",
+                "value": target_label,
+                "hint": "Enter — закрепить/снять окно (F6)",
+            },
         ]
 
         # Строка «Мост в DSH»: появляется, только если выбран режим DeepSeek
@@ -900,19 +1121,32 @@ class MyFlowApp:
         if s.insert_method == "dsh":
             try:
                 from myflow.dsh_bridge import bridge_health, dsh_app_running
+
                 health = bridge_health()
                 if not health["ok"]:
                     broken = bool(health["broken"])
-                    modules.append({
-                        "key": "dshbridge", "label": "Мост в DSH",
-                        "value": ("Enter — починить (ссылка битая)" if broken
-                                  else "Enter — поставить"),
-                        "on": False, "ok": False,
-                        "note": "переезд MyFLOW" if broken else "плагин",
-                        "hint": "Enter — " + ("починить" if broken else "поставить")
-                                + " плагин MyFLOW в профиль DeepSeek Harness; "
-                                + ("потом перезапустить DSH"
-                                   if dsh_app_running() else "потом запустить DSH")})
+                    modules.append(
+                        {
+                            "key": "dshbridge",
+                            "label": "Мост в DSH",
+                            "value": (
+                                "Enter — починить (ссылка битая)"
+                                if broken
+                                else "Enter — поставить"
+                            ),
+                            "on": False,
+                            "ok": False,
+                            "note": "переезд MyFLOW" if broken else "плагин",
+                            "hint": "Enter — "
+                            + ("починить" if broken else "поставить")
+                            + " плагин MyFLOW в профиль DeepSeek Harness; "
+                            + (
+                                "потом перезапустить DSH"
+                                if dsh_app_running()
+                                else "потом запустить DSH"
+                            ),
+                        }
+                    )
             except Exception:  # noqa: BLE001
                 pass
 
@@ -927,13 +1161,23 @@ class MyFlowApp:
                 value, note = f"пора: +{retrain['new']} диктовок", "Enter"
             else:
                 value = f"+{retrain['new']} из {retrain['threshold']}"
-                note = (f"модель на {retrain['trained_on']} диктовках"
-                        if retrain["trained_on"] else "ещё не обучалась")
-            modules.append({
-                "key": "retrain", "label": "Дообучение", "value": value,
-                "on": bool(retrain["running"]), "ok": True, "note": note,
-                "hint": "Enter — дообучить постпроцессор на свежих диктовках "
-                        "(~20 мин, GPU занят; журнал data/retrain.log)"})
+                note = (
+                    f"модель на {retrain['trained_on']} диктовках"
+                    if retrain["trained_on"]
+                    else "ещё не обучалась"
+                )
+            modules.append(
+                {
+                    "key": "retrain",
+                    "label": "Дообучение",
+                    "value": value,
+                    "on": bool(retrain["running"]),
+                    "ok": True,
+                    "note": note,
+                    "hint": "Enter — дообучить постпроцессор на свежих диктовках "
+                    "(~20 мин, GPU занят; журнал data/retrain.log)",
+                }
+            )
 
         # Строка «Постпроцессор» появляется ТОЛЬКО когда модель собрана: иначе она
         # обещала бы то, чего нет (модель дообучается отдельно, tools/train_postproc.md).
@@ -965,7 +1209,7 @@ class MyFlowApp:
         cached = getattr(self, "_mic_cache", None)
         if cached:
             mics, started = cached
-            if mics or now - started < 30.0:     # пустой кэш обновляем по таймауту
+            if mics or now - started < 30.0:  # пустой кэш обновляем по таймауту
                 return mics
         # Кэша нет/устарел — отдаём мгновенный список без пробы и греем полный
         # в фоне. Метку времени пишем сразу, иначе один скан запускался бы на
@@ -978,7 +1222,10 @@ class MyFlowApp:
 
     def _refresh_mics_async(self) -> None:
         """Полное сканирование (проба звука) в фоне; результат кладём в кэш."""
-        if getattr(self, "_mic_thread", None) is not None and self._mic_thread.is_alive():
+        if (
+            getattr(self, "_mic_thread", None) is not None
+            and self._mic_thread.is_alive()
+        ):
             return
 
         def worker() -> None:
@@ -989,6 +1236,7 @@ class MyFlowApp:
                     self._mic_cache = (fast_mic_list(), time.monotonic())
                     return
                 from myflow.pick_mic import gather_mics
+
                 current = self.settings.get().asr.input_device
                 alive = [m for m in gather_mics() if m.get("alive")]
                 if current is not None and not any(m["idx"] == current for m in alive):
@@ -1004,8 +1252,7 @@ class MyFlowApp:
             finally:
                 self._mic_scanning = False
 
-        self._mic_thread = threading.Thread(target=worker, daemon=True,
-                                            name="mic-scan")
+        self._mic_thread = threading.Thread(target=worker, daemon=True, name="mic-scan")
         self._mic_thread.start()
 
     def control_apply(self, action: str, value=None) -> tuple[bool, str]:
@@ -1021,7 +1268,10 @@ class MyFlowApp:
                 # Кэш НЕ сбрасываем: полный скан — 12 секунд, а он нам тут не нужен.
                 # Выбранное устройство гарантированно окажется в списке после
                 # очередного фонового обновления; переключение работает мгновенно.
-                return True, f"микрофон переключён на {idx if idx is not None else 'системный'}"
+                return (
+                    True,
+                    f"микрофон переключён на {idx if idx is not None else 'системный'}",
+                )
 
             if action == "mode":
                 new_mode = "auto" if value else "ptt"
@@ -1042,10 +1292,14 @@ class MyFlowApp:
 
             if action == "insert":
                 # Цикл по ←→: активное окно → OpenCode → DeepSeek Harness.
-                current = (s.insert_method if s.insert_method in INSERT_METHODS
-                           else INSERT_METHODS[0])
-                method = INSERT_METHODS[(INSERT_METHODS.index(current) + 1)
-                                        % len(INSERT_METHODS)]
+                current = (
+                    s.insert_method
+                    if s.insert_method in INSERT_METHODS
+                    else INSERT_METHODS[0]
+                )
+                method = INSERT_METHODS[
+                    (INSERT_METHODS.index(current) + 1) % len(INSERT_METHODS)
+                ]
                 s.insert_method = method
                 store.save()
                 if method == "opencode":
@@ -1071,7 +1325,9 @@ class MyFlowApp:
             if action == "voice_mode":
                 modes = ["auto", "always", "off"]
                 cur = s.voiceprint.mode if s.voiceprint.mode in modes else "auto"
-                nxt = modes[(modes.index(cur) + (1 if float(value) > 0 else -1)) % len(modes)]
+                nxt = modes[
+                    (modes.index(cur) + (1 if float(value) > 0 else -1)) % len(modes)
+                ]
                 s.voiceprint.mode = nxt
                 store.save()
                 print(f"[myflow] проверка голоса: режим {nxt}")
@@ -1105,12 +1361,16 @@ class MyFlowApp:
                 # подозрительные фразы будут просто оставаться на GigaAM.
                 if getattr(self.whisper, "backend_name", "") != "whisper":
                     if not self._ensure_server("asr"):
-                        return False, ("whisper-сервер не поднялся — авто-выбор НЕ "
-                                       "включён (проверь bin\\whisper и модель)")
+                        return False, (
+                            "whisper-сервер не поднялся — авто-выбор НЕ "
+                            "включён (проверь bin\\whisper и модель)"
+                        )
                 # Защита: пока включён Oracle LLM, авто-выбор включить нельзя.
                 if bool(getattr(s.asr, "judge", False)):
-                    return False, ("сначала выключи «Oracle LLM» — режимы несовместимы "
-                                   "(оба гоняют whisper и LLM)")
+                    return False, (
+                        "сначала выключи «Oracle LLM» — режимы несовместимы "
+                        "(оба гоняют whisper и LLM)"
+                    )
                 s.asr.router = True
                 self.settings.save()
                 self._ensure_second_opinion()
@@ -1121,7 +1381,9 @@ class MyFlowApp:
             # Второе мнение нужно ещё и судье: если он включён — сервер и клиент
             # НЕ трогаем, иначе Oracle LLM останется без whisper.
             if bool(getattr(s.asr, "judge", False)):
-                print("[myflow] авто-выбор ASR выключен (Oracle LLM продолжает работать)")
+                print(
+                    "[myflow] авто-выбор ASR выключен (Oracle LLM продолжает работать)"
+                )
                 return True, "авто-выбор выключен (Oracle LLM остаётся включённым)"
             self._second = None
             # Если основной движок не whisper, сервер больше не нужен — гасим
@@ -1136,6 +1398,7 @@ class MyFlowApp:
 
         if key == "dshbridge":
             from myflow.dsh_bridge import repair_bridge
+
             ok, message = repair_bridge()
             print(f"[myflow] мост в DSH: {message}")
             return ok, message
@@ -1145,18 +1408,24 @@ class MyFlowApp:
             if not bool(getattr(s.asr, "judge", False)):
                 if getattr(self.whisper, "backend_name", "") != "whisper":
                     if not self._ensure_server("asr"):
-                        return False, ("whisper-сервер не поднялся — Oracle LLM НЕ включён "
-                                       "(проверь bin\\whisper и модель)")
+                        return False, (
+                            "whisper-сервер не поднялся — Oracle LLM НЕ включён "
+                            "(проверь bin\\whisper и модель)"
+                        )
                 if not getattr(self.polish, "alive", lambda: False)():
                     # Сервер мог не подниматься при загрузке (грузим только нужное):
                     # поднимаем его сейчас, режим-то включают осознанно.
                     if not self._ensure_server("llm"):
-                        return False, ("LLM не поднялась — Oracle LLM нечем склеивать "
-                                       "(проверь :8082)")
+                        return False, (
+                            "LLM не поднялась — Oracle LLM нечем склеивать "
+                            "(проверь :8082)"
+                        )
                 # Защита: пока включён авто-выбор, Oracle LLM включить нельзя.
                 if bool(getattr(s.asr, "router", False)):
-                    return False, ("сначала выключи «Авто-выбор» — режимы несовместимы "
-                                   "(оба гоняют whisper и LLM)")
+                    return False, (
+                        "сначала выключи «Авто-выбор» — режимы несовместимы "
+                        "(оба гоняют whisper и LLM)"
+                    )
                 s.asr.judge = True
                 self.settings.save()
                 self._ensure_second_opinion()
@@ -1165,8 +1434,10 @@ class MyFlowApp:
             s.asr.judge = False
             self.settings.save()
             print("[myflow] Oracle LLM выключен")
-            if not getattr(s.asr, "router", False) and \
-                    getattr(self.whisper, "backend_name", "") != "whisper":
+            if (
+                not getattr(s.asr, "router", False)
+                and getattr(self.whisper, "backend_name", "") != "whisper"
+            ):
                 self._second = None
                 self._stop_server("asr")
             return True, "Oracle LLM выключен"
@@ -1184,14 +1455,16 @@ class MyFlowApp:
 
             if target == "gigaam":
                 from myflow.asr_gigaam import GigaAmClient
+
                 if not GigaAmClient.package_available():
                     return False, "GigaAM недоступен (нет onnx-asr) — оставил whisper"
                 client = GigaAmClient(s.asr)
                 self.whisper = client
                 s.asr.backend = "gigaam"
                 self.settings.save()
-                threading.Thread(target=client.warmup, daemon=True,
-                                 name="asr-switch-warmup").start()
+                threading.Thread(
+                    target=client.warmup, daemon=True, name="asr-switch-warmup"
+                ).start()
                 # whisper-сервер больше не нужен: гасим, освобождаем ~1 ГБ VRAM.
                 self._stop_server("asr")
                 print(f"[myflow] ASR: {self._asr_label()}")
@@ -1199,11 +1472,14 @@ class MyFlowApp:
 
             # target == "whisper": без живого сервера он бесполезен.
             if not self._ensure_server("asr"):
-                s.asr.backend = previous          # откатываем настройку
+                s.asr.backend = previous  # откатываем настройку
                 self.settings.save()
-                return False, ("whisper-сервер не поднялся (проверь bin\\whisper и "
-                               "модель) — оставил " + (previous or "gigaam"))
+                return False, (
+                    "whisper-сервер не поднялся (проверь bin\\whisper и "
+                    "модель) — оставил " + (previous or "gigaam")
+                )
             from myflow.asr import WhisperClient
+
             self.whisper = WhisperClient(s.asr)
             s.asr.backend = "whisper"
             self.settings.save()
@@ -1212,8 +1488,9 @@ class MyFlowApp:
 
         if key == "size":
             if getattr(self, "_terminal_managed_size", False):
-                return False, ("размером управляет терминал — растяни окно мышью, "
-                               "он его запомнит")
+                return False, (
+                    "размером управляет терминал — растяни окно мышью, он его запомнит"
+                )
             # Размер окна: перебираем пресеты. Можно и просто растянуть окно
             # мышью — TUI это заметит и запомнит (см. TuiApp._adopt_size).
             presets = [(100, 28), (120, 34), (140, 44), (160, 50)]
@@ -1231,8 +1508,13 @@ class MyFlowApp:
             s.auto_stop_by_silence = not s.auto_stop_by_silence
             self.settings.save()
             self.recorder.on_auto_stop = (
-                self._on_auto_stop if (not self._pref_auto and s.auto_stop_by_silence) else None)
-            print(f"[myflow] VAD-автостоп: {'вкл' if s.auto_stop_by_silence else 'выкл'}")
+                self._on_auto_stop
+                if (not self._pref_auto and s.auto_stop_by_silence)
+                else None
+            )
+            print(
+                f"[myflow] VAD-автостоп: {'вкл' if s.auto_stop_by_silence else 'выкл'}"
+            )
             return True, f"VAD-автостоп: {'вкл' if s.auto_stop_by_silence else 'выкл'}"
 
         if key == "llm":
@@ -1244,17 +1526,22 @@ class MyFlowApp:
                 self._ensure_llm_async()
             else:
                 self._stop_llm_server()
-            print(f"[myflow] Post-Processor: "
-                  f"{'включён' if s.polish.enabled else 'выключен'}")
-            return True, (f"Post-Processor: "
-                          f"{'включён' if s.polish.enabled else 'выключен'}")
+            print(
+                f"[myflow] Post-Processor: "
+                f"{'включён' if s.polish.enabled else 'выключен'}"
+            )
+            return True, (
+                f"Post-Processor: {'включён' if s.polish.enabled else 'выключен'}"
+            )
 
         if key == "voice":
             s.voiceprint.enabled = not s.voiceprint.enabled
             self.settings.save()
             if self.voice is not None:
                 self.voice.enabled = s.voiceprint.enabled
-            print(f"[myflow] проверка голоса: {'вкл' if s.voiceprint.enabled else 'выкл'}")
+            print(
+                f"[myflow] проверка голоса: {'вкл' if s.voiceprint.enabled else 'выкл'}"
+            )
             return True, f"проверка голоса: {'вкл' if s.voiceprint.enabled else 'выкл'}"
 
         if key == "ax":
@@ -1279,8 +1566,12 @@ class MyFlowApp:
                         self.overlay.hide()
                 except Exception:  # noqa: BLE001
                     pass
-            label = {"snippets": "сниппеты", "learning": "обучение",
-                     "overlay": "оверлей", "keep_audio": "запись аудио фраз"}[key]
+            label = {
+                "snippets": "сниппеты",
+                "learning": "обучение",
+                "overlay": "оверлей",
+                "keep_audio": "запись аудио фраз",
+            }[key]
             print(f"[myflow] {label}: {'вкл' if flags[key] else 'выкл'}")
             return True, f"{label}: {'вкл' if flags[key] else 'выкл'}"
 
@@ -1300,7 +1591,7 @@ class MyFlowApp:
         try:
             self.recorder.shutdown()
         except Exception:  # noqa: BLE001
-            pass      # гасим фоновые петли (в т.ч. сэмплер фокуса)
+            pass  # гасим фоновые петли (в т.ч. сэмплер фокуса)
         if self._listener:
             self._listener.stop()
         if self._pref_auto:
@@ -1389,22 +1680,26 @@ class MyFlowApp:
         # suppress=True (по желанию): наши F-клавиши не улетают в активное окно
         # (в IDE F8 = шаг отладки). По умолчанию False — как было.
         self._listener = keyboard.Listener(
-            on_press=self._on_press, on_release=self._on_release,
+            on_press=self._on_press,
+            on_release=self._on_release,
             suppress=bool(getattr(hk, "suppress", False)),
         )
         self._listener.start()
 
     def _start_listener_async(self) -> None:
         """Поднять слушатель хоткеев, не блокируя старт приложения."""
-        threading.Thread(target=self._start_listener_safe, daemon=True,
-                         name="listener-start").start()
+        threading.Thread(
+            target=self._start_listener_safe, daemon=True, name="listener-start"
+        ).start()
 
     def _start_listener_safe(self) -> None:
         try:
             self._start_listener()
         except Exception as exc:  # noqa: BLE001
-            print(f"[myflow] слушатель хоткеев не поднялся: {exc!r} "
-                  f"(сторож попробует снова)")
+            print(
+                f"[myflow] слушатель хоткеев не поднялся: {exc!r} "
+                f"(сторож попробует снова)"
+            )
 
     def _listener_watchdog_loop(self, interval: float = 2.0) -> None:
         """Страховка: если слушатель хоткеев умер — поднять заново.
@@ -1435,7 +1730,7 @@ class MyFlowApp:
         self._key_down = False
         self._ptt_held = False
         with self._preview_lock:
-            self._preview_slot = None   # отменённый драфт не показываем
+            self._preview_slot = None  # отменённый драфт не показываем
         if self._pref_auto:
             try:
                 self.recorder.discard()
@@ -1461,7 +1756,8 @@ class MyFlowApp:
         # (тесты, встраивание) не имеет вспомогательного метода.
         interval_fn = getattr(self, "_watchdog_interval", None)
         while not self._stopping.wait(
-                interval_fn(interval) if callable(interval_fn) else interval):
+            interval_fn(interval) if callable(interval_fn) else interval
+        ):
             try:
                 if self.polish.cfg.enabled:
                     continue
@@ -1481,7 +1777,8 @@ class MyFlowApp:
         if self._polish_watchdog is not None and self._polish_watchdog.is_alive():
             return
         self._polish_watchdog = threading.Thread(
-            target=self._polish_watchdog_loop, daemon=True, name="polish-watchdog")
+            target=self._polish_watchdog_loop, daemon=True, name="polish-watchdog"
+        )
         self._polish_watchdog.start()
 
     def _sync_dsh_bridge(self) -> None:
@@ -1492,8 +1789,9 @@ class MyFlowApp:
         """
         try:
             from myflow.dsh_bridge import bridge_installed, sync_bridge
+
             if not bridge_installed():
-                return                      # моста нет — поставит пользователь по Enter
+                return  # моста нет — поставит пользователь по Enter
             ok, message = sync_bridge()
             if ok and "обновил" in message:
                 print(f"[myflow] мост в DSH: {message}")
@@ -1527,6 +1825,7 @@ class MyFlowApp:
         if cached is None:
             import copy as _copy
             from myflow.polish import PolishClient
+
             clone = _copy.copy(cfg)
             clone.url = getattr(cfg, "url_postproc", "http://127.0.0.1:8083/v1")
             # Главный тумблер полировки (polish.enabled) НЕ трогаем: если
@@ -1554,15 +1853,19 @@ class MyFlowApp:
             return PolishResult(text=text, latency_ms=0, skipped=True)
         if not _health_check_llm(client):
             self._polish_fails += 1
-            print("[myflow] ! LLM не отвечает — вставлю сырой ASR "
-                  "(поднимаю сервер в фоне, фраза в очереди на дополировку)")
+            print(
+                "[myflow] ! LLM не отвечает — вставлю сырой ASR "
+                "(поднимаю сервер в фоне, фраза в очереди на дополировку)"
+            )
             # Ждать здесь НЕЛЬЗЯ: холодный старт llama-server ~8 с, диктовка
             # встала бы. Поднимаем в фоне, а фразу дополирует очередь.
             self._ensure_llm_async()
             if self._polish_fails >= 3:
                 self.polish.cfg.enabled = False
-                print("[myflow] ! LLM недоступна 3 раза подряд — полировка выключена "
-                      "до восстановления сервера (проверяю раз в 30с)")
+                print(
+                    "[myflow] ! LLM недоступна 3 раза подряд — полировка выключена "
+                    "до восстановления сервера (проверяю раз в 30с)"
+                )
                 self._ensure_polish_watchdog()
             return PolishResult(text=text, latency_ms=0, skipped=True)
         try:
@@ -1588,8 +1891,10 @@ class MyFlowApp:
                     print(f"[myflow] ! повторная полировка не удалась ({exc2})")
             if self._polish_fails >= 3:
                 self.polish.cfg.enabled = False
-                print("[myflow] ! LLM недоступна 3 раза подряд — полировка выключена "
-                      "до восстановления сервера (проверяю раз в 30с)")
+                print(
+                    "[myflow] ! LLM недоступна 3 раза подряд — полировка выключена "
+                    "до восстановления сервера (проверяю раз в 30с)"
+                )
                 self._ensure_polish_watchdog()
             print("[myflow]   вставлю сырой ASR; фраза в очереди на дополировку")
             return PolishResult(text=text, latency_ms=0, skipped=True)
@@ -1624,16 +1929,20 @@ class MyFlowApp:
         stopper = self._server_stopper
         if stopper is None:
             return
-        threading.Thread(target=lambda: self._safe_stop(stopper, key),
-                         daemon=True, name=f"stop-{key}").start()
+        threading.Thread(
+            target=lambda: self._safe_stop(stopper, key),
+            daemon=True,
+            name=f"stop-{key}",
+        ).start()
 
     def _stop_llm_server(self) -> None:
         """Погасить LLM в фоне (не блокируя диктовку и UI)."""
         stopper = self._server_stopper
         if stopper is None:
             return
-        threading.Thread(target=lambda: self._safe_stop(stopper),
-                         daemon=True, name="llm-unload").start()
+        threading.Thread(
+            target=lambda: self._safe_stop(stopper), daemon=True, name="llm-unload"
+        ).start()
 
     @staticmethod
     def _safe_stop(stopper, key: str = "llm") -> None:
@@ -1680,8 +1989,9 @@ class MyFlowApp:
             except Exception:  # noqa: BLE001 — автолечение не должно ломать диктовку
                 pass
 
-        self._llm_revive = threading.Thread(target=worker, daemon=True,
-                                            name="llm-revive")
+        self._llm_revive = threading.Thread(
+            target=worker, daemon=True, name="llm-revive"
+        )
         self._llm_revive.start()
 
     def _wait_llm_ready(self, seconds: float, client=None) -> bool:
@@ -1711,11 +2021,14 @@ class MyFlowApp:
             self._ensure_server("postproc")
         else:
             self._ensure_llm_async()
-        waited = self._wait_llm_ready(float(getattr(cfg, "wait_on_fail_seconds", 2.5)),
-                                      client=client)
+        waited = self._wait_llm_ready(
+            float(getattr(cfg, "wait_on_fail_seconds", 2.5)), client=client
+        )
         if waited:
-            print(f"[myflow]   LLM поднялась — повторяю полировку "
-                  f"(ждали до {getattr(cfg, 'wait_on_fail_seconds', 2.5):.1f} с)")
+            print(
+                f"[myflow]   LLM поднялась — повторяю полировку "
+                f"(ждали до {getattr(cfg, 'wait_on_fail_seconds', 2.5):.1f} с)"
+            )
         return waited
 
     def _repolish_loop(self) -> None:
@@ -1736,19 +2049,22 @@ class MyFlowApp:
                     # не поднимаем сервер: он мог освобождать VRAM под игру.
                     if getattr(self, "_polish_user_off", False):
                         continue
-                    self.polish.cfg.enabled = True     # дадим шанс после автолечения
+                    self.polish.cfg.enabled = True  # дадим шанс после автолечения
                 if not _health_check_llm(self.polish):
                     self._ensure_llm_async()
                     continue
                 done = 0
                 for row in self.db.deferred_polish(limit=5):
                     try:
-                        res = self.polish.polish(row["asr_text"],
-                                                 style=row.get("style") or "plain",
-                                                 dictionary=self.db.get_dictionary(
-                                                     row.get("app_window")))
+                        res = self.polish.polish(
+                            row["asr_text"],
+                            style=row.get("style") or "plain",
+                            dictionary=self.db.get_dictionary(row.get("app_window")),
+                        )
                     except Exception as exc:  # noqa: BLE001
-                        print(f"[myflow] ! дополировка #{row['id']} не удалась: {exc!r}")
+                        print(
+                            f"[myflow] ! дополировка #{row['id']} не удалась: {exc!r}"
+                        )
                         break
                     score = divergence_score(row["asr_text"], res.text)
                     self.db.set_polished(row["id"], res.text, score)
@@ -1771,12 +2087,14 @@ class MyFlowApp:
         except Exception:  # noqa: BLE001
             self._deferred_polish_count = 0
         if self._deferred_polish_count:
-            print(f"[myflow] ! фраз в очереди на дополировку: "
-                  f"{self._deferred_polish_count} (LLM оживёт — дополирую)")
-        self._repolish_thread = threading.Thread(target=self._repolish_loop, daemon=True,
-                                                name="repolish")
+            print(
+                f"[myflow] ! фраз в очереди на дополировку: "
+                f"{self._deferred_polish_count} (LLM оживёт — дополирую)"
+            )
+        self._repolish_thread = threading.Thread(
+            target=self._repolish_loop, daemon=True, name="repolish"
+        )
         self._repolish_thread.start()
-
 
     # ---- жизненный цикл записи (PTT) ----
 
@@ -1843,7 +2161,7 @@ class MyFlowApp:
             started_at = time.monotonic() - max(0.0, rec.duration_ms / 1000.0)
             self._target = self._focus_history.at(started_at) or current_window()
         else:
-            self._target = None       # insert_target="focus": решаем в момент вставки
+            self._target = None  # insert_target="focus": решаем в момент вставки
         self._enqueue(rec)
 
     def _start_focus_tracker(self) -> None:
@@ -1861,8 +2179,9 @@ class MyFlowApp:
                 self._focus_history.prune()
                 time.sleep(0.4)
 
-        self._focus_thread = threading.Thread(target=loop, daemon=True,
-                                              name="focus-tracker")
+        self._focus_thread = threading.Thread(
+            target=loop, daemon=True, name="focus-tracker"
+        )
         self._focus_thread.start()
 
     def _on_live_preview(self, pcm_int16) -> None:
@@ -1873,7 +2192,9 @@ class MyFlowApp:
         первыми. Раньше превью лежали в общей FIFO и задерживали вставку.
         """
         with self._preview_lock:
-            self._preview_slot = _Job(gen=self._gen, item=_LivePreview(pcm_int16=pcm_int16))
+            self._preview_slot = _Job(
+                gen=self._gen, item=_LivePreview(pcm_int16=pcm_int16)
+            )
 
     def _take_preview(self) -> _Job | None:
         with self._preview_lock:
@@ -1939,7 +2260,9 @@ class MyFlowApp:
         cmd = cmd_classify(text)
         if cmd is None and is_llm_intent_candidate(text) and self.polish.cfg.enabled:
             try:
-                cmd = llm_classify(text, self.polish.cfg.url, self.polish._effective_model())
+                cmd = llm_classify(
+                    text, self.polish.cfg.url, self.polish._effective_model()
+                )
             except Exception:
                 cmd = None
         if cmd is None or cmd.kind not in KNOWN_KINDS:
@@ -2015,6 +2338,7 @@ class MyFlowApp:
         в UNICODE-инъекцию: Ctrl+Z не срабатывает, а оверлей рапортует успех.
         """
         from pynput.keyboard import Key, KeyCode, Controller
+
         kb = Controller()
         if what == "ENTER":
             kb.press(Key.enter)
@@ -2036,9 +2360,10 @@ class MyFlowApp:
         if getattr(self, "_second", None) is not None:
             return
         if getattr(self.whisper, "backend_name", "") != "gigaam":
-            return          # основной движок уже whisper — второе мнение не нужно
+            return  # основной движок уже whisper — второе мнение не нужно
         try:
             from myflow.asr import WhisperClient
+
             self._second = WhisperClient(cfg)
         except Exception as exc:  # noqa: BLE001
             print(f"[myflow] второе мнение недоступно: {exc!r}")
@@ -2076,8 +2401,11 @@ class MyFlowApp:
         except Exception:  # noqa: BLE001
             return res, origin
         # Режим «Oracle LLM»: гоняем оба движка и просим LLM склеить лучший текст.
-        polish_probe = (getattr(self.polish, "alive", None)
-                        or getattr(self.polish, "health", None) or (lambda: False))
+        polish_probe = (
+            getattr(self.polish, "alive", None)
+            or getattr(self.polish, "health", None)
+            or (lambda: False)
+        )
         if getattr(cfg, "judge", False) and polish_probe():
             try:
                 alt_all = second.transcribe(pcm)
@@ -2087,17 +2415,27 @@ class MyFlowApp:
             if alt_all is not None and (alt_all.text or "").strip():
                 verdict = judge_merge(self.polish, res.text, alt_all.text)
                 if verdict.text:
-                    print(f"[myflow] ⚖ Oracle LLM ({verdict.reason}, {verdict.latency_ms} мс): "
-                          f"склеил два текста")
+                    print(
+                        f"[myflow] ⚖ Oracle LLM ({verdict.reason}, {verdict.latency_ms} мс): "
+                        f"склеил два текста"
+                    )
                     self.overlay.show("⚖ Oracle: склеил два текста", "#f5c542")
-                    res = AsrResult(text=verdict.text, language=res.language,
-                                    latency_ms=res.latency_ms + alt_all.latency_ms + verdict.latency_ms)
+                    res = AsrResult(
+                        text=verdict.text,
+                        language=res.language,
+                        latency_ms=res.latency_ms
+                        + alt_all.latency_ms
+                        + verdict.latency_ms,
+                    )
                     return res, f"judge:{verdict.reason}"
                 # Oracle LLM не помог — применяем правило авто-выбора к уже готовым
                 # текстам (whisper повторно НЕ гоняем).
-                print(f"[myflow] ⚖ Oracle LLM не помог ({verdict.reason}) — выбираю правило")
-                fallback = review_asr_quality(res.text, duration_ms=duration_ms,
-                                              cfg=_with_router(cfg))
+                print(
+                    f"[myflow] ⚖ Oracle LLM не помог ({verdict.reason}) — выбираю правило"
+                )
+                fallback = review_asr_quality(
+                    res.text, duration_ms=duration_ms, cfg=_with_router(cfg)
+                )
                 if fallback.use_second:
                     return alt_all, f"whisper:после Oracle ({fallback.reason})"
                 return res, origin
@@ -2144,34 +2482,46 @@ class MyFlowApp:
         # (телевизор, коллега, видео) — не тратим ASR/LLM и ничего не вставляем.
         # В PTT-режиме по умолчанию не проверяем: удержание F8 — явное намерение.
         voice_cfg = self.settings.get().voiceprint
-        voice_active = (voice_cfg.mode == "always"
-                        or (voice_cfg.mode == "auto" and self._pref_auto))
+        voice_active = voice_cfg.mode == "always" or (
+            voice_cfg.mode == "auto" and self._pref_auto
+        )
         voice_ok, voice_score, voice_reason = (True, None, "проверка не в этом режиме")
         if voice_active:
             voice_ok, voice_score, voice_reason = self.voice.check(recording.pcm_int16)
         if not voice_ok:
             e2e_ms = int((time.perf_counter() - started) * 1000)
-            print(f"[myflow] ✗ {voice_reason} — фраза пропущена "
-                  f"({recording.duration_ms} мс, {e2e_ms} мс)")
+            print(
+                f"[myflow] ✗ {voice_reason} — фраза пропущена "
+                f"({recording.duration_ms} мс, {e2e_ms} мс)"
+            )
             self.overlay.show("✗ не ваш голос", "#e5484d")
-            self.db.insert_history(DictationRecord(
-                asr_text="", polished_text="", app_window=app,
-                duration_ms=recording.duration_ms, e2e_latency_ms=e2e_ms,
-                style=self._resolve_style(app), status="other_speaker",
-                app_category=app_category,
-                audio_path=str(audio_path) if audio_path else None,
-            ))
+            self.db.insert_history(
+                DictationRecord(
+                    asr_text="",
+                    polished_text="",
+                    app_window=app,
+                    duration_ms=recording.duration_ms,
+                    e2e_latency_ms=e2e_ms,
+                    style=self._resolve_style(app),
+                    status="other_speaker",
+                    app_category=app_category,
+                    audio_path=str(audio_path) if audio_path else None,
+                )
+            )
             return
         if voice_score is not None:
             print(f"[myflow] ☺ голос владельца (cosine={voice_score:.3f})")
 
-        print(f"[myflow] ⚙ распознавание ({recording.duration_ms} мс, {app_category})...")
+        print(
+            f"[myflow] ⚙ распознавание ({recording.duration_ms} мс, {app_category})..."
+        )
         self.overlay.show("⚙ распознавание…", "#f5c542")
-        self._refresh_asr_prompt()   # словарь -> подсказка whisper (раз в минуту)
+        self._refresh_asr_prompt()  # словарь -> подсказка whisper (раз в минуту)
 
         try:
-            asr, asr_origin = self._transcribe(recording.pcm_int16,
-                                              duration_ms=recording.duration_ms)
+            asr, asr_origin = self._transcribe(
+                recording.pcm_int16, duration_ms=recording.duration_ms
+            )
         except Exception as exc_asr:
             # Отказ ASR не должен терять фразу: если это whisper — падаем на
             # локальную GigaAM и повторяем распознавание ТОГО ЖЕ аудио.
@@ -2182,21 +2532,29 @@ class MyFlowApp:
                 _tb_to_file("ОШИБКА ASR")
                 print(f"[myflow] ✗ ASR не справился: {exc_asr}")
                 self.overlay.show("✗ ASR ошибка", "#e5484d")
-                self._record_failure("asr_error", app, app_category, recording,
-                                     audio_path)
+                self._record_failure(
+                    "asr_error", app, app_category, recording, audio_path
+                )
                 return
         if not asr.text:
             print("[myflow] ✗ пустой результат распознавания")
             self.overlay.show("✗ не распознано", "#e5484d")
-            self._record_failure("empty_asr", app, app_category, recording, audio_path,
-                                 asr_latency_ms=asr.latency_ms)
+            self._record_failure(
+                "empty_asr",
+                app,
+                app_category,
+                recording,
+                audio_path,
+                asr_latency_ms=asr.latency_ms,
+            )
             return
 
         # СНИППЕТЫ — ДО команд и полировки: явная пользовательская фраза
         # («мой email», «организуй мысли») должна подставить готовый текст.
         if flags.get("snippets", True):
-            snippet = self._try_snippet(asr.text, app, app_category, recording,
-                                        audio_path, asr, gen)
+            snippet = self._try_snippet(
+                asr.text, app, app_category, recording, audio_path, asr, gen
+            )
             if snippet:
                 return
 
@@ -2204,9 +2562,11 @@ class MyFlowApp:
         # команда — обрабатываем и выходим (никакой вставки/БД).
         cmd = self._dispatch_voice_command(asr.text)
         if cmd:
-            print(f"[myflow]   ⌘ команда: {cmd.kind}"
-                  + (f" <{cmd.text[:40]}>" if cmd.text else "")
-                  + f" ({cmd.source})")
+            print(
+                f"[myflow]   ⌘ команда: {cmd.kind}"
+                + (f" <{cmd.text[:40]}>" if cmd.text else "")
+                + f" ({cmd.source})"
+            )
             return
 
         dic = self.db.get_dictionary(app) if flags["learning"] else []
@@ -2225,10 +2585,13 @@ class MyFlowApp:
         # (замер: такие фразы стоят ~280 мс LLM, а чистка — микросекунды).
         local_rules: list[str] = []
         fast_text = asr.text
-        if (not fast_ok and self.polish.cfg.enabled
-                and getattr(cfg_polish, "light_clean", True)
-                and "gigaam" in (backend_name or "").lower()
-                and style in ("plain", "casual")):
+        if (
+            not fast_ok
+            and self.polish.cfg.enabled
+            and getattr(cfg_polish, "light_clean", True)
+            and "gigaam" in (backend_name or "").lower()
+            and style in ("plain", "casual")
+        ):
             cleaned, local_rules = light_clean(asr.text)
             # ВАЖНО: без конечной пунктуации фраза часто ОБОРВАНА («Наш туи
             # тормозит. То») — там нужен LLM (он выбрасывает хвост), а не
@@ -2256,7 +2619,9 @@ class MyFlowApp:
             if polished.skipped or polished.truncated:
                 final_text = asr.text
                 if polished.truncated:
-                    print("[myflow]   WARNING: ответ LLM обрезан (max_tokens) — вставлен сырой ASR")
+                    print(
+                        "[myflow]   WARNING: ответ LLM обрезан (max_tokens) — вставлен сырой ASR"
+                    )
             else:
                 final_text = self._guard_polish(asr.text, polished.text, style)
 
@@ -2278,7 +2643,9 @@ class MyFlowApp:
         # Видимость полировки: показываем исходный ASR и результат LLM,
         # чтобы было понятно, что именно изменила модель.
         if fast_ok and local_rules:
-            print(f"[myflow]   LLM: лёгкая чистка без модели ({', '.join(local_rules)})")
+            print(
+                f"[myflow]   LLM: лёгкая чистка без модели ({', '.join(local_rules)})"
+            )
             print(f"[myflow]   ASR : {asr.text}")
             print(f"[myflow]   было→стало: {final_text}")
         elif fast_ok:
@@ -2289,8 +2656,10 @@ class MyFlowApp:
             print(f"[myflow]   LLM: текст не изменён (divergence={divergence:.2f})")
         else:
             print(f"[myflow]   ASR : {asr.text}")
-            print(f"[myflow]   LLM : {final_text}  (style={style}, "
-                  f"divergence={divergence:.2f}, polish={polished.latency_ms} мс)")
+            print(
+                f"[myflow]   LLM : {final_text}  (style={style}, "
+                f"divergence={divergence:.2f}, polish={polished.latency_ms} мс)"
+            )
 
         history_id = self.db.insert_history(
             DictationRecord(
@@ -2312,14 +2681,18 @@ class MyFlowApp:
         print(f"[myflow] ✓ {final_text}")
         # Профиль голоса пополняем своими же удачными фразами: чем больше
         # записей, тем устойчивее центроид (микрофон/комната меняются).
-        if self.voice.maybe_auto_enroll(recording.pcm_int16, accepted=True,
-                                        score=voice_score):
-            print(f"[myflow] ☺ профиль голоса обновлён "
-                  f"({self.voice.profile.count} фраз)")
+        if self.voice.maybe_auto_enroll(
+            recording.pcm_int16, accepted=True, score=voice_score
+        ):
+            print(
+                f"[myflow] ☺ профиль голоса обновлён ({self.voice.profile.count} фраз)"
+            )
         # Отмена могла прийти, пока шли ASR и полировка: текст уже в истории,
         # но вставлять его не нужно (иначе F9 «не отменяет»).
         if gen != self._gen:
-            print("[myflow] ○ отменено во время обработки — вставлять не буду (текст в истории)")
+            print(
+                "[myflow] ○ отменено во время обработки — вставлять не буду (текст в истории)"
+            )
             self.overlay.show("○ отменено", "#9aa0a6")
             return
         if flags["auto_insert"]:
@@ -2331,7 +2704,9 @@ class MyFlowApp:
                 if ok:
                     self._remember_insert_target()
                 if isinstance(self.paster, OpenCodeInjector) and not ok:
-                    print("[myflow] ✗ инжект не прошёл: opencode не найден или консоль недоступна")
+                    print(
+                        "[myflow] ✗ инжект не прошёл: opencode не найден или консоль недоступна"
+                    )
                     self.overlay.show("✗ инжект не прошёл", "#e5484d")
                 elif not ok:
                     # Вставка отложена (пользователь занят) — оверлей уже сказал
@@ -2349,8 +2724,7 @@ class MyFlowApp:
         polish_ms = 0 if fast_ok else polished.latency_ms
         print(f"[myflow] e2e={e2e_ms} мс (asr={asr.latency_ms}, polish={polish_ms})")
 
-    def _asr_fallback(self, recording: Recording,
-                      exc: Exception) -> AsrResult | None:
+    def _asr_fallback(self, recording: Recording, exc: Exception) -> AsrResult | None:
         """Резервное распознавание через GigaAM, если текущий движок отказал.
 
         Реальный случай: backend=whisper, а whisper-сервер не поднялся — каждая
@@ -2359,9 +2733,10 @@ class MyFlowApp:
         справилась — переключаемся на неё и запоминаем это в настройках.
         """
         if getattr(self.whisper, "backend_name", "") == "gigaam":
-            return None                     # уже GigaAM — резерва нет
+            return None  # уже GigaAM — резерва нет
         try:
             from myflow.asr_gigaam import GigaAmClient
+
             if not GigaAmClient.package_available():
                 return None
         except Exception:  # noqa: BLE001
@@ -2369,15 +2744,19 @@ class MyFlowApp:
         try:
             client = GigaAmClient(self.settings.get().asr)
             if not client.warmup():
-                print(f"[myflow] ✗ ASR-резерв: GigaAM не загрузилась "
-                      f"({client._load_error})")
+                print(
+                    f"[myflow] ✗ ASR-резерв: GigaAM не загрузилась "
+                    f"({client._load_error})"
+                )
                 return None
             result = client.transcribe(recording.pcm_int16)
             self.whisper = client
             self.settings.get().asr.backend = "gigaam"
             self.settings.save()
-            print(f"[myflow] ⚠ {type(exc).__name__}: основной ASR отказал "
-                  f"({str(exc)[:80]}) — распознал через GigaAM, переключился на неё")
+            print(
+                f"[myflow] ⚠ {type(exc).__name__}: основной ASR отказал "
+                f"({str(exc)[:80]}) — распознал через GigaAM, переключился на неё"
+            )
             self.overlay.show("⚠ ASR переключён на GigaAM", "#f5c542")
             return result
         except Exception as exc2:  # noqa: BLE001
@@ -2394,7 +2773,7 @@ class MyFlowApp:
         """
         cfg = self.settings.get().asr
         if not getattr(cfg, "prompt_from_dictionary", True):
-            cfg.initial_prompt = self._asr_prompt_base   # словарь не подмешиваем
+            cfg.initial_prompt = self._asr_prompt_base  # словарь не подмешиваем
             return
         now = time.monotonic()
         if not force and now - self._asr_prompt_ts < 60.0:
@@ -2420,8 +2799,8 @@ class MyFlowApp:
             cfg.initial_prompt = base
             return
         vocab_text = ", ".join(vocab)
-        budget = 380 - len(vocab_text) - 12      # символов (~190 токенов на всё)
-        head = base[:max(60, budget)].rstrip(" .,;:")
+        budget = 380 - len(vocab_text) - 12  # символов (~190 токенов на всё)
+        head = base[: max(60, budget)].rstrip(" .,;:")
         cfg.initial_prompt = f"{head}. Термины: {vocab_text}."
 
     # ---- сниппеты / аудио / статистика неудач ----
@@ -2458,7 +2837,11 @@ class MyFlowApp:
         вставка откладывается (status=pending) и выполняется на естественной
         паузе или когда он сам вернётся в целевое окно — управление не теряется.
         """
-        target = self._target if (self.settings.get().insert_target or "start") == "start" else None
+        target = (
+            self._target
+            if (self.settings.get().insert_target or "start") == "start"
+            else None
+        )
         cur = current_window()
         needs_move = bool(target) and (cur is None or cur.hwnd != target.hwnd)
         if needs_move:
@@ -2466,13 +2849,17 @@ class MyFlowApp:
             if idle < float(self.settings.get().insert_idle_seconds):
                 # Пользователь занят: не мешаем, положим в отложенные.
                 self._pending.append((text, target, history_id))
-                print(f"[myflow] ⏳ пользователь занят ({idle:.1f} с назад была активность) — "
-                      f"вставлю в «{target.label}» на паузе (F10 — вставить сразу)")
+                print(
+                    f"[myflow] ⏳ пользователь занят ({idle:.1f} с назад была активность) — "
+                    f"вставлю в «{target.label}» на паузе (F10 — вставить сразу)"
+                )
                 self.overlay.show("⏳ вставлю на паузе", "#f5c542")
                 return False
         return self._deliver(text, target, history_id)
 
-    def _deliver(self, text: str, target: WindowRef | None, history_id: int | None) -> bool:
+    def _deliver(
+        self, text: str, target: WindowRef | None, history_id: int | None
+    ) -> bool:
         """Непосредственная вставка (без проверки занятости)."""
         restored = False
         if target is not None:
@@ -2481,13 +2868,17 @@ class MyFlowApp:
                 if self.settings.get().refocus_on_insert:
                     restored = focus_window(target.hwnd)
                     if restored:
-                        time.sleep(0.06)      # окну нужно мгновение стать активным
+                        time.sleep(0.06)  # окну нужно мгновение стать активным
                     else:
-                        print(f"[myflow] ! не удалось вернуть фокус в «{target.label}» — "
-                              "вставляю в активное окно")
+                        print(
+                            f"[myflow] ! не удалось вернуть фокус в «{target.label}» — "
+                            "вставляю в активное окно"
+                        )
                 else:
-                    print(f"[myflow]   цель «{target.label}» не в фокусе, "
-                          "вставляю в активное (refocus_on_insert=false)")
+                    print(
+                        f"[myflow]   цель «{target.label}» не в фокусе, "
+                        "вставляю в активное (refocus_on_insert=false)"
+                    )
         ok = self.paster.paste(text)
         self._last_insert_ts = time.monotonic()
         # Наблюдателю правок важно знать, в какое окно вставили.
@@ -2512,8 +2903,10 @@ class MyFlowApp:
         text, target, history_id = self._pending[0]
         cur = current_window()
         if target is not None and not window_exists(target.hwnd):
-            print(f"[myflow] ! целевое окно «{target.label}» закрылось — "
-                  "вставляю в активное")
+            print(
+                f"[myflow] ! целевое окно «{target.label}» закрылось — "
+                "вставляю в активное"
+            )
             self._pending.popleft()
             self._deliver(text, None, history_id)
             return True
@@ -2524,8 +2917,10 @@ class MyFlowApp:
         idle = idle_seconds()
         if idle >= float(self.settings.get().insert_idle_seconds):
             self._pending.popleft()
-            print(f"[myflow] ⏳ пауза {idle:.1f} с — вставляю отложенное в "
-                  f"«{target.label}»")
+            print(
+                f"[myflow] ⏳ пауза {idle:.1f} с — вставляю отложенное в "
+                f"«{target.label}»"
+            )
             self._deliver(text, target, history_id)
             return True
         return False
@@ -2575,10 +2970,13 @@ class MyFlowApp:
         user = self.settings.get().app_categories or {}
         if user:
             merged: dict[str, list[str]] = {
-                k: list(v) for k, v in DEFAULT_APP_CATEGORIES.items()}
+                k: list(v) for k, v in DEFAULT_APP_CATEGORIES.items()
+            }
             for category, masks in user.items():
                 merged.setdefault(str(category), [])
-                merged[str(category)] = list(merged[str(category)]) + [str(m) for m in masks]
+                merged[str(category)] = list(merged[str(category)]) + [
+                    str(m) for m in masks
+                ]
             return detect_category(app_descriptor_text, merged)
         return detect_category(app_descriptor_text)
 
@@ -2590,23 +2988,43 @@ class MyFlowApp:
             print(f"[myflow]   аудио не сохранено: {exc!r}")
             return None
 
-    def _record_failure(self, status: str, app: str, category: str,
-                        recording: Recording, audio_path, asr_latency_ms: int = 0) -> None:
+    def _record_failure(
+        self,
+        status: str,
+        app: str,
+        category: str,
+        recording: Recording,
+        audio_path,
+        asr_latency_ms: int = 0,
+    ) -> None:
         """Зафиксировать неуспех в истории (для статистики и retry)."""
         try:
-            self.db.insert_history(DictationRecord(
-                asr_text="", polished_text="", app_window=app,
-                duration_ms=recording.duration_ms,
-                e2e_latency_ms=asr_latency_ms or None,
-                style=self._resolve_style(app), status=status,
-                app_category=category,
-                audio_path=str(audio_path) if audio_path else None,
-            ))
+            self.db.insert_history(
+                DictationRecord(
+                    asr_text="",
+                    polished_text="",
+                    app_window=app,
+                    duration_ms=recording.duration_ms,
+                    e2e_latency_ms=asr_latency_ms or None,
+                    style=self._resolve_style(app),
+                    status=status,
+                    app_category=category,
+                    audio_path=str(audio_path) if audio_path else None,
+                )
+            )
         except Exception as exc:  # noqa: BLE001
             print(f"[myflow]   не удалось записать неуспех: {exc!r}")
 
-    def _try_snippet(self, asr_text: str, app: str, category: str, recording: Recording,
-                     audio_path, asr: AsrResult, gen: int) -> bool:
+    def _try_snippet(
+        self,
+        asr_text: str,
+        app: str,
+        category: str,
+        recording: Recording,
+        audio_path,
+        asr: AsrResult,
+        gen: int,
+    ) -> bool:
         """Подставить сниппет, если распознанное совпало с его фразой."""
         try:
             snippet = self.db.find_snippet(asr_text)
@@ -2618,13 +3036,21 @@ class MyFlowApp:
         replacement = snippet["replacement"]
         self.db.bump_snippet(snippet["phrase"])
         e2e_ms = 0
-        history_id = self.db.insert_history(DictationRecord(
-            asr_text=asr_text, polished_text=replacement, app_window=app,
-            duration_ms=recording.duration_ms, e2e_latency_ms=e2e_ms,
-            detected_language=asr.language, style="snippet", status="snippet",
-            app_category=category, divergence=0.0,
-            audio_path=str(audio_path) if audio_path else None,
-        ))
+        history_id = self.db.insert_history(
+            DictationRecord(
+                asr_text=asr_text,
+                polished_text=replacement,
+                app_window=app,
+                duration_ms=recording.duration_ms,
+                e2e_latency_ms=e2e_ms,
+                detected_language=asr.language,
+                style="snippet",
+                status="snippet",
+                app_category=category,
+                divergence=0.0,
+                audio_path=str(audio_path) if audio_path else None,
+            )
+        )
         self._last_history_id = history_id
         print(f"[myflow] ✓ сниппет «{snippet['phrase']}» -> {replacement[:60]}")
         if self.settings.get().flags["auto_insert"] and gen == self._gen:
@@ -2654,10 +3080,14 @@ class MyFlowApp:
                 print(f"[myflow] retry #{row['id']}: аудио не найдено")
                 continue
             peak = float(abs(pcm).max()) / 32768.0 if len(pcm) else 0.0
-            rec = Recording(pcm_int16=pcm,
-                            duration_ms=int(len(pcm) * 1000 / 16000),
-                            max_amplitude=peak)
-            print(f"[myflow] retry #{row['id']} ({rec.duration_ms} мс, {row['status']})")
+            rec = Recording(
+                pcm_int16=pcm,
+                duration_ms=int(len(pcm) * 1000 / 16000),
+                max_amplitude=peak,
+            )
+            print(
+                f"[myflow] retry #{row['id']} ({rec.duration_ms} мс, {row['status']})"
+            )
             self.db.mark_status(int(row["id"]), "retried")
             before = self._last_history_id
             self._process_recording(self._gen, rec)
@@ -2666,8 +3096,9 @@ class MyFlowApp:
         return done
 
     @staticmethod
-    def _guard_polish(raw: str, polished_text: str, style: str,
-                      divergence: float | None = None) -> str:
+    def _guard_polish(
+        raw: str, polished_text: str, style: str, divergence: float | None = None
+    ) -> str:
         """Страховка от LLM-саботажа: обрезка ИЛИ переписывание -> сырой ASR.
 
         Урок из лога: «Проверка связи.» -> «Провер». Старая версия требовала
@@ -2678,20 +3109,26 @@ class MyFlowApp:
         больше половины слов — это не полировка, а генерация.
         """
         if not polished_text.strip():
-            return raw                      # пустой ответ ≠ пустая вставка
+            return raw  # пустой ответ ≠ пустая вставка
         raw = raw.strip()
         polished_text = polished_text.strip()
         n_raw = len(raw.split())
         n_pol = len(polished_text.split())
         c_raw, c_pol = len(raw), len(polished_text)
-        div = divergence if divergence is not None else divergence_score(raw, polished_text)
+        div = (
+            divergence
+            if divergence is not None
+            else divergence_score(raw, polished_text)
+        )
         tag = f"divergence={div:.2f}"
 
         if style == "summarize":
             # Пересказ короче исходника — норма. Но не в разы длиннее и не
             # должен терять числа (они важны: «восемь тысяч» -> 8080 и т.п.).
             if n_raw and n_pol > max(n_raw * 2, n_raw + 20):
-                print(f"[myflow]   WARNING: пересказ раздулся ({n_pol}/{n_raw} слов, {tag}) — сырой ASR")
+                print(
+                    f"[myflow]   WARNING: пересказ раздулся ({n_pol}/{n_raw} слов, {tag}) — сырой ASR"
+                )
                 return raw
             if _numbers(raw) - _numbers(polished_text):
                 print("[myflow]   WARNING: пересказ потерял числа — сырой ASR")
@@ -2699,16 +3136,24 @@ class MyFlowApp:
             return polished_text
 
         if c_raw and c_pol < c_raw * 0.6:
-            print(f"[myflow]   WARNING: LLM обрезал фразу ({c_pol}/{c_raw} симв., {tag}) — сырой ASR")
+            print(
+                f"[myflow]   WARNING: LLM обрезал фразу ({c_pol}/{c_raw} симв., {tag}) — сырой ASR"
+            )
             return raw
         if div > MAX_DIVERGENCE:
-            print(f"[myflow]   WARNING: LLM переписала фразу ({tag}, {n_pol}/{n_raw} слов) — сырой ASR")
+            print(
+                f"[myflow]   WARNING: LLM переписала фразу ({tag}, {n_pol}/{n_raw} слов) — сырой ASR"
+            )
             return raw
         if n_raw and n_pol <= n_raw * 0.5:
-            print(f"[myflow]   WARNING: LLM выбросил половину слов ({n_pol}/{n_raw}) — сырой ASR")
+            print(
+                f"[myflow]   WARNING: LLM выбросил половину слов ({n_pol}/{n_raw}) — сырой ASR"
+            )
             return raw
         if n_raw and n_pol > max(n_raw * 1.6, n_raw + 12):
-            print(f"[myflow]   WARNING: LLM исказил фразу ({n_pol}/{n_raw} слов) — сырой ASR")
+            print(
+                f"[myflow]   WARNING: LLM исказил фразу ({n_pol}/{n_raw} слов) — сырой ASR"
+            )
             return raw
         return polished_text
 
@@ -2727,7 +3172,9 @@ class MyFlowApp:
             i = self._style_cycle.index(self._style_override) + 1
             if i >= len(self._style_cycle):
                 self._style_override = None
-                print(f"[myflow] стиль: авто (по окну), базовый={self.settings.get().default_style}")
+                print(
+                    f"[myflow] стиль: авто (по окну), базовый={self.settings.get().default_style}"
+                )
             else:
                 self._style_override = self._style_cycle[i]
                 print(f"[myflow] стиль: {self._style_override} (ручной)")
@@ -2765,7 +3212,9 @@ class MyFlowApp:
         result = record_edit_and_learn(
             self.db, self._last_history_id, polished, edited_text
         )
-        print(f"[myflow] обучение: distance={result['edit_distance']}, новые слова={result['new_words']}")
+        print(
+            f"[myflow] обучение: distance={result['edit_distance']}, новые слова={result['new_words']}"
+        )
 
     def _spawn_edit_watcher(self, history_id: int, polished_text: str) -> None:
         """Ф9: фоном ловим правку вставленного текста и учим словарь.
@@ -2777,7 +3226,9 @@ class MyFlowApp:
         (observation_end_reason), как contentObservationEndReason у Wispr.
         """
         flags = self.settings.get().flags
-        use_ax = flags.get("ax_observation", True) and self.settings.get().use_ax_observation
+        use_ax = (
+            flags.get("ax_observation", True) and self.settings.get().use_ax_observation
+        )
         reader = getattr(self.paster, "can_read", False)
         if not use_ax and not reader:
             return  # ни AX, ни клипборда: наблюдать нечем
@@ -2797,8 +3248,10 @@ class MyFlowApp:
                     # могло быть ложным (поле без UI Automation, другое окно,
                     # вставка не прошла) — говорим об этом, а не молчим.
                     if reason == AxWatcher.NOT_FOUND:
-                        print("[myflow] ⚠ текста в поле не видно — проверь, что вставка "
-                              "прошла (поле может не поддерживать UI Automation)")
+                        print(
+                            "[myflow] ⚠ текста в поле не видно — проверь, что вставка "
+                            "прошла (поле может не поддерживать UI Automation)"
+                        )
                         self.overlay.show("⚠ проверь вставку", "#f5c542")
             except Exception as exc:  # watcher не должен убивать основной поток
                 print(f"[myflow] watcher: {exc}")
@@ -2822,8 +3275,10 @@ class MyFlowApp:
             self._polish_user_off = True
             self.settings.save()
             self._stop_llm_server()
-            print("[myflow] ⏏ LLM выгружена — VRAM освобождается "
-                  "(F11 — вернуть, полировка включится сама)")
+            print(
+                "[myflow] ⏏ LLM выгружена — VRAM освобождается "
+                "(F11 — вернуть, полировка включится сама)"
+            )
             self.overlay.show("⏏ LLM выгружена — VRAM свободна", "#f5c542")
         else:
             cfg.enabled = True
@@ -2836,6 +3291,7 @@ class MyFlowApp:
     def _game_watch_loop(self, interval: float = 5.0) -> None:
         """Полноэкранная игра -> выгрузить LLM (не отнимать VRAM)."""
         from myflow.winfocus import is_fullscreen_foreground
+
         while not self._stopping.wait(interval):
             try:
                 cfg = self.settings.get().polish
@@ -2847,17 +3303,24 @@ class MyFlowApp:
                     if self._fullscreen_since is not None:
                         self._fullscreen_since = None
                         if self._polish_user_off and cfg.enabled is False:
-                            print("[myflow] игра/полный экран закрыт — LLM поднимется "
-                                  "при следующей фразе (или F11)")
+                            print(
+                                "[myflow] игра/полный экран закрыт — LLM поднимется "
+                                "при следующей фразе (или F11)"
+                            )
                     continue
                 if self._fullscreen_since is None:
                     self._fullscreen_since = now
                     continue
                 hold = float(getattr(cfg, "game_detect_seconds", 20.0))
-                if (now - self._fullscreen_since >= hold and cfg.enabled
-                        and not self._polish_user_off):
-                    print(f"[myflow] ⏏ полный экран уже {hold:.0f} с — выгружаю LLM, "
-                          f"чтобы не занимать VRAM")
+                if (
+                    now - self._fullscreen_since >= hold
+                    and cfg.enabled
+                    and not self._polish_user_off
+                ):
+                    print(
+                        f"[myflow] ⏏ полный экран уже {hold:.0f} с — выгружаю LLM, "
+                        f"чтобы не занимать VRAM"
+                    )
                     self._toggle_llm_unload()
             except Exception as exc:  # noqa: BLE001 — сторож не должен падать
                 print(f"[myflow] сторож игр: {exc!r}")
@@ -2865,8 +3328,9 @@ class MyFlowApp:
     def _ensure_game_watch(self) -> None:
         if self._game_watch is not None and self._game_watch.is_alive():
             return
-        self._game_watch = threading.Thread(target=self._game_watch_loop,
-                                           daemon=True, name="game-watch")
+        self._game_watch = threading.Thread(
+            target=self._game_watch_loop, daemon=True, name="game-watch"
+        )
         self._game_watch.start()
 
     def _llm_confirms_correction(self, src: str, dst: str) -> bool:
@@ -2879,9 +3343,11 @@ class MyFlowApp:
         if not self.polish.cfg.enabled or not _health_check_llm(self.polish):
             return False
         try:
-            prompt = (f"Распознавание речи выдало слово «{src}», пользователь "
-                      f"исправил на «{dst}». Это ошибка распознавания (да) или "
-                      f"грамматическая правка/перефраз (нет)? Ответь одним словом: да или нет.")
+            prompt = (
+                f"Распознавание речи выдало слово «{src}», пользователь "
+                f"исправил на «{dst}». Это ошибка распознавания (да) или "
+                f"грамматическая правка/перефраз (нет)? Ответь одним словом: да или нет."
+            )
             answer = (self.polish.ask(prompt) or "").strip().lower()
             return answer.startswith("да") or answer.startswith("yes")
         except Exception:  # noqa: BLE001 — проверка не должна мешать обучению
@@ -2889,32 +3355,61 @@ class MyFlowApp:
 
     def _watch_with_ax(self, db: Database, history_id: int, polished_text: str) -> str:
         """Наблюдение через UI Automation. Возвращает причину окончания."""
-        watcher = AxWatcher(self.ax,
-                            window_seconds=self.settings.get().observation_seconds)
-        edited, reason = watcher.watch(polished_text, expected_pid=self._last_insert_pid)
+        watcher = AxWatcher(
+            self.ax, window_seconds=self.settings.get().observation_seconds
+        )
+        edited, reason = watcher.watch(
+            polished_text, expected_pid=self._last_insert_pid
+        )
         if edited and reason == AxWatcher.EDITED:
-            result = record_edit_and_learn(db, history_id, polished_text, edited,
-                                           observation_end_reason=reason,
-                                           validator=self._llm_confirms_correction)
-            print(f"[myflow] авто-обучение (AX): distance={result['edit_distance']}, "
-                  f"новые слова={result['new_words']}")
+            result = record_edit_and_learn(
+                db,
+                history_id,
+                polished_text,
+                edited,
+                observation_end_reason=reason,
+                validator=self._llm_confirms_correction,
+            )
+            print(
+                f"[myflow] авто-обучение (AX): distance={result['edit_distance']}, "
+                f"новые слова={result['new_words']}"
+            )
         return reason
 
-    def _watch_with_clipboard(self, db: Database, history_id: int, polished_text: str) -> str:
+    def _watch_with_clipboard(
+        self, db: Database, history_id: int, polished_text: str
+    ) -> str:
         """Старый путь: пользователь должен скопировать правку в буфер."""
         if not getattr(self.paster, "can_read", False):
             return "ax_unavailable"
         result = watch_pasted_edit(db, history_id, polished_text, self.paster.read)
         if result:
-            print(f"[myflow] авто-обучение (буфер): distance={result['edit_distance']}, "
-                  f"новые слова={result['new_words']}")
+            print(
+                f"[myflow] авто-обучение (буфер): distance={result['edit_distance']}, "
+                f"новые слова={result['new_words']}"
+            )
             return "edited"
         return "observation_window_elapsed"
 
 
 _KEY_NAMES = {
-    "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12",
-    "space", "enter", "tab", "esc", "backspace",
+    "f1",
+    "f2",
+    "f3",
+    "f4",
+    "f5",
+    "f6",
+    "f7",
+    "f8",
+    "f9",
+    "f10",
+    "f11",
+    "f12",
+    "space",
+    "enter",
+    "tab",
+    "esc",
+    "backspace",
 }
 
 
@@ -2928,7 +3423,7 @@ def _matches(key, hotkey_name: str) -> bool:
         return False
 
 
-_CTRL_HANDLERS: list = []   # держим ссылки: без них ctypes-колбэк соберёт GC
+_CTRL_HANDLERS: list = []  # держим ссылки: без них ctypes-колбэк соберёт GC
 
 
 def _install_console_handler(on_exit) -> None:
@@ -2967,6 +3462,7 @@ def _acquire_single_instance() -> bool:
     процесс гарантированно получает EADDRINUSE и выходит.
     """
     import socket
+
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         s.bind(("127.0.0.1", 8765))
@@ -3023,6 +3519,7 @@ def _tee_log(max_bytes: int = 2_000_000) -> None:
     """
     import io
     import sys
+
     log_path = Path(__file__).resolve().parent.parent / "data" / "main.log"
     _rotate_log(log_path, max_bytes)
 
@@ -3058,19 +3555,38 @@ def _tee_log(max_bytes: int = 2_000_000) -> None:
             return False
 
     sys.stdout = _Tee(sys.stdout)
-    print(f"\n=== сессия {time.strftime('%Y-%m-%d %H:%M:%S')} "
-          f"(python {sys.version.split()[0]}) ===")
+    print(
+        f"\n=== сессия {time.strftime('%Y-%m-%d %H:%M:%S')} "
+        f"(python {sys.version.split()[0]}) ==="
+    )
 
 
 def main() -> None:
     import sys
-    if sys.stdout is None:      # pythonw.exe: stdout отсутствует
-        sys.stdout = open(Path(__file__).resolve().parent.parent / "data" / "main.log",
-                          "a", encoding="utf-8", errors="replace")
+
+    if sys.stdout is None:  # pythonw.exe: stdout отсутствует
+        sys.stdout = open(
+            Path(__file__).resolve().parent.parent / "data" / "main.log",
+            "a",
+            encoding="utf-8",
+            errors="replace",
+        )
     sys.stdout.reconfigure(line_buffering=True)  # вывод виден сразу в консоли
     _tee_log()
     if not _acquire_single_instance():
         print("[myflow] другой экземпляр уже работает — выходим (single-instance).")
+        return
+    # Не хватает моделей — говорим и предлагаем докачать.
+    # ПОСЛЕ single-instance: скачивание пишет в общие файлы, и два процесса
+    # не должны качать одно и то же одновременно.
+    # ОГОВОРКА: на этом пути недостающий ПАКЕТ уже не поймать — модуль
+    # myflow.main импортирует numpy/pynput на уровне файла, и без них процесс
+    # падает на import раньше, чем мы дошли сюда. Пакеты ловит пульт
+    # (myflow.tui), где импорты ленивые, и доктор.
+    from myflow.bootstrap import preflight
+
+    if not preflight():
+        print("[myflow] не хватает компонентов — разберись по списку выше.")
         return
     # Единственный guard от двойного запуска — атомарный bind порта 8765
     # (см. _acquire_single_instance). WMI/eldest-wins вариант удалён: он

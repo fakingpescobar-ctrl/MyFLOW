@@ -125,34 +125,32 @@ py -3 -m venv .venv
 
 ### Шаг 3. Модели
 
-Двойной клик по **`fetch-models.bat`**. Скрипт докачает с прерыванием — можно запускать повторно, продолжение с места.
+**Их можно не качать вручную.** При первом запуске MyFLOW сам проверит, чего не хватает, покажет список и предложит скачать — после твоего «да» (см. [«Приложение чинит себя само»](#приложение-чинит-себя-само)).
 
-Что он делает:
+Если хочешь скачать заранее:
 
-- **whisper large-v3-turbo** (547 МБ) — скачивает сам через `curl` с докачкой в `models\`;
-- **GigaAM v3 e2e** (214 МБ) — подтягивается сам при первом распознавании, нужен интернет один раз.
+```powershell
+.venv\Scripts\python -X utf8 -m myflow.bootstrap --fix
+```
 
-Что нужно взять отдельно — эти файлы лежат вне git, и скрипт их не качает:
+Что при этом качается:
 
 | Файл | Размер | Куда | Откуда |
 |---|---|---|---|
+| whisper large-v3-turbo | 547 МБ | `models\` | [ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp) |
 | `Qwen3-4B-Instruct-2507-Q8_0.gguf` | 4.0 ГБ | `models\` | [unsloth/Qwen3-4B-Instruct-2507-GGUF](https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF) |
-| `model.onnx` — проверка голоса | 32 МБ | `models\voiceprint\` | [onnx-community/wespeaker-voxceleb-resnet34-LM](https://huggingface.co/onnx-community/wespeaker-voxceleb-resnet34-LM), файл `onnx/model.onnx` |
 | `silero_v6.onnx` — VAD | 2.3 МБ | `data\vad_models\` | [snakers4/silero-vad](https://github.com/snakers4/silero-vad), файл `src/silero_vad/data/silero_vad.onnx` |
+| `model.onnx` — проверка голоса | 25 МБ | `models\voiceprint\` | [onnx-community/wespeaker-voxceleb-resnet34-LM](https://huggingface.co/onnx-community/wespeaker-voxceleb-resnet34-LM), файл `onnx/model.onnx` |
 
 > [!IMPORTANT]
-> Без VAD-модели приложение **не запустится**: каталог `data/` в git не попадает, а скачивать эту модель некому — ни один скрипт этого не делает.
+> Без VAD-модели приложение **не запустится**: каталог `data/` в git не попадает. Поэтому она есть в списке на скачивание — пульт не даст стартовать, пока её нет.
 
-Всё это качается той же командой, что и скрипт — с докачкой:
+GigaAM v3 e2e (214 МБ) подтягивается сам при первом распознавании — нужен интернет один раз.
+
+**`fetch-models.bat`** по-прежнему качает whisper — можно запустить и его, докачка с прерыванием включена:
 
 ```powershell
-New-Item -ItemType Directory -Force data\vad_models | Out-Null
-
-curl.exe -L -C - --retry 5 -o models\Qwen3-4B-Instruct-2507-Q8_0.gguf `
-  "https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-Q8_0.gguf"
-
-curl.exe -L -C - --retry 5 -o data\vad_models\silero_v6.onnx `
-  "https://raw.githubusercontent.com/snakers4/silero-vad/master/src/silero_vad/data/silero_vad.onnx"
+fetch-models.bat
 ```
 
 > [!NOTE]
@@ -176,6 +174,30 @@ curl.exe -L -C - --retry 5 -o data\vad_models\silero_v6.onnx `
 ```
 
 Доктор перечислит всё, чего не хватает, и скажет, что делать. Если написано «ВСЁ ГОТОВО ✓» — можно запускать.
+
+Сказать доктору «докачай сам»:
+
+```powershell
+.venv\Scripts\python -X utf8 tools\doctor.py --fix
+```
+
+### Приложение чинит себя само
+
+Перед стартом пульт проверяет, всё ли на месте — и пакеты, и модели. Если чего-то не хватает, приложение показывает список и спрашивает:
+
+```
+  MyFLOW — кое-чего не хватает:
+  [ файл  ] data\vad_models\silero_v6.onnx — детектор речи — без него
+           приложение не стартует, 2 МБ (обязателен)
+
+  Поставить и скачать? [Y/n]
+```
+
+После «да» пакеты ставятся в то же окружение, из которого запущено MyFLOW, файлы качаются с докачкой и прогресс-баром. После «нет» приложение не молчит, а показывает точные команды, чтобы сделать руками.
+
+Без согласия пользователя **ничего не скачивается и не ставится** — это правило модуля, а не вежливость.
+
+Недостающее необязательное (например, проверка голоса) не мешает запуску: приложение спросит, но продолжит работать и без него.
 
 ### Шаг 6. Запуск
 

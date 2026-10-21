@@ -5,9 +5,11 @@
 
     python tools/doctor.py
 """
+
 from __future__ import annotations
 
-import importlib.util
+import argparse
+
 import os
 import sqlite3
 import sys
@@ -15,6 +17,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+from myflow.bootstrap import (
+    MODEL_FILES,
+    PACKAGES,
+    confirm,
+    missing_models,
+    missing_packages,
+    repair,
+)
 
 OK, WARN, BAD = "  ok  ", " warn ", " НЕТ  "
 problems: list[str] = []
@@ -34,44 +45,72 @@ def check_python() -> None:
         problems.append("обновить Python до 3.11+")
 
 
-def check_modules() -> None:
-    needed = {"numpy": "счёт и аудио", "sounddevice": "микрофон",
-              "onnxruntime": "распознавание", "requests": "серверы моделей",
-              "soundfile": "аудио фраз"}
-    missing = [name for name in needed
-               if importlib.util.find_spec(name) is None]
-    if missing:
-        line(BAD, f"нет модулей: {', '.join(missing)}")
-        problems.append("установить зависимости: pip install -r requirements.txt")
+def check_modules() -> tuple[list[str], list[str]]:
+    """Пакеты. -> (что мешает запуску, что можно починить).
+
+    Обязательные пакеты — стоп. Желательные (GigaAM, проверка голоса, OGG) —
+    предупреждение: без них приложение работает, но часть функций молча
+    отключается. Их тоже предлагаем поставить.
+    """
+    blocking: list[str] = []
+    fixable: list[str] = []
+    missing = missing_packages()
+    required = [p for p in missing if p.required]
+    optional = [p for p in missing if not p.required]
+    if required:
+        line(
+            BAD, f"нет обязательных модулей: {', '.join(p.pip_name for p in required)}"
+        )
+        blocking.append("поставить пакеты: python -m myflow.bootstrap --fix")
     else:
-        line(OK, f"зависимости на месте ({len(needed)})")
+        installed_required = sum(1 for p in PACKAGES if p.required and p.installed)
+        line(OK, f"обязательные зависимости на месте ({installed_required})")
+    for pkg in optional:
+        line(WARN, f"нет модуля {pkg.pip_name} — {pkg.why} (желательно)")
+        fixable.append(f"поставить пакет {pkg.pip_name} — {pkg.why}")
+    return blocking, fixable
 
 
-def check_models() -> None:
-    models = ROOT / "models"
-    if not models.exists():
-        line(BAD, "нет папки models/")
-        problems.append("скачать модели (см. README)")
-        return
+def check_gigaam() -> None:
+    """GigaAM — основной движок распознавания.
 
-    files = [p for p in models.rglob("*") if p.is_file() and p.stat().st_size > 1024]
-    gguf = [p for p in files if p.suffix == ".gguf"]
-    whisper = [p for p in files if p.name.startswith("ggml-") and p.suffix == ".bin"]
-    giga = [p for p in files if "giga" in p.name.lower() or "giga" in str(p.parent).lower()]
+    Он НЕ в списке скачиваемого: onnx-asr тянет его сам при первом
+    распознавании (нужен интернет один раз). Поэтому это предупреждение,
+    а не проблема — доктор не должен блокировать запуск из-за него.
+    """
+    cache = ROOT / "models" / "hf-cache" / "hub"
+    found = []
+    if cache.exists():
+        found = [p for p in cache.rglob("*.onnx") if p.stat().st_size > 50 * 2**20]
+    if found:
+        main = max(found, key=lambda p: p.stat().st_size)
+        line(OK, f"GigaAM v3 e2e: {main.name} ({main.stat().st_size / 2**20:.0f} МБ)")
+    else:
+        line(WARN, "GigaAM v3 e2e: нет — скачается сам при первом распознавании")
 
-    # Рабочий постпроцессор — тот, что выбирает приложение (myflow-postproc-*).
-    # Самый большой .gguf показывать нельзя: рядом лежат промежуточные сборки.
-    shipped = [p for p in gguf if p.name.startswith("myflow-postproc")]
-    for found, what in ((shipped or gguf, "постпроцессор (.gguf)"),
-                        (whisper, "whisper (ggml-*.bin)"),
-                        (giga, "GigaAM (onnx)")):
-        if found:
-            main = sorted(found, key=lambda p: -p.stat().st_size)[0]
-            extra = f" (+ ещё {len(found) - 1})" if len(found) > 1 else ""
-            line(OK, f"{what}: {main.name} ({main.stat().st_size / 2**20:.0f} МБ){extra}")
-        else:
-            line(WARN, f"{what}: не найдено")
-            problems.append(f"скачать: {what}")
+
+def check_models() -> tuple[list[str], list[str]]:
+    """Модели. -> (что мешает запуску, что можно скачать).
+
+    Обязательная модель (VAD) попадает и туда, и туда: без неё приложение
+    не стартит — но и скачать её можно.
+    """
+    blocking: list[str] = []
+    fixable: list[str] = []
+    for model in MODEL_FILES:
+        if model.present():
+            line(OK, f"{model.label}: {model.name_of()}")
+            continue
+        mark = "обязательна" if model.required else "желательна"
+        line(
+            BAD if model.required else WARN,
+            f"{model.label}: не найдено ({mark}) — {model.why}",
+        )
+        item = f"скачать: {model.label} ({model.why})"
+        if model.required:
+            blocking.append(item)
+        fixable.append(item)
+    return blocking, fixable
 
 
 def check_venv() -> None:
@@ -92,7 +131,8 @@ def check_history() -> None:
     try:
         count = con.execute("select count(*) from history").fetchone()[0]
         with_text = con.execute(
-            "select count(*) from history where coalesce(asr_text,'') <> ''").fetchone()[0]
+            "select count(*) from history where coalesce(asr_text,'') <> ''"
+        ).fetchone()[0]
     finally:
         con.close()
     line(OK, f"история: {count} записей ({with_text} с текстом)")
@@ -101,17 +141,21 @@ def check_history() -> None:
 def check_servers() -> None:
     """Порты моделей: занят — уже поднят, свободен — поднимет приложение."""
     import socket
+
     for port, what in ((8081, "whisper"), (8082, "Oracle 4B"), (8083, "постпроцессор")):
         with socket.socket() as sock:
             sock.settimeout(0.2)
             busy = sock.connect_ex(("127.0.0.1", port)) == 0
-        line(WARN if busy else OK,
-             f"порт {port} ({what}): {'занят — сервер работает' if busy else 'свободен'}")
+        line(
+            WARN if busy else OK,
+            f"порт {port} ({what}): {'занят — сервер работает' if busy else 'свободен'}",
+        )
 
 
 def check_dsh_bridge() -> None:
     try:
         from myflow.dsh_bridge import bridge_health, dsh_app_running, find_dsh_app
+
         health = bridge_health()
         if health["ok"]:
             line(OK, "мост в DeepSeek Harness: готов")
@@ -121,28 +165,57 @@ def check_dsh_bridge() -> None:
             line(WARN, "мост в DSH: копия плагина повреждена (лечится в панели)")
         else:
             app = find_dsh_app()
-            line(WARN, f"мост в DSH не установлен"
-                       f"{' (DSH найден)' if app else ' (DSH не найден)'}"
-                       f" — ставится из панели MyFLOW")
+            line(
+                WARN,
+                f"мост в DSH не установлен"
+                f"{' (DSH найден)' if app else ' (DSH не найден)'}"
+                f" — ставится из панели MyFLOW",
+            )
     except Exception as exc:  # noqa: BLE001
         line(WARN, f"мост в DSH: не удалось проверить ({exc!r})")
 
 
 def main() -> int:
+    ap = argparse.ArgumentParser(description="MyFLOW: проверка готовности")
+    ap.add_argument(
+        "--fix", action="store_true", help="скачать недостающее (с вопросом)"
+    )
+    args = ap.parse_args()
+
     print("  MyFLOW — проверка готовности\n")
     check_venv()
     check_python()
-    check_modules()
-    check_models()
+    blocking, fixable = check_modules()
+    blocking_models, fixable_models = check_models()
+    check_gigaam()
+    problems.extend(blocking + blocking_models)
+    fixable = fixable + fixable_models
     check_history()
     check_servers()
     check_dsh_bridge()
 
     print()
+    if args.fix and (fixable or blocking):
+        if confirm("  Поставить и скачать? [Y/n] "):
+            repair()
+            # Убираем ТОЛЬКО те проблемы, которые чинил --fix: чужие
+            # (нет окружения, старый Python, не установленный мост в DSH)
+            # остаются в списке — иначе доктор сказал бы «ВСЁ ГОТОВО» при
+            # реальных проблемах.
+            fixed = set(blocking + blocking_models)
+            problems[:] = [p for p in problems if p not in fixed]
+            print()
+            print("  Перепроверяю:")
+            blocking, fixable = check_modules()
+            blocking_models, fixable_models = check_models()
+            problems.extend(blocking + blocking_models)
+            print()
+
     if problems:
         print(f"  ЧТО СДЕЛАТЬ ({len(problems)}):")
         for item in dict.fromkeys(problems):
             print(f"    - {item}")
+        print("    (одной командой: python -m myflow.bootstrap --fix)")
         return 1
     print("  ВСЁ ГОТОВО ✓ запускай start-myflow.bat")
     return 0
