@@ -750,7 +750,7 @@ Whisper остаётся вторым мнением по требованию.
   `opencode.exe`, `AttachConsole` и пишем клавиши через `WriteConsoleInputW` прямо
   в буфер ввода консоли. Фокус не нужен, окно может быть свёрнуто.
 * **У DSH есть профили** `web`, `tui`, `headless`, `desktop`, `shell`
-  (`$DSH_HOME=C:\Users\<user>\.dsh`, есть и отдельный `.dsh-tui`). CLI умеет
+  (`$DSH_HOME=%USERPROFILE%\.dsh`, есть и отдельный `.dsh-tui`). CLI умеет
   `dsh --profile headless "задача"` (ответить и выйти) и `--resume <session>`.
 * **Локальный API веб-профиля закрыт**: `/`, `/api`, `/api/health`, `/api/sessions`,
   `/api/session`, `/api/state`, `/api/events`, `/api/status` отдают **401** — и без
