@@ -1,0 +1,20 @@
+# MyFLOW — зависимости для дообучения постпроцессора (Python 3.13, Windows).
+#
+# Ставится в ОТДЕЛЬНОЕ окружение .venv-train (см. install-train-env.bat):
+# там CUDA-torch (~2.5 ГБ), в боевое .venv его тянуть незачем.
+#
+# Версии сняты с рабочего окружения, на котором постпроцессор обучен.
+#
+# ВАЖНО про torch: колесо с PyPI для Windows — CPU-only (194 МБ).
+# CUDA-сборка (2.5 ГБ) лежит на индексе PyTorch, поэтому install-train-env.bat
+# ставит с --extra-index-url https://download.pytorch.org/whl/cu124.
+torch==2.6.0+cu124
+transformers==5.19.0
+peft==0.21.2
+accelerate==1.15.0
+datasets==5.1.0
+gguf==0.19.0
+pyarrow==26.0.0
+# sympy зажат: torch 2.6.0 требует ровно 1.13.1 — иначе ломается импорт.
+sympy==1.13.1
+numpy==2.5.4

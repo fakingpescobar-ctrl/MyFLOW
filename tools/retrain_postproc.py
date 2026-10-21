@@ -93,8 +93,25 @@ def main() -> int:
     args = ap.parse_args()
 
     if not TRAIN_PY.exists():
-        log("нет учебного окружения .venv-train — см. tools/train_postproc.md")
+        log("нет учебного окружения .venv-train — запусти install-train-env.bat")
         return 1
+
+    base = ROOT / "data" / "train" / "Qwen3-0.6B"
+    if not (base / "model.safetensors").exists():
+        log("нет базы Qwen3-0.6B для обучения — скачай её:")
+        log("  python tools/fetch_hf_model.py Qwen/Qwen3-0.6B --dir data\\train\\Qwen3-0.6B")
+        return 1
+
+    # Корпус для синтетики берём сами, если он уже скачан: без него датасет
+    # состоит только из твоих диктовок, а для первого обучения их мало.
+    corpus = args.corpus
+    if corpus is None:
+        default_corpus = ROOT / "data" / "train" / "corpus" / "conversational.txt"
+        corpus = default_corpus if default_corpus.exists() else None
+    if corpus is None:
+        log("корпуса для синтетики нет (покажем на одних твоих диктовках)")
+    else:
+        log(f"корпус для синтетики: {corpus.name}")
 
     dictations, max_id = count_dictations()
     log(f"старт дообучения: диктовок с текстом {dictations}, max id {max_id}")
@@ -105,7 +122,7 @@ def main() -> int:
                 "--out", str(WORK), "--variants", str(args.variants),
                 "--identity-share", str(args.identity_share),
                 "--min-words", str(args.min_words),
-                "--corpus", str(args.corpus) if args.corpus else "",
+                "--corpus", str(corpus) if corpus else "",
                 "--corpus-share", str(args.corpus_share),
                 "--holdout-last", str(args.holdout)],
                "собираю датасет из текущей истории"):

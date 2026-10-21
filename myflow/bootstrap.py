@@ -87,6 +87,28 @@ class ModelFile:
         return self.destination().name
 
 
+@dataclass(frozen=True)
+class Bundle:
+    """Набор файлов, который нужен целиком: база для обучения, корпус.
+
+    Отличие от ModelFile: качается не один файл, а несколько (модель с
+    токенизатором, корпус строк). Загрузка идёт через готовые инструменты
+    проекта (tools/fetch_hf_model.py, tools/fetch_corpus.py).
+    """
+
+    label: str
+    why: str
+    hint: str
+    destination: Callable[[], Path]
+    present: Callable[[], bool]
+    fetch: Callable[[Callable[[str], None]], bool]
+    required: bool = False
+
+    def name_of(self) -> str:
+        """Имя того, что на месте (для отчётов)."""
+        return self.destination().name
+
+
 def _silero_path() -> Path:
     env = os.environ.get("MYFLOW_SILERO_PATH")
     return Path(env) if env else ROOT / "data" / "vad_models" / "silero_v6.onnx"
@@ -222,6 +244,71 @@ PACKAGES: tuple[Package, ...] = (
 )
 
 
+def _bundle_base() -> Bundle:
+    """База Qwen3-0.6B — на ней обучается личный постпроцессор.
+
+    Это общий вес Qwen (Apache-2.0), а не личная модель: каждый обучает
+    СВОЮ LoRA поверх него, на своих правках.
+    """
+    dest = ROOT / "data" / "train" / "Qwen3-0.6B"
+    files = ("config.json", "model.safetensors", "tokenizer.json")
+
+    def present() -> bool:
+        return all((dest / name).exists() for name in files)
+
+    def fetch(log: Callable[[str], None] = print) -> bool:
+        log(f"  ↓ База Qwen3-0.6B (~1.5 ГБ) → {dest}")
+        result = subprocess.run(
+            [sys.executable, "-X", "utf8",
+             str(ROOT / "tools" / "fetch_hf_model.py"),
+             "Qwen/Qwen3-0.6B", "--dir", str(dest)],
+            cwd=str(ROOT),
+        )
+        return result.returncode == 0 and present()
+
+    return Bundle(
+        "База Qwen3-0.6B (обучение)",
+        "на ней обучается твой личный постпроцессор",
+        r"python tools/fetch_hf_model.py Qwen/Qwen3-0.6B --dir data\train\Qwen3-0.6B",
+        lambda: dest,
+        present,
+        fetch,
+    )
+
+
+def _bundle_corpus() -> Bundle:
+    """Разговорный корпус: чистые тексты, на которых модель учится ошибаться.
+
+    Это общий публичный корпус (opus-100, субтитры) — в отличие от диктовок
+    и эталонов Wispr, он не персональный, поэтому годится любому.
+    """
+    dest = ROOT / "data" / "train" / "corpus" / "conversational.txt"
+
+    def present() -> bool:
+        return dest.exists() and dest.stat().st_size > 10_000
+
+    def fetch(log: Callable[[str], None] = print) -> bool:
+        log(f"  ↓ Корпус для синтетики → {dest}")
+        result = subprocess.run(
+            [sys.executable, "-X", "utf8",
+             str(ROOT / "tools" / "fetch_corpus.py"), "--rows", "3000"],
+            cwd=str(ROOT),
+        )
+        return result.returncode == 0 and present()
+
+    return Bundle(
+        "Корпус для синтетики",
+        "чистые русские тексты: модель учится на них чинить свои ошибки",
+        "python tools/fetch_corpus.py --rows 3000",
+        lambda: dest,
+        present,
+        fetch,
+    )
+
+
+BUNDLES: tuple[Bundle, ...] = (_bundle_base(), _bundle_corpus())
+
+
 # --------------------------------------------------------------------- проверка
 
 
@@ -235,14 +322,38 @@ def missing_models() -> list[ModelFile]:
     return [m for m in MODEL_FILES if not m.present()]
 
 
+def train_env_ready() -> bool:
+    """Есть ли учебное окружение — значит пользователь готовится обучать.
+
+    По этому признаку решаем, предлагать ли базу и корпус: без .venv-train
+    они не нужны, и спрашивать о них при каждом запуске — мусор.
+    """
+    return (ROOT / ".venv-train" / "Scripts" / "python.exe").exists()
+
+
+def missing_bundles(only_if_train_env: bool = True) -> list[Bundle]:
+    """Наборы файлов, которых нет (база для обучения, корпус).
+
+    `only_if_train_env` — по умолчанию предлагаем их только тем, кто
+    поставил учебное окружение: остальным они не нужны.
+    """
+    if only_if_train_env and not train_env_ready():
+        return []
+    return [b for b in BUNDLES if not b.present()]
+
+
 def blocking_gaps(
-    packages: list[Package] | None = None, models: list[ModelFile] | None = None
+    packages: list[Package] | None = None,
+    models: list[ModelFile] | None = None,
+    bundles: list[Bundle] | None = None,
 ) -> list[str]:
     """Что именно мешает запуску. Пустой список — запускать можно."""
     packages = missing_packages() if packages is None else packages
     models = missing_models() if models is None else models
+    bundles = missing_bundles() if bundles is None else bundles
     gaps = [f"пакет {p.pip_name} ({p.why})" for p in packages if p.required]
     gaps += [f"файл {m.destination()} ({m.why})" for m in models if m.required]
+    gaps += [f"набор {b.destination()} ({b.why})" for b in bundles if b.required]
     return gaps
 
 
@@ -360,11 +471,14 @@ def confirm(question: str) -> bool:
 
 
 def format_gaps(
-    packages: list[Package] | None = None, models: list[ModelFile] | None = None
+    packages: list[Package] | None = None,
+    models: list[ModelFile] | None = None,
+    bundles: list[Bundle] | None = None,
 ) -> list[str]:
     """Строки отчёта о том, чего не хватает."""
     packages = missing_packages() if packages is None else packages
     models = missing_models() if models is None else models
+    bundles = missing_bundles() if bundles is None else bundles
     lines: list[str] = []
     for pkg in packages:
         mark = "обязателен" if pkg.required else "желателен"
@@ -375,22 +489,33 @@ def format_gaps(
             f"  [ файл  ] {model.destination()} — {model.why}, "
             f"{model.size_mb:,.0f} МБ ({mark})"
         )
+    for bundle in bundles:
+        mark = "обязателен" if bundle.required else "желателен"
+        lines.append(
+            f"  [ набор ] {bundle.destination()} — {bundle.why} ({mark})"
+        )
     return lines
 
 
 def manual_instructions(
-    packages: list[Package] | None = None, models: list[ModelFile] | None = None
+    packages: list[Package] | None = None,
+    models: list[ModelFile] | None = None,
+    bundles: list[Bundle] | None = None,
 ) -> list[str]:
     """Что делать руками, если пользователь отказался от автоматической загрузки."""
     packages = missing_packages() if packages is None else packages
     models = missing_models() if models is None else models
+    bundles = missing_bundles() if bundles is None else bundles
     lines: list[str] = []
     if packages:
         names = " ".join(p.pip_name for p in packages)
-        lines.append(f"  поставь пакеты:  .venv\\Scripts\\pip install {names}")
+        lines.append(rf"  поставь пакеты:  .venv\Scripts\pip install {names}")
     for model in models:
         lines.append(f"  скачай вручную:  {model.url}")
         lines.append(f"                   → {model.destination()}")
+    for bundle in bundles:
+        lines.append(f"  скачай вручную:  {bundle.hint}")
+        lines.append(f"                   → {bundle.destination()}")
     return lines
 
 
@@ -398,15 +523,19 @@ def repair(
     log: Callable[[str], None] = print,
     packages: list[Package] | None = None,
     models: list[ModelFile] | None = None,
+    bundles: list[Bundle] | None = None,
 ) -> bool:
     """Поставить пакеты и скачать файлы (согласие уже получено)."""
     packages = missing_packages() if packages is None else packages
     models = missing_models() if models is None else models
+    bundles = missing_bundles() if bundles is None else bundles
     ok = True
     if packages:
         ok = install_packages(packages, log) and ok
     for model in models:
         ok = download_model(model, log) and ok
+    for bundle in bundles:
+        ok = bundle.fetch(log) and ok
     return ok
 
 
@@ -414,6 +543,7 @@ def preflight(
     log: Callable[[str], None] = print,
     packages: list[Package] | None = None,
     models: list[ModelFile] | None = None,
+    bundles: list[Bundle] | None = None,
 ) -> bool:
     """Проверка перед стартом. False — запускаться нельзя.
 
@@ -422,22 +552,23 @@ def preflight(
     """
     packages = missing_packages() if packages is None else packages
     models = missing_models() if models is None else models
-    if not packages and not models:
+    bundles = missing_bundles() if bundles is None else bundles
+    if not packages and not models and not bundles:
         return True
 
     log("")
     log("  MyFLOW — кое-чего не хватает:")
-    for line in format_gaps(packages, models):
+    for line in format_gaps(packages, models, bundles):
         log(line)
     log("")
 
     if not confirm("  Поставить и скачать? [Y/n] "):
         log("")
         log("  Скачай руками:")
-        for line in manual_instructions(packages, models):
+        for line in manual_instructions(packages, models, bundles):
             log(line)
         log("")
-        gaps = blocking_gaps(packages, models)
+        gaps = blocking_gaps(packages, models, bundles)
         if gaps:
             log("  Без этого не запустится:")
             for gap in gaps:
@@ -445,7 +576,7 @@ def preflight(
         return not gaps
 
     log("")
-    repair(log, packages, models)
+    repair(log, packages, models, bundles)
     log("")
     gaps = blocking_gaps()
     if gaps:
@@ -463,11 +594,12 @@ def main(argv: list[str] | None = None) -> int:
 
     packages = missing_packages()
     models = missing_models()
-    if not packages and not models:
+    bundles = missing_bundles()
+    if not packages and not models and not bundles:
         print("  Всё на месте — ничего скачивать не нужно.")
         return 0
 
-    for line in format_gaps(packages, models):
+    for line in format_gaps(packages, models, bundles):
         print(line)
     print("")
     if not fix:
@@ -476,10 +608,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if not confirm("  Поставить и скачать? [Y/n] "):
         print("")
-        for line in manual_instructions(packages, models):
+        for line in manual_instructions(packages, models, bundles):
             print(line)
         return 1
-    repair()
+    repair(packages=packages, models=models, bundles=bundles)
     return 0 if not blocking_gaps() else 1
 
 

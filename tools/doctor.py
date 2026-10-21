@@ -19,12 +19,14 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from myflow.bootstrap import (
+    BUNDLES,
     MODEL_FILES,
     PACKAGES,
     confirm,
     missing_models,
     missing_packages,
     repair,
+    train_env_ready,
 )
 
 OK, WARN, BAD = "  ok  ", " warn ", " НЕТ  "
@@ -68,6 +70,29 @@ def check_modules() -> tuple[list[str], list[str]]:
     for pkg in optional:
         line(WARN, f"нет модуля {pkg.pip_name} — {pkg.why} (желательно)")
         fixable.append(f"поставить пакет {pkg.pip_name} — {pkg.why}")
+    return blocking, fixable
+
+
+def check_training_assets() -> tuple[list[str], list[str]]:
+    """Ассеты для обучения постпроцессора: база Qwen3-0.6B и корпус.
+
+    Они нужны только тому, кто собирается обучать (у кого есть .venv-train).
+    Без учебного окружения мы их не предлагаем качать — иначе доктор свалил
+    бы каждому по 1.5 ГБ, о которых он и не думал.
+    """
+    blocking: list[str] = []
+    fixable: list[str] = []
+    train_ready = train_env_ready()
+    for bundle in BUNDLES:
+        if bundle.present():
+            line(OK, f"{bundle.label}: на месте")
+            continue
+        if train_ready:
+            line(WARN, f"{bundle.label}: нет — {bundle.why}")
+            fixable.append(f"скачать: {bundle.label} ({bundle.why})")
+        else:
+            line(WARN, f"{bundle.label}: нет — нужно только для обучения "
+                       "(install-train-env.bat), само не скачается")
     return blocking, fixable
 
 
@@ -188,8 +213,9 @@ def main() -> int:
     blocking, fixable = check_modules()
     blocking_models, fixable_models = check_models()
     check_gigaam()
+    blocking_train, fixable_train = check_training_assets()
     problems.extend(blocking + blocking_models)
-    fixable = fixable + fixable_models
+    fixable = fixable + fixable_models + fixable_train
     check_history()
     check_servers()
     check_dsh_bridge()

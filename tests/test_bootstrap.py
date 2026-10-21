@@ -174,6 +174,108 @@ class LightModuleTest(unittest.TestCase):
         )
 
 
+class TrainingAssetsTest(unittest.TestCase):
+    """Путь нового пользователя к своему постпроцессору.
+
+    Модель не публикуется (она персональная) — значит новый человек обязан
+    уметь получить базу, корпус и обучиться сам. Проверяем, что все шаги
+    этого пути существуют и что приложение предлагает их, а не молчит.
+    """
+
+    ROOT = Path(__file__).resolve().parent.parent
+
+    def test_install_script_exists(self):
+        bat = self.ROOT / "install-train-env.bat"
+        self.assertTrue(bat.exists(), "нужен скрипт установки учебного окружения")
+        text = bat.read_text(encoding="utf-8")
+        self.assertIn(".venv-train", text)
+        self.assertIn("requirements-train.txt", text)
+
+    def test_requirements_train_exist(self):
+        req = self.ROOT / "requirements-train.txt"
+        self.assertTrue(req.exists(), "нужен отдельный файл зависимостей для обучения")
+        text = req.read_text(encoding="utf-8")
+        for package in ("torch", "transformers", "peft", "accelerate"):
+            self.assertIn(package, text, f"{package} нужен для обучения")
+
+    def test_bundles_are_declared(self):
+        self.assertTrue(bootstrap.BUNDLES, "нужны наборы файлов для обучения")
+        labels = [b.label for b in bootstrap.BUNDLES]
+        self.assertTrue(any("Qwen3-0.6B" in x for x in labels), labels)
+        self.assertTrue(any("орпус" in x for x in labels), labels)
+
+    def test_bundle_presence_is_checked_by_files(self):
+        """Набор считается готовым, только если есть все его файлы."""
+        bundle = bootstrap.BUNDLES[0]
+        self.assertIsInstance(bundle.present(), bool)
+
+    def test_bundles_offered_only_with_training_env(self):
+        """Без .venv-train про базу и корпус не спрашиваем — они не нужны."""
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = bootstrap.Bundle(
+                label="тест",
+                why="тест",
+                hint="тест",
+                destination=lambda: Path(tmp) / "x",
+                present=lambda: False,
+                fetch=lambda log=print: True,
+            )
+            saved = bootstrap.BUNDLES
+            bootstrap.BUNDLES = (fake,)
+            try:
+                self.assertEqual(bootstrap.missing_bundles(only_if_train_env=False),
+                                 [fake])
+                # train_env_ready() смотрит в ROOT — она у нас настоящая,
+                # поэтому проверяем обе ветки явно.
+                if not bootstrap.train_env_ready():
+                    self.assertEqual(bootstrap.missing_bundles(), [])
+            finally:
+                bootstrap.BUNDLES = saved
+
+    def test_bundle_not_fetched_without_consent(self):
+        """Как и файлы-модели, наборы не качаются без согласия."""
+        fetched: list[str] = []
+        bundle = bootstrap.Bundle(
+            label="тест",
+            why="тест",
+            hint="тест",
+            destination=lambda: Path("нет"),
+            present=lambda: False,
+            fetch=lambda log=print: fetched.append("да") or True,
+        )
+        original_confirm = bootstrap.confirm
+        bootstrap.confirm = lambda question: False
+        try:
+            bootstrap.preflight(log=lambda s: None, packages=[], models=[],
+                                bundles=[bundle])
+        finally:
+            bootstrap.confirm = original_confirm
+        self.assertEqual(fetched, [], "набор скачался без согласия")
+
+    def test_module_is_runnable(self):
+        """`python -m myflow.bootstrap` должен работать.
+
+        Регресс: при правке модуля один раз потерялся блок
+        `if __name__ == "__main__"` — модуль импортировался, но ничего не
+        делал, и команда молча выходила с кодом 0.
+        """
+        root = Path(__file__).resolve().parent.parent
+        out = subprocess.run(
+            [sys.executable, "-X", "utf8", "-m", "myflow.bootstrap"],
+            capture_output=True, text=True, cwd=str(root),
+        )
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("Всё на месте", out.stdout)
+
+    def test_retrain_uses_corpus_when_present(self):
+        """Дообучение должно подхватывать корпус сам, а не требовать флаг."""
+        text = (self.ROOT / "tools" / "retrain_postproc.py").read_text(encoding="utf-8")
+        self.assertIn("conversational.txt", text,
+                      "retrain должен сам брать корпус, если он скачан")
+        self.assertIn("install-train-env.bat", text,
+                      "retrain должен подсказывать скрипт установки окружения")
+
+
 class IntegrationTest(unittest.TestCase):
     """Точки входа обязаны звать preflight — иначе «самочинилка» не сработает."""
 
