@@ -60,7 +60,7 @@ if not exist "%WHEELS%" mkdir "%WHEELS%"
 
 rem torch s CUDA berem s indeksa PyTorch - s PyPI lezhit CPU-koleso.
 if not exist "%WHEELS%\torch-2.6.0+cu124-cp313-cp313-win_amd64.whl" (
-  echo   kachayu torch 2.6.0+cu124 (2.5 GB, mozhno dokat s momenta)...
+  echo   kachayu torch 2.6.0+cu124 - 2.5 GB, dokat s momenta...
   curl.exe -L -C - --retry 40 --retry-delay 5 --speed-limit 50000 --speed-time 60 ^
     -o "%WHEELS%\torch-2.6.0+cu124-cp313-cp313-win_amd64.whl" ^
     "%TORCH_INDEX%/torch-2.6.0%%2Bcu124-cp313-cp313-win_amd64.whl"
