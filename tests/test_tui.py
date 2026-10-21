@@ -263,12 +263,28 @@ class SettingsStateTest(unittest.TestCase):
 
 
 # ---------------------------------------------------------------- супервизор
+def _free_port() -> int:
+    """Свободный порт для теста.
+
+    Раньше был захардкожен 18081 — и тест падал, если порт занимал кто-то
+    чужой (например, оставшийся сервер из другой сессии). Тест не должен
+    зависеть от того, что конкретный порт свободен.
+    """
+    import socket
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
 def _spec(tmp: Path, key: str = "asr") -> T.ServerSpec:
     exe = tmp / "server.exe"
     model = tmp / "model.bin"
     exe.write_bytes(b"x")
     model.write_bytes(b"x")
-    return T.ServerSpec(key=key, title="Тест", port=18081, url="http://127.0.0.1:18081",
+    port = _free_port()
+    return T.ServerSpec(key=key, title="Тест", port=port,
+                        url=f"http://127.0.0.1:{port}",
                         health_path="/health", exe=exe, args=[], model=model,
                         log=tmp / "s.log")
 
