@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,6 +8,17 @@ version = "0.2.0"
 description = "Локальный голосовой диктант (Whisper + LLM) для Windows"
 readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["dictation", "speech-to-text", "whisper", "llm", "windows"]
+classifiers = [
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: Microsoft :: Windows",
+    "Environment :: Console",
+    "Topic :: Multimedia :: Sound/Audio :: Speech",
+    "Topic :: Text Processing :: Linguistic",
+    "Natural Language :: Russian",
+]
 dependencies = [
     "numpy>=2.0",
     "sounddevice>=0.5",

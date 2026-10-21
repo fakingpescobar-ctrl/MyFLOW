@@ -67,11 +67,29 @@ class SelfContainedProjectTest(unittest.TestCase):
         self.assertEqual(missing, [], f"нет файлов внутри проекта: {missing}")
 
     def test_models_and_bin_are_gitignored(self):
-        """Модели весят гигабайты — в git они попадать не должны."""
-        out = subprocess.run(["git", "check-ignore", "models", "bin"],
-                             cwd=str(ROOT), capture_output=True, text=True)
-        self.assertIn("models", out.stdout)
-        self.assertIn("bin", out.stdout)
+        """Модели весят гигабайты — в git они попадать не должны.
+
+        И сборка пакета (build/, dist/) — тоже: setuptools кладёт туда копию
+        исходников, и она стала бы вторым источником истины.
+
+        Главная проверка — через ls-files: нам важно, что в индексе под этими
+        путями ПУСТО. А check-ignore сверяем отдельно: он смотрит на
+        правила .gitignore, и зависит от того, есть ли каталог на диске.
+        """
+        tracked = subprocess.run(
+            ["git", "ls-files", "models", "bin", "build", "dist"],
+            cwd=str(ROOT), capture_output=True, text=True,
+        )
+        self.assertEqual(
+            tracked.stdout.strip(), "",
+            f"под этими путями не должно быть отслеживаемых файлов: {tracked.stdout}",
+        )
+        ignored = subprocess.run(
+            ["git", "check-ignore", "models/", "bin/", "build/", "dist/"],
+            cwd=str(ROOT), capture_output=True, text=True,
+        )
+        for name in ("models/", "bin/", "build/", "dist/"):
+            self.assertIn(name, ignored.stdout)
 
     def test_no_absolute_drive_paths_in_code(self):
         """Пути — только через myflow.config; хардкод диска ломает переносимость."""

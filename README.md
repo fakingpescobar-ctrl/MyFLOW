@@ -2,6 +2,10 @@
 
 # MyFLOW
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.13-blue.svg)](https://www.python.org/)
+[![Windows](https://img.shields.io/badge/platform-Windows-0078D6.svg?logo=windows&logoColor=white)](https://learn.microsoft.com/windows/)
+
 **Локальный голосовой диктант для Windows.** Говоришь — текст появляется там, где стоит курсор. Распознавание и полировка идут на твоей машине: голос никуда не уходит, телеметрии нет.
 
 > [!TIP]
@@ -12,7 +16,7 @@
 | Задержка «речь → вставка» | **719–750 мс** |
 | WER p50 (авто-выбор движка) | **0.071** |
 | Точных совпадений с эталоном | **44.7 %** |
-| Тестов в репозитории | **789** |
+| Тестов в репозитории | **795** |
 
 ---
 
@@ -427,7 +431,7 @@ myflow/
   bootstrap.py      # самопочинка: чего не хватает и предложение это скачать
 scripts/            # start-asr / start-llm / start-all / stop-servers
 tools/              # бенчи, eval, дообучение, доктор, ручные инструменты
-tests/              # 789 тестов
+tests/              # 795 тестов
 data/               # рантайм: settings.json, myflow.sqlite, логи
 models/             # модели (в git не попадают)
 bin/                # llama-server / whisper-server (в git не попадают)
@@ -455,6 +459,7 @@ bin/                # llama-server / whisper-server (в git не попадаю�
 
 ## Статус проекта
 
-- Лицензия проекта пока не выбрана — компоненты перечислены в [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+- **Лицензия — [MIT](LICENSE).** Можно брать, менять, использовать где угодно; при копировании текста нужно сохранить уведомление об авторе. Компоненты сторонних разработчиков распространяются на своих условиях — всё перечислено в [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+- Личный постпроцессор (обученная LoRA) под MIT **не** распространяется: он твой, и каждому пользователю предлагается обучить свой на своих правках.
 - Скриншоты в этом README — реальные кадры TUI, снятые в демо-режиме (`--demo`), не мокапы.
 - В репозитории лежат только код и документация: модели, бинарники, база и логи исключены из git.
